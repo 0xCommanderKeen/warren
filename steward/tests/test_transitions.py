@@ -24,6 +24,7 @@ from steward import notify as nf
 from steward import prompt as p
 from steward import transitions as tr
 from steward.approvals import NeedsHuman
+from steward.approved_edits import GRANT_SKILL_ACTION
 from steward.manifest import SECRET_REDACTION, ResidentManifest, load_manifest
 from steward.run_lifecycle import RunTransitions
 from steward.runners import Outcome, RunResult
@@ -640,6 +641,48 @@ def test_a_repeat_inside_the_window_is_answered_and_nobody_is_knocked_on(
     assert row is not None
     assert (row.decision, row.decided_by) == ("deny", "repeat")
     assert sink.events == [], "a looping resident must not knock on every wake-up"
+
+
+def test_a_second_skill_grant_still_reaches_a_person_after_the_first_was_refused(
+    approvals: tr.ApprovalTransitions,
+    store: Store,
+    sink: ev.NullEmitter,
+    manifest: ResidentManifest,
+) -> None:
+    """Every grant asks under one action name, so the guard would answer for all of them.
+
+    Two different questions — a different skill, a different resident — and a no to the
+    first must not silently answer the second (warren#437). The action steward's write door
+    opens against is the one where a swallowed ask costs a write nobody refused.
+    """
+    first = approvals.raise_request(
+        manifest=manifest,
+        request=NeedsHuman(
+            raw="",
+            action=GRANT_SKILL_ACTION,
+            detail={"resident": "shelf-worker", "skill": "series-detection"},
+        ),
+        now=NOW,
+    )
+    approvals.decide(first.require().request_id, "deny", now=NOW)
+    sink.events.clear()
+
+    outcome = approvals.raise_request(
+        manifest=manifest,
+        request=NeedsHuman(
+            raw="",
+            action=GRANT_SKILL_ACTION,
+            detail={"resident": "hob", "skill": "read-invoices"},
+        ),
+        now=NOW + timedelta(hours=1),
+    )
+
+    assert outcome.applied
+    assert not outcome.answered, "the second question was asked, not answered for"
+    row = store.approval(outcome.require().request_id)
+    assert row is not None
+    assert row.pending
+    assert types(sink) == ["needs_human"], "and a person heard about it"
 
 
 def test_an_unreadable_escalation_still_reaches_a_person(

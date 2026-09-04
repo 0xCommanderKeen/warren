@@ -33,7 +33,8 @@ something the draft can propose and a person can correct in one line.
 - **A resident that already exists under another name is a refusal.** Two residents doing
   one job means two budgets, two sessions, and one of them silently losing the race to
   whatever they both write. When the job sits close to an existing resident's, say so and
-  propose the duty be added there instead — a manifest edit, and Miha's.
+  propose the duty be added there instead. If that comes down to one skill, it is a knock
+  rather than a new resident — see **A skill onto an existing resident** below.
 - **Reuse the skills that exist**, by name, and grant the smallest set that covers the
   duties. When a duty needs a skill nothing covers, that is `write-skill`'s job; a
   paragraph of charter doing a skill's work is a skill hidden where nobody can reuse it.
@@ -123,3 +124,22 @@ bytes they would be approving.
 
 Then stop, and let the skeleton rest unprovisioned in the tree. That is the correct
 finished state for this work, and the next move is a human's.
+
+## A skill onto an existing resident
+
+The other answer the fleet read can give: no new resident, one more skill on one that
+exists. That edit is Miha's to approve and yours to make once he has — a separate knock,
+naming the two things steward checks the write against:
+
+```
+<needs-human action="grant_skill" expires-in="24h" options="approve,deny">
+{"resident": "shelf-worker", "skill": "series-detection",
+ "note": "Reads the series index so it stops guessing from filenames."}
+</needs-human>
+```
+
+When the decision comes back approved, `GET /residents/<id>/declaration`, add the one
+`skills` entry, and `PUT` it back whole with `"approval_request_id": "<id>"` and no `soul`.
+Steward compares your manifest against the one on disk and refuses every difference beyond
+that line, so send the bytes you were given with one entry added. Report the commit hash;
+one approval is one edit, and a refusal is something to knock about again.

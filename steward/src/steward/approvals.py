@@ -75,6 +75,7 @@ from datetime import datetime, timedelta
 from typing import Any, cast
 
 from steward import events as ev
+from steward.approved_edits import GRANT_SKILL_ACTION
 from steward.manifest import (
     SECRET_REDACTION,
     ResidentManifest,
@@ -146,7 +147,15 @@ REPEAT_DENY_WINDOW_ENV = "STEWARD_REPEAT_DENY_WINDOW_H"
 #: exactly the case this module promises never to swallow. :mod:`steward.delegation` has
 #: two catch-alls of its own and keeps them out of the guard the other way, by knocking
 #: rather than raising, because approvals cannot import it.
-REPEAT_GUARD_EXEMPT_ACTIONS = frozenset({UNREADABLE_ACTION})
+#:
+#: :data:`~steward.approved_edits.GRANT_SKILL_ACTION` is the third, and a catch-all of the
+#: same kind (warren#437): every ask to put a skill on a manifest carries the same action
+#: and differs only in its detail, so one no to *grant series-detection to shelf-worker*
+#: would silently answer *grant read-invoices to hob* for the rest of the window — the
+#: second question swallowed unheard, and no phone buzzing to say so. The action is also
+#: the one steward's write door opens against, which makes it the one action where a
+#: swallowed ask costs a write nobody refused on the merits.
+REPEAT_GUARD_EXEMPT_ACTIONS = frozenset({UNREADABLE_ACTION, GRANT_SKILL_ACTION})
 
 ACTION_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _BLOCK = re.compile(

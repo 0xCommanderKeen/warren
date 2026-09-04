@@ -65,6 +65,7 @@ __all__ = [
     "ROUTINE_DELIVER_CHAT",
     "SCHEMA_VERSION",
     "SECRET_REDACTION",
+    "SESSION_GRANT_RESIDENTS_GRANT_SKILL",
     "SESSION_GRANT_SKILLS_WRITE",
     "UNRESTRICTED_TOOLS",
     "VOICE_MAX_CHARS",
@@ -200,6 +201,7 @@ UNRESTRICTED_TOOLS = "unrestricted"
 SESSION_GRANT_SKILLS_WRITE = "skills.write"
 SESSION_GRANT_RESIDENTS_DECLARE = "residents.declare"
 SESSION_GRANT_RESIDENTS_DRY_RUN = "residents.dry_run"
+SESSION_GRANT_RESIDENTS_GRANT_SKILL = "residents.grant_skill"
 
 
 class SessionGrant(StrEnum):
@@ -208,6 +210,10 @@ class SessionGrant(StrEnum):
     SKILLS_WRITE = SESSION_GRANT_SKILLS_WRITE
     RESIDENTS_DECLARE = SESSION_GRANT_RESIDENTS_DECLARE
     RESIDENTS_DRY_RUN = SESSION_GRANT_RESIDENTS_DRY_RUN
+    #: The one door that does not open on the grant alone (warren#437). A session holding
+    #: it may ``PUT`` a declaration only while presenting an approval a human answered
+    #: ``approve`` to, and only when the edit is the one that approval describes.
+    RESIDENTS_GRANT_SKILL = SESSION_GRANT_RESIDENTS_GRANT_SKILL
 
 
 #: A built-in tool name as ``claude --tools`` spells it — ``Read``, ``Glob``, ``WebFetch``.

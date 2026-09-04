@@ -233,6 +233,19 @@
         "additionalProperties": false,
         "description": "A resident's declaration, as a form edits it.\n\n``manifest`` and ``text`` are two spellings of one thing and exactly one may be given.\n``manifest`` is the mapping a form builds from its fields, which steward serialises \u2014\nconvenient, and it rewrites the file, so comments in it do not survive. ``text`` is the\nYAML itself, written byte for byte, which is how a caller keeps the comments a person\nwrote. Neither is more validated than the other.",
         "properties": {
+          "approval_request_id": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The approved request this edit is made against. Required of a session holding `residents.grant_skill`, and refused from a human caller, who needs none.",
+            "title": "Approval Request Id"
+          },
           "manifest": {
             "anyOf": [
               {
@@ -1382,7 +1395,8 @@
         "enum": [
           "skills.write",
           "residents.declare",
-          "residents.dry_run"
+          "residents.dry_run",
+          "residents.grant_skill"
         ],
         "title": "SessionGrant",
         "type": "string"
@@ -2426,7 +2440,7 @@
         "summary": "Get Declaration"
       },
       "put": {
-        "description": "Replace a resident's declaration, if it validates, and commit it.\n\n**Human callers only**, and this is the sharpest instance of that rule in the whole\nAPI: a resident that could rewrite its own charter would be choosing the rules it is\nheld to.\n\nA full replacement rather than a patch. Merging a partial edit into a manifest means\nsteward deciding what a missing key meant \u2014 cleared, or untouched? \u2014 and the\ndeclaration is the wrong file to be clever with. Read it, change it, write it back.\nThe ``revision`` from the ``GET`` is how two editors find out about each other.\n\nNothing is written unless the whole tree still validates with this change applied,\nincluding the checks that only exist across residents. A refusal has written\nnothing, committed nothing, and left the resident exactly as it was.",
+        "description": "Replace a resident's declaration, if it validates, and commit it.\n\n**A human act, and one narrow exception to that** (warren#437). A resident that\ncould rewrite its own charter would be choosing the rules it is held to, so a\nsession reaches this route only holding ``residents.grant_skill``, and gets through\nit only while presenting the id of an approval it raised, that a human answered\n``approve``, that has not expired or been spent, and that describes exactly the edit\nbeing made. The decision is consumed by the write, so one yes is one edit.\n\nA full replacement rather than a patch. Merging a partial edit into a manifest means\nsteward deciding what a missing key meant \u2014 cleared, or untouched? \u2014 and the\ndeclaration is the wrong file to be clever with. Read it, change it, write it back.\nThe ``revision`` from the ``GET`` is how two editors find out about each other.\n\nNothing is written unless the whole tree still validates with this change applied,\nincluding the checks that only exist across residents. A refusal has written\nnothing, committed nothing, and left the resident exactly as it was.",
         "operationId": "put_declaration_residents__resident_id__declaration_put",
         "parameters": [
           {

@@ -48,6 +48,15 @@ def _session_grant_for(method: str, path: str) -> SessionGrant | None:
         resident_id = path.removeprefix("/residents/").removesuffix("/provision")
         if resident_id and "/" not in resident_id:
             return SessionGrant.RESIDENTS_DRY_RUN
+    if method == "PUT" and path.startswith("/residents/") and path.endswith("/declaration"):
+        # The grant gets the session as far as the route and no further (warren#437). What
+        # actually opens this door is an approved, unspent request naming this exact edit,
+        # which only the route can check because only the route has been handed the
+        # candidate document. The gate's job is to stop a session that holds no grant at
+        # all from reaching a body parse.
+        resident_id = path.removeprefix("/residents/").removesuffix("/declaration")
+        if resident_id and "/" not in resident_id:
+            return SessionGrant.RESIDENTS_GRANT_SKILL
     if method == "POST" and path == "/skills":
         return SessionGrant.SKILLS_WRITE
     if method == "PUT" and path.startswith("/skills/"):
@@ -70,7 +79,9 @@ _SESSION_REFUSALS: tuple[tuple[str, str], ...] = (
         (
             "a resident's charter, skills and routines are written about it rather than by "
             "it; a session that could edit its own declaration would be choosing its own "
-            "rules, which is the one thing the declaration exists to stop"
+            "rules, which is the one thing the declaration exists to stop. The "
+            "residents.grant_skill grant opens this door for one skill line at a time, and "
+            "only against an approval a human answered yes to"
         ),
     ),
     (

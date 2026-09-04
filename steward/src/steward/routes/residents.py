@@ -1,6 +1,7 @@
 """Resident HTTP routes and their local request/view vocabulary."""
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Annotated, Any
 
 import yaml
@@ -8,6 +9,8 @@ from fastapi import APIRouter, Request
 from pydantic import BeforeValidator, Field, model_validator
 
 from steward import authoring as au
+from steward import events as ev
+from steward.approved_edits import UnapprovedEditError, approved_edit
 from steward.budgets import BudgetStatus
 from steward.chat import Transcript, chat_complaint, conversation_slug, conversation_summaries
 from steward.deploy import TransportError
@@ -127,6 +130,14 @@ class DeclarationPut(_Body):
         default=None,
         max_length=IDENTIFIER_MAX_CHARS,
         description="The revision this edit was made against. Omit it to overwrite blindly.",
+    )
+    approval_request_id: str | None = Field(
+        default=None,
+        max_length=IDENTIFIER_MAX_CHARS,
+        description=(
+            "The approved request this edit is made against. Required of a session holding "
+            "`residents.grant_skill`, and refused from a human caller, who needs none."
+        ),
     )
 
     @model_validator(mode="after")
@@ -274,6 +285,40 @@ RETIRE_UNTOUCHED: frozenset[str] = frozenset(
         "stale_retirement_plan",
     }
 )
+
+
+#: What a declaration edit that no decision authorises is answered with. One error slug
+#: for every way an approval can fail to cover a write — unknown, somebody else's, still
+#: pending, denied, expired, spent, or simply about a different edit — because the caller's
+#: next move is the same in all of them: knock again and wait for a human. The *message*
+#: says which one it was, and one code keeps a client from branching on distinctions that
+#: change nothing, or from using the door as an oracle for which request ids exist.
+EDIT_NOT_APPROVED = "edit_not_approved"
+
+
+@dataclass(frozen=True, slots=True)
+class _GatedEdit:
+    """The decision one session's declaration edit is being written against.
+
+    Built only once the edit has matched, so its existence is the statement that this write
+    is allowed. ``revision`` is the fingerprint of the declaration the match was made
+    against, which is what stops the write landing on bytes nobody compared.
+    """
+
+    request_id: str
+    act: str
+    revision: str
+
+
+def _manifest_data(text: str, which: str) -> dict[str, Any]:
+    """Parse one manifest for comparison, or say which of the two would not parse."""
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise UnapprovedEditError(f"the {which} manifest does not parse as YAML: {exc}") from exc
+    if not isinstance(data, Mapping):
+        raise UnapprovedEditError(f"the {which} manifest is not a mapping")
+    return dict(data)
 
 
 def _deployed_message(report: NurseryReport) -> str:
@@ -790,13 +835,81 @@ def router(deps: Deps) -> APIRouter:  # noqa: C901, PLR0915 — route factory is
             "paths": [str(p) for p in au.declaration_paths(residents_dir, resident.id, soul_file)],
         }
 
+    def gated_edit(
+        resident_id: str, manifest_text: str, body: DeclarationPut, request: Request
+    ) -> _GatedEdit | None:
+        """Hold a session's declaration edit to the one decision that authorises it.
+
+        Returns ``None`` for a human caller, who needs no decision and is refused for
+        presenting one: consuming an approval on a person's behalf would put a spent mark
+        against a decision they never used, and the ledger's whole value is that the mark
+        means what it says.
+        """
+        session = session_of(request)
+        if session is None:
+            if body.approval_request_id is not None:
+                _refuse(
+                    422,
+                    "approval_not_needed",
+                    "`approval_request_id` is how a granted session proves a human approved "
+                    "the edit it is making; a human caller is the approval and steward will "
+                    "not spend one on their behalf",
+                )
+            return None
+        # Past the gate, so the resident holds `residents.grant_skill`. That buys the
+        # route, not the write.
+        if body.approval_request_id is None:
+            _refuse(
+                403,
+                "session_credential_forbidden",
+                f"{session.resident_id} presented the credential for run {session.run_id} "
+                f"and named no approved request; the residents.grant_skill grant opens this "
+                f"door only against a human's yes. Nothing was recorded.",
+            )
+        if body.soul is not None:
+            _refuse(
+                403,
+                EDIT_NOT_APPROVED,
+                "this edit also carries a soul document; what a decision opens is the one "
+                "manifest line it describes, so send `manifest` or `text` alone and leave "
+                "the soul as it is",
+            )
+        resident = deps.find_resident(
+            validate_path(residents_dir, settings.skills_dir), resident_id
+        )
+        current = au.read_declaration(residents_dir, resident.id, resident.manifest.soul.file)
+        try:
+            edit = approved_edit(
+                db.approval(body.approval_request_id),
+                request_id=body.approval_request_id,
+                presented_by=session.resident_id,
+                writing_to=resident.id,
+                now=ev.utc_now_iso(deps.now()),
+            )
+            edit.check(
+                _manifest_data(current.manifest_text, "declared"),
+                _manifest_data(manifest_text, "offered"),
+            )
+        except UnapprovedEditError as exc:
+            _refuse(403, EDIT_NOT_APPROVED, f"{exc}. Nothing was written.")
+        return _GatedEdit(
+            request_id=body.approval_request_id,
+            act=edit.act,
+            revision=au.revision_of(
+                *au.declaration_paths(residents_dir, resident.id, resident.manifest.soul.file)
+            ),
+        )
+
     @routes.put("/residents/{resident_id}/declaration")
     def put_declaration(resident_id: str, body: DeclarationPut, request: Request) -> dict[str, Any]:
         """Replace a resident's declaration, if it validates, and commit it.
 
-        **Human callers only**, and this is the sharpest instance of that rule in the whole
-        API: a resident that could rewrite its own charter would be choosing the rules it is
-        held to.
+        **A human act, and one narrow exception to that** (warren#437). A resident that
+        could rewrite its own charter would be choosing the rules it is held to, so a
+        session reaches this route only holding ``residents.grant_skill``, and gets through
+        it only while presenting the id of an approval it raised, that a human answered
+        ``approve``, that has not expired or been spent, and that describes exactly the edit
+        being made. The decision is consumed by the write, so one yes is one edit.
 
         A full replacement rather than a patch. Merging a partial edit into a manifest means
         steward deciding what a missing key meant — cleared, or untouched? — and the
@@ -813,7 +926,18 @@ def router(deps: Deps) -> APIRouter:  # noqa: C901, PLR0915 — route factory is
             else yaml.safe_dump(body.manifest, sort_keys=False, allow_unicode=True)
         )
         declaration = au.Declaration(manifest_text=manifest_text, soul_text=body.soul)
+        gated = gated_edit(resident_id, manifest_text, body, request)
         request_id = deps.accept(request, "written", {"resident": resident_id})
+        if gated is not None and not db.consume_approval(gated.request_id, by=request_id):
+            # The match above read the decision as unspent; something else spent it in
+            # between. The claim is the authority, not the read.
+            db.set_request_outcome(request_id, f"refused: {EDIT_NOT_APPROVED}")
+            _refuse(
+                403,
+                EDIT_NOT_APPROVED,
+                f"approval {gated.request_id!r} was spent on another write while this one "
+                f"was being checked; one approval is one edit. Nothing was written.",
+            )
         try:
             written = au.write_declaration(
                 residents_dir,
@@ -822,11 +946,15 @@ def router(deps: Deps) -> APIRouter:  # noqa: C901, PLR0915 — route factory is
                 request_id=request_id,
                 principal=deps.acting_principal(request),
                 skills_dir=settings.skills_dir,
-                expected_revision=body.revision,
+                expected_revision=body.revision or (gated.revision if gated else None),
                 **deps.write_settings(request),
             )
         except au.AuthoringError as exc:
             db.set_request_outcome(request_id, f"refused: {exc.reason}")
+            if gated is not None:
+                # Nothing was written, so nothing was spent: the same decision still
+                # authorises the same edit, and a manifest typo must not cost a human's yes.
+                db.release_approval(gated.request_id, by=request_id)
             deps.refuse_write(exc)
         return {
             "request_id": request_id,
@@ -835,6 +963,9 @@ def router(deps: Deps) -> APIRouter:  # noqa: C901, PLR0915 — route factory is
             "revision": written.revision,
             "paths": [str(p) for p in written.paths],
             "commit": written.commit.to_dict(),
+            "approval": None
+            if gated is None
+            else {"request_id": gated.request_id, "act": gated.act},
             "warnings": [au.diagnostic_as_dict(d) for d in written.validation.warnings],
             "message": (
                 f"written and validated; {written.commit.note}. The scheduler picks this up "

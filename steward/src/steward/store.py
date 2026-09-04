@@ -341,6 +341,12 @@ _ADDED_COLUMNS: Mapping[str, Mapping[str, str]] = {
     "approvals": {
         "resident": "TEXT NOT NULL DEFAULT ''",
         "delivered_at": "TEXT",
+        # A decision that opened a door, and the write that spent it (warren#437). One
+        # approval is one edit, so the write claims the row before it touches the tree and
+        # gives it back if it refuses; ``consumed_by`` is the claimant's own request id,
+        # which is what makes the release safe to attribute.
+        "consumed_at": "TEXT",
+        "consumed_by": "TEXT NOT NULL DEFAULT ''",
     },
     "approval_announcements": {
         "attempts": "INTEGER NOT NULL DEFAULT 0",
@@ -580,6 +586,13 @@ class ApprovalRecord:
     #: decided request means the resident has not been told yet, which is exactly the
     #: set the next session's preamble is built from.
     delivered_at: str | None = None
+    #: When this decision was spent on the write it authorised, and by which request
+    #: (warren#437). ``None`` is the ordinary case: most approvals authorise an action a
+    #: resident performs itself, and steward never hears about it. A non-null value is the
+    #: record that steward's own write door opened once against this decision and will not
+    #: open against it again.
+    consumed_at: str | None = None
+    consumed_by: str = ""
 
     @property
     def pending(self) -> bool:
@@ -607,6 +620,8 @@ class ApprovalRecord:
             decided_at=row["decided_at"],
             edit=_loads(edit, None) if edit else None,
             delivered_at=row["delivered_at"],
+            consumed_at=row["consumed_at"],
+            consumed_by=row["consumed_by"] or "",
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -628,6 +643,8 @@ class ApprovalRecord:
             "decided_at": self.decided_at,
             "edit": dict(self.edit) if self.edit else None,
             "delivered_at": self.delivered_at,
+            "consumed_at": self.consumed_at,
+            "consumed_by": self.consumed_by or None,
         }
 
 
@@ -1894,6 +1911,45 @@ class Store:
                 )
                 marked += cursor.rowcount
         return marked
+
+    def consume_approval(self, request_id: str, *, by: str, now: str | None = None) -> bool:
+        """Claim this decision for one write, and report whether *this* call got it.
+
+        The whole of "one approval is one edit" (warren#437). Conditional on
+        ``consumed_at IS NULL``, so two sessions of the same resident presenting the same
+        request id at the same moment cannot both be told yes — the second reads ``False``
+        and is refused before it reaches the tree.
+
+        Claimed *before* the write rather than marked after it, because the failure that
+        matters is the one where the write lands and the marker does not: that leaves a
+        spent decision looking unspent, which is the one direction this must never fail in.
+        A write that then refuses gives the claim back through :meth:`release_approval`.
+
+        ``by`` is the claiming request's own id, and it is what makes the release safe:
+        only the claimant can give a claim back.
+        """
+        moment = now or utc_now_iso()
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE approvals SET consumed_at = ?, consumed_by = ? "
+                "WHERE request_id = ? AND consumed_at IS NULL",
+                (moment, by, request_id),
+            )
+        return cursor.rowcount == 1
+
+    def release_approval(self, request_id: str, *, by: str) -> bool:
+        """Give a claimed decision back, because the write it was claimed for refused.
+
+        Narrowed to ``consumed_by = by`` so a caller can only release its own claim: a
+        stale release must never re-open a decision some other write is holding.
+        """
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE approvals SET consumed_at = NULL, consumed_by = '' "
+                "WHERE request_id = ? AND consumed_by = ? AND consumed_at IS NOT NULL",
+                (request_id, by),
+            )
+        return cursor.rowcount == 1
 
     def decide(  # noqa: PLR0913 — optional API ledger metadata joins the same transaction
         self,

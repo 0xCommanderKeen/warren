@@ -189,6 +189,7 @@ session_grants:
   - skills.write
   - residents.declare
   - residents.dry_run
+  - residents.grant_skill
 ```
 
 `skills.write` lets this resident's live session credential reach `POST /skills` and
@@ -201,7 +202,15 @@ instructions. Every other session write remains closed.
 the accepted skeleton is validated and committed under the session resident's identity.
 `residents.dry_run` opens `POST /residents/{id}/provision` only with an explicit
 `dry_run: true`, returning the same plan an operator sees without reaching the host.
-Neither door permits declaration edits, retirement, deployment, or real provisioning.
+Neither door permits retirement, deployment, or real provisioning.
+
+`residents.grant_skill` is the one grant that opens nothing on its own. It lets a session
+reach `PUT /residents/{id}/declaration`, and steward then refuses the write unless the body
+names an approval that resident raised, a human answered `approve`, that has not expired or
+already been spent, and whose detail describes exactly the edit being made — one skill
+added to one resident, with nothing else in the declaration different. The decision is
+consumed by the write, so one yes is one edit. See
+[docs/approvals.md](approvals.md#an-approval-that-opens-a-door).
 
 A name the library does not have fails validation with the closest match named:
 
