@@ -11,6 +11,7 @@ from steward import authoring as au
 from steward.manifest import Resident, ValidationResult
 from steward.nursery import CommitIdentity
 from steward.operator_auth import OperatorPrincipal
+from steward.runners import build_runner
 from steward.session_auth import SessionPrincipal
 from steward.store import Store, new_id
 from steward.transitions.approval import ApprovalOutboxWorker, ApprovalTransitions
@@ -59,6 +60,11 @@ class Deps:
     runs: Any
     hooks: Any
     claims: Any
+    #: How a session is turned into a process. Held here because the *rehearsal* door
+    #: (warren#446) launches one directly rather than through the scheduler or the chat
+    #: bridge, and a route that reached for :func:`steward.runners.build_runner` itself
+    #: would be a runner nobody could inject a mock into.
+    runner_factory: Any = build_runner
 
     def accept(self, request: Request, outcome: str, detail: dict[str, Any] | None = None) -> str:
         """Log an accepted mutating request and return its trace id."""

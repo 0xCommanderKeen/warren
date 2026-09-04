@@ -134,6 +134,10 @@ const UNCALLED = [
   "GET /tasks/{task_id}/lineage",
   // Delegation is resident-to-resident, through the `<delegate>` block in a session.
   "POST /delegate",
+  // Rehearsing a declaration (warren#446) is Karen's move inside `raise-resident`, before
+  // she knocks: what the console shows is the reply she quotes in it, not a button that
+  // spends a model turn on somebody else's behalf.
+  "POST /residents/{resident_id}/rehearse",
   "PUT /secrets/{name}",
 ];
 

@@ -161,7 +161,7 @@ The write allowlist below is about **sessions** and is untouched by operator cre
 It exists to keep a running resident out of human acts, and an operator is the human.
 
 **What a session may reach.** Every `GET`, plus `POST /delegate`. Named `session_grants`
-may open three deliberately narrow doors beside that permanent allowlist:
+may open four deliberately narrow doors beside that permanent allowlist:
 
 - `skills.write` permits `POST /skills` and `PUT` of an ungranted skill. It may not set
   `defaults: true` or replace a skill any resident manifest already grants.
@@ -170,6 +170,12 @@ may open three deliberately narrow doors beside that permanent allowlist:
 - `residents.dry_run` permits `POST /residents/{id}/provision` with an explicit
   `dry_run: true` only. It returns the full bundle, compose, command, next-fire and
   environment-key plan without reaching a host.
+- `residents.rehearse` permits `POST /residents/{id}/rehearse`: one throwaway turn run
+  from a declaration, in a scratch directory, with no container, no mounts, no memory
+  directory, no credential, no tools and no steward event. **Never implied by
+  `residents.dry_run`**, and that is the point of it being a
+  name of its own (warren#446): a dry run reads a plan and costs nothing, a rehearsal runs
+  a model turn and spends the caller's own budget line.
 
 The narrowings and every other write path are `403 session_credential_forbidden`, naming
 the act, and nothing is recorded. In particular, declaration edits and retirement stay
@@ -212,6 +218,9 @@ worth knowing:
   over ssh. `residents.dry_run` opens only its no-host planning form. Named separately from
   declaring, and matched ahead of it, because the two are different acts and a refusal that
   called this one "declaring" would be describing something the caller did not try.
+- **`POST /residents/{id}/rehearse`** — a rehearsal runs a model turn and spends money.
+  `residents.dry_run` buys the free half of "check this declaration before building it"
+  and deliberately does not buy this half.
 - **`POST /residents/{id}/retire`** — retiring is ending a resident: a mark in git, a
   container stopped, a village token removed. A session that could do it would be deciding
   which of its colleagues carries on, or dismissing itself. Matched ahead of declaring for

@@ -189,6 +189,7 @@ session_grants:
   - skills.write
   - residents.declare
   - residents.dry_run
+  - residents.rehearse
 ```
 
 `skills.write` lets this resident's live session credential reach `POST /skills` and
@@ -201,7 +202,13 @@ instructions. Every other session write remains closed.
 the accepted skeleton is validated and committed under the session resident's identity.
 `residents.dry_run` opens `POST /residents/{id}/provision` only with an explicit
 `dry_run: true`, returning the same plan an operator sees without reaching the host.
-Neither door permits declaration edits, retirement, deployment, or real provisioning.
+`residents.rehearse` opens `POST /residents/{id}/rehearse`, which runs one throwaway turn
+from a declaration — its charter, soul and skills in the prompt, and no container, mounts,
+memory directory, credential, tools or steward event — and charges the turn to *this*
+resident's budget line. It is a separate name from `residents.dry_run` on purpose
+(warren#446): reading a plan is free and running a turn is not, so the cheap door never
+implies the expensive one. None of these doors permits declaration edits, retirement, deployment, or
+real provisioning.
 
 A name the library does not have fails validation with the closest match named:
 

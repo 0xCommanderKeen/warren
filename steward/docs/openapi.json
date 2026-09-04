@@ -737,6 +737,24 @@
         "title": "ProvisionPost",
         "type": "object"
       },
+      "RehearsePost": {
+        "additionalProperties": false,
+        "description": "The one message a rehearsal answers.\n\nNothing else, and deliberately no knobs: the declaration in the tree is the rest of\nthe request, and a rehearsal that let the caller vary the charter, the skills or the\ntools would be rehearsing something other than what would be provisioned.",
+        "properties": {
+          "message": {
+            "description": "What to say to the resident. Shape it like its first real message.",
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "RehearsePost",
+        "type": "object"
+      },
       "ResidentManifest": {
         "additionalProperties": false,
         "description": "The versioned declaration that makes a villager a resident.",
@@ -1398,7 +1416,8 @@
         "enum": [
           "skills.write",
           "residents.declare",
-          "residents.dry_run"
+          "residents.dry_run",
+          "residents.rehearse"
         ],
         "title": "SessionGrant",
         "type": "string"
@@ -2720,6 +2739,66 @@
           }
         ],
         "summary": "Provision Declared Resident"
+      }
+    },
+    "/residents/{resident_id}/rehearse": {
+      "post": {
+        "description": "Answer one message from a declaration, and keep nothing (warren#446).\n\nThe behavioural half of the dry run. ``POST /residents/{id}/provision`` with\n``dry_run: true`` proves the *plan* \u2014 the image, the host, the mounts, the next\nfires \u2014 and says nothing about whether the charter reads right. This runs one\nthrowaway turn from the same declaration, with its charter, soul and skills\nassembled into the prompt exactly as a real launch would assemble them, and\nreturns what the resident said.\n\nNothing else happens. No container, no mounts, no memory directory, no session\ncredential, no events, and no run row against the resident being rehearsed: it is\nexactly as unprovisioned afterwards as it was before. See\n:mod:`steward.rehearsal` for what each of those absences is protecting.\n\n**The one thing it costs is money**, which is why the door is its own grant. A\nsession pays out of its *own* budget line rather than the declaration's \u2014 the\nresident being rehearsed does not exist yet, and the caller is who chose to spend\na model turn \u2014 so a caller whose budget is spent or paused is refused here as it\nwould be refused a session of its own. That check is advisory in exactly the way\n``guard.allow`` is at every other route: it reads the ledger before the turn and\nwrites to it after, so simultaneous requests can each see an unspent budget. What\nbounds a rehearsal absolutely is the per-turn timeout and the empty tool grant,\nnot the daily cap.",
+        "operationId": "rehearse_declared_resident_residents__resident_id__rehearse_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resident_id",
+            "required": true,
+            "schema": {
+              "title": "Resident Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RehearsePost"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Rehearse Declared Resident Residents  Resident Id  Rehearse Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Rehearse Declared Resident"
       }
     },
     "/residents/{resident_id}/retire": {
