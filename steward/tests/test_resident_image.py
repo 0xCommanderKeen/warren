@@ -17,6 +17,7 @@ chronicle — run by a human (or by the pilot) there.
 import ast
 import hashlib
 import json
+import os
 import re
 import runpy
 import subprocess
@@ -29,6 +30,7 @@ import yaml
 from conftest import REPO_ROOT, ResidentWriter, valid_manifest
 from steward.deploy import DEFAULT_IMAGE, memory_mount, render_compose, target_for
 from steward.manifest import load_manifest
+from steward.runners import CONTAINER_EMITTER, hook_settings
 
 IMAGE_DIR = REPO_ROOT / "docker" / "resident"
 DOCKERFILE = IMAGE_DIR / "Dockerfile"
@@ -280,6 +282,98 @@ def test_the_settings_template_names_no_other_hooks() -> None:
 
     assert set(settings["hooks"]) == set(HOOKS)
     assert set(settings) == {"hooks"}
+
+
+# ------------------------------------------- what steward declares instead (steward #264)
+
+
+def test_steward_declares_the_same_six_events_as_the_image_template() -> None:
+    """Two spellings of one channel, held to each other so neither can drift alone.
+
+    The image's settings.json is the `user` source, seeded into /root/.claude for a human
+    running `claude` in this container by hand. Steward's own document is what a session it
+    launches carries on argv, because since #206 that user source is not loaded. They are
+    different files for different readers and they must describe the same six events: an
+    event added to one and not the other is a village that sees a session by hand and
+    half-sees it under steward.
+    """
+    template = json.loads(SETTINGS.read_text(encoding="utf-8"))
+    declared = json.loads(hook_settings("/opt/steward/chronicle-emit.py"))
+
+    assert set(declared["hooks"]) == set(template["hooks"]) == set(HOOKS)
+
+
+def test_steward_declares_an_emitter_this_image_actually_bakes() -> None:
+    """The one path in steward's document that the image has to make true.
+
+    A hook naming a script that is not there is not a failed session — it is a session that
+    runs perfectly and tells the village nothing, which is the exact silence #264 exists to
+    end and the hardest kind to notice. So the constant and the COPY are checked against
+    each other here rather than discovered on the NAS.
+    """
+    copied = re.search(
+        r"^COPY\s+chronicle-emit\.py\s+(\S+)$", DOCKERFILE.read_text(encoding="utf-8"), re.MULTILINE
+    )
+
+    assert copied is not None, "the image no longer bakes chronicle-emit.py at a fixed path"
+    assert copied.group(1) == CONTAINER_EMITTER
+
+
+def test_what_steward_declares_is_hooks_and_nothing_else() -> None:
+    """Same rule as the template's, for the same reason, on the document steward writes."""
+    declared = json.loads(hook_settings("/opt/steward/chronicle-emit.py"))
+
+    assert set(declared) == {"hooks"}
+    assert "CHRONICLE_URL" not in json.dumps(declared)
+    assert "CHRONICLE_TOKEN" not in json.dumps(declared)
+
+
+def test_the_emitter_answers_the_command_steward_writes(tmp_path: Path) -> None:
+    """End of the loop: steward's hook command, the #234 bundle, a real hook payload.
+
+    Every other test here checks a *shape* — the six events, the baked path, the JSON. This
+    one runs the thing. `python3 <emitter>` with no arguments is what both settings
+    documents write, and the bundle reads its runner off argv (`runner_name([]) == "claude"`),
+    so an argument-less invocation is not an accident of the template but the supported call.
+
+    Sealed the way an unreachable village seals it: `$HOME` in a temp directory, no
+    `CHRONICLE_URL`, mirrors off. The emitter journals to its durable outbox instead of
+    posting, which is exactly what it does inside a resident whose village is down — and
+    that journal is the evidence, because it carries the identity steward supplies
+    (`CHRONICLE_AGENT_ID`, `CHRONICLE_PROJECT`, both already in every session's environment).
+    """
+    payload = {
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "s1",
+        "prompt": "say hello",
+        "cwd": "/tmp/work",  # noqa: S108 — a string in a payload, never created
+    }
+
+    result = subprocess.run(  # noqa: S603 — a fixed argv, no shell, no template
+        [sys.executable, str(EMITTER)],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+        env={
+            "HOME": str(tmp_path),
+            "PATH": os.environ.get("PATH", ""),
+            "CHRONICLE_AGENT_ID": "cc:testy",
+            "CHRONICLE_PROJECT": "steward",
+            "CHRONICLE_MIRROR": "",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    journaled = [
+        json.loads(line)
+        for line in (tmp_path / ".chronicle" / "events.jsonl").read_text("utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [event["type"] for event in journaled] == ["task_started"]
+    assert journaled[0]["agent_id"] == "cc:testy"
+    assert journaled[0]["project"] == "steward"
 
 
 # --------------------------------------------------------------------------- the scripts

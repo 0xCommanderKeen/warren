@@ -486,6 +486,271 @@ def test_the_bound_survives_a_permissive_permission_mode(
     assert argv[-3:] == ["--tools", "Read", "--strict-mcp-config"]
 
 
+# ------------------------------ the hooks steward declares for a session (steward #264)
+
+
+def declared_settings(argv: list[str]) -> dict[str, object] | None:
+    """Return the settings document steward put on this argv, or ``None`` if it named none.
+
+    Read back off argv rather than off the constant, for the reason the setting-sources
+    test gives: sourcing both sides of the assertion from the same module would pass just
+    as happily over a session that declared nothing.
+    """
+    if r.SETTINGS_FLAG not in argv:
+        return None
+    document = json.loads(argv[argv.index(r.SETTINGS_FLAG) + 1])
+    assert isinstance(document, dict)
+    return document
+
+
+def hook_commands(document: dict[str, object]) -> set[str]:
+    """Every command string the document's hooks would run."""
+    hooks = document["hooks"]
+    assert isinstance(hooks, dict)
+    return {
+        step["command"]
+        for entries in hooks.values()
+        for entry in entries
+        for step in entry["hooks"]
+    }
+
+
+def test_a_local_session_declares_no_hooks_until_an_emitter_is_named(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Local placement is opt-in, and its default is exactly today's silence.
+
+    Steward ships the container's filesystem and does not ship the host's: there is no
+    path a local session's hook could run that steward can promise exists. So an
+    unconfigured local placement names no settings at all rather than naming a file that
+    might not be there — which, measured, is not a quiet miss but a dead session
+    (`Error: Settings file not found`, exit 1, no run).
+    """
+    monkeypatch.delenv(r.SESSION_EMITTER_ENV, raising=False)
+
+    assert declared_settings(claude_argv(stub_bin, tmp_path, UNRESTRICTED)) is None
+
+
+def test_a_local_session_declares_the_emitter_an_operator_named(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`$STEWARD_SESSION_EMITTER` is the seam a host with an emitter on it uses."""
+    monkeypatch.setenv(r.SESSION_EMITTER_ENV, "/opt/village/chronicle-emit.py")
+
+    document = declared_settings(claude_argv(stub_bin, tmp_path, UNRESTRICTED))
+
+    assert document is not None
+    assert hook_commands(document) == {"python3 /opt/village/chronicle-emit.py || true"}
+
+
+def test_a_container_session_declares_the_emitter_its_image_bakes(
+    stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Container placement needs no configuration: steward built that filesystem."""
+    log = docker_stub(stub_bin, monkeypatch, tmp_path)
+    monkeypatch.delenv(r.SESSION_EMITTER_ENV, raising=False)
+    r.build_runner(RunnerSpec(kind="claude"), PLACED).run(
+        request_for(tmp_path, env={"STEWARD_RUN_ID": "run-1"})
+    )
+
+    (call,) = docker_calls(log)
+    document = declared_settings(call[11:])
+
+    assert document is not None
+    assert hook_commands(document) == {f"python3 {r.CONTAINER_EMITTER} || true"}
+
+
+def test_the_declared_emitter_is_the_image_layer_and_not_the_mounted_copy() -> None:
+    """The one hook command steward writes must not be a file a mount can replace.
+
+    `/root/.claude` is a bind mount from the host, and the entrypoint seeds a copy of the
+    emitter into it for a human running `claude` in the container by hand. Declaring
+    *that* copy would put arbitrary code on every tool call behind a path outside the
+    image — which is the hole steward #206 closed, reopened through the back door. The
+    baked copy is in the image layer, under no mount, and steward built it.
+    """
+    assert r.CONTAINER_EMITTER == "/opt/steward/chronicle-emit.py"
+    assert not r.CONTAINER_EMITTER.startswith("/root/")
+
+
+def test_the_declared_settings_carry_hooks_and_nothing_else(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A settings file is a wide door; steward opens exactly one panel of it.
+
+    `permissions`, `model`, `env` and `mcpServers` are all settings keys, and every one of
+    them is already a manifest dimension or a deliberate refusal. What steward declares
+    here is the telemetry channel #206 closed, and nothing that would let a settings
+    document quietly re-decide something a manifest already answered.
+    """
+    monkeypatch.setenv(r.SESSION_EMITTER_ENV, "/opt/village/chronicle-emit.py")
+
+    document = declared_settings(claude_argv(stub_bin, tmp_path, UNRESTRICTED))
+
+    assert document is not None
+    hooks = document["hooks"]
+    assert isinstance(hooks, dict)
+    assert set(document) == {"hooks"}
+    assert set(hooks) == set(r.CHRONICLE_HOOKS)
+
+
+def test_the_declared_settings_are_named_beside_the_closed_sources(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both flags, always, in that order: the pair is the statement.
+
+    `--settings` on its own would add steward's hooks to whatever the filesystem also
+    offered; `--setting-sources ""` on its own is the silence #264 exists to end. Measured
+    2026-09-04 against CLI 2.1.260 (`docs/settings-sources.md`): a document named by
+    `--settings` fires its hooks with the sources closed, and a `.claude/settings.json` in
+    the session's own working directory still fires nothing.
+    """
+    monkeypatch.setenv(r.SESSION_EMITTER_ENV, "/opt/village/chronicle-emit.py")
+
+    argv = claude_argv(stub_bin, tmp_path, UNRESTRICTED)
+
+    assert argv[argv.index("--setting-sources") + 1] == ""
+    assert argv.index("--setting-sources") < argv.index(r.SETTINGS_FLAG)
+
+
+def test_the_two_tool_hooks_match_every_tool(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`PreToolUse`/`PostToolUse` need a matcher or they see one tool and report none."""
+    monkeypatch.setenv(r.SESSION_EMITTER_ENV, "/opt/village/chronicle-emit.py")
+
+    document = declared_settings(claude_argv(stub_bin, tmp_path, UNRESTRICTED))
+
+    assert document is not None
+    hooks = document["hooks"]
+    assert isinstance(hooks, dict)
+    for event, entries in hooks.items():
+        matchers = [entry.get("matcher") for entry in entries]
+        assert matchers == (["*"] if event in r.MATCHED_HOOKS else [None])
+
+
+def test_a_hook_that_cannot_run_cannot_deny_the_tool_call(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failure direction, pinned: no telemetry, never a blocked session.
+
+    Exit 2 is the CLI's *blocking* code for a hook, and `python3 <missing file>` exits
+    exactly 2 (measured). So an emitter path that is wrong — a resident on an image older
+    than the one that baked it, a typo in `$STEWARD_SESSION_EMITTER` — would deny every
+    tool call the session made rather than merely staying quiet. `|| true` is what makes
+    the wrong path a quiet resident instead of a broken fleet.
+    """
+    monkeypatch.setenv(r.SESSION_EMITTER_ENV, "/opt/village/chronicle-emit.py")
+
+    document = declared_settings(claude_argv(stub_bin, tmp_path, UNRESTRICTED))
+
+    assert document is not None
+    assert all(command.endswith("|| true") for command in hook_commands(document))
+
+
+def test_an_emitter_path_with_a_space_in_it_is_still_one_word(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI runs a hook command through a shell, so the path steward writes is quoted."""
+    monkeypatch.setenv(r.SESSION_EMITTER_ENV, "/opt/the village/chronicle-emit.py")
+
+    document = declared_settings(claude_argv(stub_bin, tmp_path, UNRESTRICTED))
+
+    assert document is not None
+    assert hook_commands(document) == {"python3 '/opt/the village/chronicle-emit.py' || true"}
+
+
+def test_a_hook_cannot_hold_a_session_open(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every step carries a timeout: telemetry must not be able to hang a routine."""
+    monkeypatch.setenv(r.SESSION_EMITTER_ENV, "/opt/village/chronicle-emit.py")
+
+    document = declared_settings(claude_argv(stub_bin, tmp_path, UNRESTRICTED))
+
+    assert document is not None
+    hooks = document["hooks"]
+    assert isinstance(hooks, dict)
+    timeouts = {
+        step["timeout"]
+        for entries in hooks.values()
+        for entry in entries
+        for step in entry["hooks"]
+    }
+    assert timeouts == {r.HOOK_TIMEOUT_S}
+
+
+def test_only_claude_is_told_about_hooks(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`codex` has no `--settings`, so naming one would be a session that fails to launch."""
+    monkeypatch.setenv(r.SESSION_EMITTER_ENV, "/opt/village/chronicle-emit.py")
+    stub_bin("codex", CLAUDE_STUB)
+    r.build_runner(RunnerSpec(kind="codex")).run(request_for(tmp_path, env=dumps(tmp_path)))
+
+    assert r.SETTINGS_FLAG not in (tmp_path / "argv.txt").read_text().splitlines()
+
+
+def test_a_declaring_session_is_told_not_to_mirror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The emitter's loopback mirror is on unless something says otherwise (#264).
+
+    `chronicle-emit.py` mirrors every event to `http://127.0.0.1:8737` when
+    `CHRONICLE_MIRROR` is *absent* — presence decides, so only an explicitly empty value
+    turns it off, and the resident image bakes one for exactly that reason. Local placement
+    is the half steward does not ship, and until steward declared hooks it did not matter
+    because a local session had no hooks to mirror. The case this is really about is a
+    control plane on a machine that *does* run a chronicle dev server on 8737: every
+    production session would quietly duplicate its events into somebody's scratch village.
+    """
+    monkeypatch.setenv(r.SESSION_EMITTER_ENV, "/opt/village/chronicle-emit.py")
+    runner = r.ClaudeRunner(RunnerSpec(kind="claude"))
+
+    env = runner.environment(request_for(tmp_path))
+
+    assert env[r.CHRONICLE_MIRROR_ENV] == ""
+
+
+def test_a_silent_session_is_told_nothing_about_mirrors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session with no emitter runs no emitter, so it gets no opinion about its targets."""
+    monkeypatch.delenv(r.SESSION_EMITTER_ENV, raising=False)
+    runner = r.ClaudeRunner(RunnerSpec(kind="claude"))
+
+    assert r.CHRONICLE_MIRROR_ENV not in runner.environment(request_for(tmp_path))
+
+
+def test_an_operator_who_wants_a_mirror_keeps_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A default is not an override: a named mirror survives, which is why it is allowlisted."""
+    monkeypatch.setenv(r.SESSION_EMITTER_ENV, "/opt/village/chronicle-emit.py")
+    monkeypatch.setenv(r.CHRONICLE_MIRROR_ENV, "http://scratch.example:8737")
+    runner = r.ClaudeRunner(RunnerSpec(kind="claude"))
+
+    env = runner.environment(request_for(tmp_path))
+
+    assert env[r.CHRONICLE_MIRROR_ENV] == "http://scratch.example:8737"
+
+
+def test_session_emitter_answers_about_an_environment_that_is_not_this_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`doctor` asks this about a *scheduler*, which may run under a different environment."""
+    monkeypatch.setenv(r.SESSION_EMITTER_ENV, "/on/this/shell.py")
+
+    assert r.session_emitter(r.LOCAL_PLACEMENT) == "/on/this/shell.py"
+    assert r.session_emitter(r.LOCAL_PLACEMENT, inherited={}) is None
+    assert (
+        r.session_emitter(r.LOCAL_PLACEMENT, inherited={r.SESSION_EMITTER_ENV: "/theirs.py"})
+        == "/theirs.py"
+    )
+    # Container placement is not a question about anybody's environment.
+    assert r.session_emitter(PLACED, inherited={}) == r.CONTAINER_EMITTER
+
+
 def test_two_requests_that_differ_only_in_tools_are_two_requests(tmp_path: Path) -> None:
     """The mock digest has to see the bound, or a rehearsal reuses another session's answer."""
 
@@ -666,6 +931,65 @@ def test_the_flags_a_manifest_needs_are_exactly_what_argv_writes() -> None:
         "--strict-mcp-config",
     )
     assert r.required_flags(RunnerSpec(kind="codex"), ToolGrant(["Read"]), ("/data",)) == ()
+
+
+def test_a_session_that_will_carry_hook_settings_asks_for_that_flag_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe has to describe the argv this manifest *here* produces (steward #264).
+
+    Not a manifest dimension, and not a constant either: a container-placed resident always
+    carries `--settings` and a local one carries it only where an operator named an
+    emitter. Asking for it unconditionally would redden a host that never sends it.
+    """
+    claude = RunnerSpec(kind="claude")
+    monkeypatch.delenv(r.SESSION_EMITTER_ENV, raising=False)
+
+    assert r.required_flags(claude, UNRESTRICTED, (), PLACED) == (
+        "--setting-sources",
+        "--settings",
+    )
+    assert r.required_flags(claude, UNRESTRICTED, ()) == ("--setting-sources",)
+
+    monkeypatch.setenv(r.SESSION_EMITTER_ENV, "/opt/village/chronicle-emit.py")
+
+    assert r.required_flags(claude, UNRESTRICTED, ()) == ("--setting-sources", "--settings")
+
+
+def test_a_container_emitter_that_is_not_there_is_reported(
+    stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Steward names a path in an image it did not necessarily build this version of.
+
+    A resident still running an image from before warren#361 carries the emitter under its
+    pre-rename name. The hook command's `|| true` means that costs telemetry rather than
+    denying every tool call — so the resident runs, looks healthy, and says nothing. This
+    probe is the only thing that can tell.
+    """
+    log = docker_stub(stub_bin, monkeypatch, tmp_path)
+
+    assert r.check_session_emitter(PLACED) is None
+    assert ["exec", CONTAINER, "test", "-f", r.CONTAINER_EMITTER] in docker_calls(log)
+
+    stub_bin("docker", "exit 1")
+    complaint = r.check_session_emitter(PLACED)
+
+    assert complaint is not None
+    assert r.CONTAINER_EMITTER in complaint
+    assert CONTAINER in complaint
+
+
+def test_nothing_is_probed_for_a_placement_steward_did_not_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local: the path came from an operator who can see their own filesystem."""
+    monkeypatch.setenv(r.SESSION_EMITTER_ENV, "/opt/village/chronicle-emit.py")
+
+    assert r.check_session_emitter(r.LOCAL_PLACEMENT) is None
+
+    monkeypatch.delenv(r.SESSION_EMITTER_ENV, raising=False)
+
+    assert r.check_session_emitter(r.LOCAL_PLACEMENT) is None
 
 
 # ------------------------------------------- what a brain may claim it spent (steward #129)
@@ -1378,7 +1702,7 @@ def test_a_container_placed_session_execs_into_the_container(
     shim = call[10]
     assert 'printf %s "$$" > /run/steward/run-42.pid' in shim
     assert "rm -f /run/steward/run-42.pid" in shim
-    assert call[11:] == [
+    assert call[11:18] == [
         "claude",
         "-p",
         "say hello",
@@ -1386,9 +1710,12 @@ def test_a_container_placed_session_execs_into_the_container(
         "json",
         "--setting-sources",
         "",
-        "--model",
-        "claude-opus-5",
     ]
+    # The one thing a container placement adds and a local one usually does not: steward's
+    # own six chronicle hooks, named as a document rather than inherited from a file
+    # (steward #264). Its contents have their own tests; here it is the argv shape.
+    assert call[18] == r.SETTINGS_FLAG
+    assert call[20:] == ["--model", "claude-opus-5"]
 
 
 def test_a_container_session_carries_only_the_named_variables(
@@ -1590,7 +1917,7 @@ def test_the_flag_probe_asks_the_container_cli(
         stub_bin,
         monkeypatch,
         tmp_path,
-        help_flags="--tools --strict-mcp-config --add-dir --setting-sources",
+        help_flags="--tools --strict-mcp-config --add-dir --setting-sources --settings",
     )
 
     assert r.check_cli_support(RunnerSpec(kind="claude"), ToolGrant(["Read"]), (), PLACED) is None

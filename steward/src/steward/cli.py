@@ -77,7 +77,16 @@ from steward.nursery import (
 from steward.openapi import OPENAPI_ARTIFACT, openapi_json
 from steward.operator_auth import new_operator_credential, operator_email
 from steward.prompt import assemble_preamble
-from steward.runners import Placement, check_cli_support, check_runner, skills_home
+from steward.runners import (
+    SESSION_EMITTER_ENV,
+    ClaudeRunner,
+    Placement,
+    check_cli_support,
+    check_runner,
+    check_session_emitter,
+    session_emitter,
+    skills_home,
+)
 from steward.scheduler import (
     DEFAULT_CATCHUP_S,
     FireReport,
@@ -503,9 +512,8 @@ def _report_reach(resident: Resident) -> int:
     """
     manifest = resident.manifest
     tools = manifest.tools
-    complaint = check_cli_support(
-        manifest.runner, tools, manifest.workspace, placement_for(manifest)
-    )
+    placement = placement_for(manifest)
+    complaint = check_cli_support(manifest.runner, tools, manifest.workspace, placement)
     if complaint:
         click.secho(f"{resident.id}: tools {tools.describe()} — {complaint}", fg="red", err=True)
         return 1
@@ -520,6 +528,52 @@ def _report_reach(resident: Resident) -> int:
             f"{resident.id}: mount {mount.host} -> {mount.container} ({mount.mode})",
             fg="yellow" if mount.mode == "rw" else "bright_black",
         )
+    return _report_telemetry(resident, placement)
+
+
+def _report_telemetry(resident: Resident, placement: Placement) -> int:
+    """Say whether this resident's sessions will tell the village what they did.
+
+    Quiet is not a problem, so it is not counted: a fleet can legitimately run with
+    per-session telemetry off, and steward's own run-level events (`routine_started`,
+    `routine_finished`, task and delegation) are emitted by the control plane and are
+    unaffected by any of this. What quiet is not allowed to be is *silent*. Since steward
+    #206 a session loads no settings file at all, so the six chronicle hooks reach it only
+    if steward declares them (#264), and without this line the difference between "the
+    village is watching" and "the village went quiet mid-run" is invisible until somebody
+    reads an empty log.
+
+    A declared emitter that is *not there* is counted, and is the one thing here that
+    turns red. It is the failure with no other symptom: the hook command ends in
+    `|| true` so that a missing emitter costs telemetry rather than denying every tool
+    call, which means the resident runs, looks healthy, and says nothing.
+
+    Only `claude` residents are answerable at all. Which flags a session carries is
+    `required_flags`' question, and it answers `()` for every other kind — a `codex` or
+    `command` session is never handed a settings document, so a line about its hooks would
+    be a confident claim about a channel that does not exist for it.
+    """
+    if resident.manifest.runner.kind != ClaudeRunner.kind:
+        return 0
+    emitter = session_emitter(placement)
+    if emitter is None:
+        click.secho(
+            f"{resident.id}: per-session events off — no emitter for {placement.describe()} "
+            f"placement; export {SESSION_EMITTER_ENV} in the environment the scheduler runs "
+            f"in to turn them on",
+            fg="yellow",
+        )
+        return 0
+    complaint = check_session_emitter(placement)
+    if complaint:
+        click.secho(f"{resident.id}: per-session events — {complaint}", fg="red", err=True)
+        return 1
+    # Local placement only: a container's emitter was just verified in the container, but a
+    # local one was resolved from *this* process's environment, and the process that will
+    # actually launch the session is the scheduler. Saying where the answer came from is
+    # the difference between a report and an assertion.
+    where = "" if placement.is_container else f" (${SESSION_EMITTER_ENV}, read here)"
+    click.secho(f"{resident.id}: per-session events via {emitter}{where}", fg="bright_black")
     return 0
 
 

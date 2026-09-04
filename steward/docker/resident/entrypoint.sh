@@ -28,13 +28,14 @@
 # and the pre-rename copy is removed once nothing names it any more. Left alone, the
 # resident would look perfectly healthy and emit nothing.
 #
-# One thing this file wires that a steward-launched session no longer reads: since steward
-# #206 every claude session is launched with `--setting-sources ""`, and this is the `user`
-# source. The hooks below fire for a person running `claude` in this container by hand;
-# they do not fire for a routine steward starts. See docs/settings-sources.md — the
-# channel was closed on purpose, and giving steward its own declared settings file
-# (`--settings`, measured to survive the flag) is the separate work that would bring the
-# telemetry back.
+# Who reads what this file writes: since steward #206 every claude session is launched with
+# `--setting-sources ""`, and $CONFIG_DIR/settings.json is the `user` source. So the hooks
+# seeded below fire for a *person* running `claude` in this container by hand, and not for a
+# routine steward starts. Steward declares the same six hooks itself, on argv, naming the
+# baked /opt/steward/chronicle-emit.py rather than the copy this script puts in the mount
+# (steward #264, docs/manifest.md) — deliberately, because $CONFIG_DIR is a bind mount from
+# the host and a hook command pointing into a mount is arbitrary code from outside the
+# image. Two readers, two copies, one channel; docs/settings-sources.md has the measurement.
 set -eu
 
 CONFIG_DIR=/root/.claude
