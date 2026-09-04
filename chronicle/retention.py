@@ -17,10 +17,6 @@ from approval_protocol import structured_approval
 from journal_observations import reduce_indexed as reduce_journal_indexed
 from protocol import validate_event
 
-# The reducer's own sets, imported rather than mirrored: retention and the projection
-# disagreeing about what counts as evidence of life — or about what opens a board row —
-# is precisely the bug this prevents.
-from village_state import AMBIENT_TYPES, STATE_NEUTRAL_TYPES
 from retention_approvals import (
     _approval_keep_indexes,
     _journal_approval_keep_indexes,
@@ -51,15 +47,22 @@ from retention_policy import (
 )
 from retention_projection import _projection_keep_indexes
 
-# Re-exports. ``event_ms`` is part of this module's public four-name interface, and
-# the rest are private selectors the family test modules reach as ``retention._x``;
-# both keep resolving here so the split stayed a move rather than a rename.
+# The reducer's own sets, imported rather than mirrored: retention and the projection
+# disagreeing about what counts as evidence of life — or about what opens a board row —
+# is precisely the bug this prevents.
+from village_state import AMBIENT_TYPES, STATE_NEUTRAL_TYPES
+
+# Re-exports, so the split stayed a move rather than a rename. ``event_ms`` is part of
+# this module's public interface alongside ``carry_forward``, ``POLICY`` and
+# ``Retention``; ``_approval_lifecycle_identity`` and the bounds below are reached as
+# ``retention._x`` / ``retention.X`` by the family test modules. ``MOOD_AUTHORITY_KIND``,
+# ``MOOD_AUTHORITY_MAX_BYTES`` and ``KEEP_TASKS`` are read by tests too, and are imported
+# above because ``carry_forward`` itself uses them — do not drop one as unused without
+# grepping the tests first.
 from retention_ledger import event_ms  # noqa: F401
 from retention_approvals import _approval_lifecycle_identity  # noqa: F401
-from retention_mood import _mood_authority_input_event  # noqa: F401
 from retention_policy import (  # noqa: F401
     KEEP_AMBIENT_PER_AGENT,
-    KEEP_APPROVALS,
     KEEP_PER_AGENT,
     KEEP_TASKS,
     MOOD_AUTHORITY_MAX_DEPTH,
@@ -681,4 +684,3 @@ def carry_forward(lines, now_ms, policy):
         "moods": frozenset(manifest_mood_indexes),
     }
     return Retention(tuple(retained), capsule, witnesses)
-

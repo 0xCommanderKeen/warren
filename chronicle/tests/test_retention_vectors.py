@@ -7,8 +7,9 @@ same commit that removed the Node suites, replacing it with ~115 lines of
 
 Their subject survived intact: `carry_forward`, `Retention.witnesses`,
 `_mood_keep_indexes`, `_mood_authority_from_line` and `MOOD_AUTHORITY_MAX_DEPTH`
-are all still live — since warren#342 spread across `retention.py` and its
-`retention_*` family modules, none of which has a dedicated test file. So the vectors go back to work rather than being
+are all still live — since warren#342 spread across `retention.py` and the
+`retention_*` family modules, with no test file dedicated to the rotation pass
+itself. So the vectors go back to work rather than being
 deleted with the suite that used to read them — the same call
 `tests/test_typed_json.py::RetiredParityVectors` made for the capsule fixture.
 
