@@ -296,6 +296,36 @@ def test_the_listing_reports_a_secret_the_environment_still_holds(
     assert entry["source"] == "env"
 
 
+def test_an_empty_variable_is_a_slot_and_not_a_secret(
+    vault: VaultFactory, monkeypatch: pytest.MonkeyPatch
+):
+    """The burrow exports every declared token as ``${NAME:-}``, so this is the real case.
+
+    A listing that counted an exported-but-empty variable as set would tell an operator
+    every unwired bot was wired — the one thing they opened this endpoint to disprove.
+    """
+    monkeypatch.setenv("STEWARD_CHAT_TOKEN_TESTY", "")
+    harness = vault(chat=True)
+
+    [entry] = harness.client.get("/secrets").json()["secrets"]
+
+    assert entry["name"] == "STEWARD_CHAT_TOKEN_TESTY"
+    assert entry["set"] is False
+    assert entry["source"] is None
+
+
+def test_an_empty_file_is_a_slot_and_not_a_secret(vault: VaultFactory):
+    """The same rule on the other side: a file somebody made and never filled is unset."""
+    harness = vault(chat=True)
+    harness.secrets_dir.mkdir(parents=True, exist_ok=True)
+    (harness.secrets_dir / "STEWARD_CHAT_TOKEN_TESTY").write_text("\n", encoding="utf-8")
+
+    [entry] = harness.client.get("/secrets").json()["secrets"]
+
+    assert entry["set"] is False
+    assert entry["source"] is None
+
+
 def test_a_secret_no_route_claims_is_still_listed(vault: VaultFactory):
     """An unassigned token is the state a half-finished provisioning leaves behind."""
     harness = vault(chat=True)
@@ -340,6 +370,46 @@ def test_an_anonymous_caller_is_refused(vault: VaultFactory):
     )
     assert anonymous.get("/secrets").status_code == 401
     assert not harness.secrets_dir.exists()
+
+
+def test_a_resident_session_may_not_read_the_inventory(vault: VaultFactory):
+    """No value is exposed, but which slot carries whose identity is still not a session's."""
+    harness = vault(chat=True)
+    session = harness.session()
+
+    response = harness.client.get("/secrets", headers=session)
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["error"] == "session_credential_forbidden"
+    assert "identity" in response.json()["detail"]["message"]
+
+
+def test_a_refusal_never_quotes_a_mistyped_body_either(vault: VaultFactory):
+    """`extra="forbid"` reports the extra key by echoing its value — which here is the token."""
+    harness = vault()
+
+    mistyped = harness.client.put(
+        "/secrets/STEWARD_CHAT_TOKEN_TESTY", json={"secret": FAKE_BOT_TOKEN}
+    )
+    wrong_type = harness.client.put(
+        "/secrets/STEWARD_CHAT_TOKEN_TESTY", json={"value": [FAKE_BOT_TOKEN]}
+    )
+
+    for response in (mistyped, wrong_type):
+        assert response.status_code == 422
+        assert FAKE_BOT_TOKEN not in response.text
+        assert response.json()["detail"]["error"] == "invalid_secret_body"
+    assert harness.store.requests() == []
+
+
+def test_a_name_that_is_a_token_is_not_echoed_back(vault: VaultFactory):
+    """A caller who pastes into the wrong field must not have it reflected at them."""
+    harness = vault()
+
+    response = harness.client.put(f"/secrets/{FAKE_BOT_TOKEN}", json={"value": "v"})
+
+    assert response.status_code in {404, 422}
+    assert FAKE_BOT_TOKEN not in response.text
 
 
 def test_a_resident_session_may_not_write_a_secret(vault: VaultFactory):

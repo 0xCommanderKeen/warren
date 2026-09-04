@@ -2879,7 +2879,7 @@
     },
     "/secrets": {
       "get": {
-        "description": "List every credential slot, whether it is filled, and which route wants it.\n\nThree sources of names, unioned: the slots declared chat routes ask for, the files\nin the secrets directory, and the ``STEWARD_CHAT_TOKEN_*`` variables still in this\nprocess's environment. A slot no route claims is listed all the same \u2014 that is what\na half-finished provisioning looks like, and hiding it would hide the thing an\noperator came here to see.",
+        "description": "List every credential slot, whether it is filled, and which route wants it.\n\nHuman callers only, unlike almost every other read in this API. A ``GET`` is safe\nby method and a session credential reaches every safe method, so the refusal has to\nbe made here rather than by the gate \u2014 and it is worth making: no value is exposed,\nbut the *inventory* is. One resident could otherwise enumerate which slot carries\nevery other resident's identity and which of them are filled, which is the shape of\nknowledge ``app_grants`` exists to keep on the human side.\n\nThree sources of names, unioned: the slots declared chat routes ask for, the files\nin the secrets directory, and the ``STEWARD_CHAT_TOKEN_*`` variables in this\nprocess's environment. A slot no route claims is listed all the same \u2014 that is what\na half-finished provisioning looks like, and hiding it would hide the thing an\noperator came here to see.",
         "operationId": "list_secrets_secrets_get",
         "responses": {
           "200": {

@@ -2655,3 +2655,48 @@ def test_a_hand_built_bridge_is_never_reloaded_under_a_test(make_bridge: BridgeM
 
     assert bridge.reload() is False
     assert [route.key for route in bridge.reachable()] == ["test-agent/chat"]
+
+
+def test_a_reload_re_registers_the_rooms_a_route_listens_in(
+    write_resident: ResidentWriter, store: Store, tmp_path: Path
+):
+    """The half a token alone does not fix: ``listen`` is a registration, not a query.
+
+    A Discord route that gains its token through ``PUT /secrets/{name}`` would otherwise
+    pass its identity check, report itself reachable, and hear nothing in any channel —
+    which is the recreate warren#462 exists to remove, still needed.
+    """
+
+    class Listening(FakeTransport):
+        name = ch.DISCORD
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.registered: list[tuple[str, tuple[str, ...]]] = []
+
+        def listen(self, token: str, names: Sequence[str]) -> bool:
+            self.registered.append((token, tuple(names)))
+            return True
+
+    directory = tmp_path / "secrets"
+    directory.mkdir()
+    env = {
+        sec.SECRETS_DIR_ENV: str(directory),
+        ch.OPERATORS_ENV: f"{ch.DISCORD}:{OPERATOR}",
+        ch.API_URL_ENV: "http://127.0.0.1:1",
+    }
+    declared = chat_manifest(tmp_path / "memory")
+    declared["routes"][-1]["address"] = "discord:testy"
+    declared["routes"][-1]["listens_in"] = ["the-hall"]
+    path = write_resident(declared)
+    transport = Listening()
+    bridge = ch.ChatBridge.from_path(
+        path.parent.parent, store, env=env, transports={ch.DISCORD: transport}
+    )
+    bridge.recheck_s = 0.0
+    assert transport.registered == [], "no token yet, so nothing to register"
+
+    sec.write_secret("STEWARD_CHAT_TOKEN_DISCORD_TESTY", FAKE_BOT_TOKEN, directory=directory)
+    bridge.reachable()
+
+    assert transport.registered == [(FAKE_BOT_TOKEN, ("the-hall",))]

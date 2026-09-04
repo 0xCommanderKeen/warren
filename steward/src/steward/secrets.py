@@ -60,10 +60,12 @@ log = logging.getLogger("steward.secrets")
 #: image, so a container running without the mount finds nothing rather than something old.
 DEFAULT_SECRETS_DIR = "/secrets"
 
-#: How a laptop, a test run, or a second burrow layout moves that directory. Set in the
-#: environment like every other steward path setting, and read from the *same* mapping a
-#: caller passes for the environment, so a reader working from an explicit mapping cannot
-#: accidentally read the real machine's secrets.
+#: How a laptop, a test run, or a second burrow layout moves that directory. Read from the
+#: *same* mapping a caller passes for the environment, so a caller working from an explicit
+#: mapping can point the whole module at a directory it owns — but note that a mapping which
+#: does not name one still falls back to :data:`DEFAULT_SECRETS_DIR`, so on a machine that
+#: has ``/secrets`` an explicit ``env={}`` is not by itself isolation. Steward's own test
+#: suite sets this variable to a scratch path for exactly that reason.
 SECRETS_DIR_ENV = "STEWARD_SECRETS_DIR"
 
 #: The grammar of a secret name: exactly what an environment variable may be called, which
@@ -120,7 +122,15 @@ def secret_names(
         entries = list(path.iterdir())
     except OSError:
         return []
-    return sorted(entry.name for entry in entries if valid_name(entry.name) and entry.is_file())
+    return sorted(
+        entry.name
+        for entry in entries
+        # ``is_symlink`` first, because ``is_file`` follows one: a link named for a slot and
+        # pointing at any file this process can read would otherwise be listed as a
+        # credential and read as one. ``valid_name`` is meant to be the only gate, and a
+        # symlink is the one way in that does not go through a name.
+        if valid_name(entry.name) and not entry.is_symlink() and entry.is_file()
+    )
 
 
 def read_secret(
@@ -144,7 +154,9 @@ def read_secret(
         return None
     path = (Path(directory) if directory is not None else secrets_dir(source)) / name
     try:
-        value = path.read_text(encoding="utf-8").strip()
+        # Same refusal as the listing, and for the same reason: a slot is a file steward
+        # wrote, not a pointer somebody left where one was expected.
+        value = "" if path.is_symlink() else path.read_text(encoding="utf-8").strip()
     except OSError:
         value = ""
     except UnicodeDecodeError:
@@ -214,7 +226,13 @@ def write_secret(
             "so a multi-line body is a paste that took more than was meant"
         )
     base = Path(directory) if directory is not None else secrets_dir(env)
+    fresh = not base.is_dir()
     base.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if fresh:
+        # ``mkdir``'s mode is masked by the process umask, so the mode above is a ceiling
+        # rather than a guarantee. Only when this call created the directory: a directory
+        # the operator already made is theirs, and deploy.sh sets it to 0700 itself.
+        base.chmod(0o700)
     destination = base / name
     descriptor, scratch = tempfile.mkstemp(dir=base, prefix=".", suffix=".tmp")
     try:
@@ -224,7 +242,29 @@ def write_secret(
             os.fsync(handle.fileno())
         Path(scratch).chmod(0o600)
         Path(scratch).replace(destination)
+        _fsync_directory(base)
     except BaseException:
         Path(scratch).unlink(missing_ok=True)
         raise
     return destination
+
+
+def _fsync_directory(path: Path) -> None:
+    """Flush the directory entry the rename just made, so a power cut cannot lose it.
+
+    The rename is atomic against a *reader*; without this it is not durable against the
+    burrow losing power, and the failure it prevents is the confusing one — an endpoint that
+    answered ``set: true`` and a directory that comes back up without the file. Best effort:
+    a filesystem that refuses to open a directory is not a reason to fail a write that has
+    already landed.
+    """
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError:  # pragma: no cover — every filesystem steward runs on allows this
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:  # pragma: no cover — same
+        pass
+    finally:
+        os.close(descriptor)

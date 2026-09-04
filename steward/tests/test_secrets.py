@@ -132,6 +132,18 @@ def test_an_unreadable_file_reads_as_unset_rather_than_raising(tmp_path: Path) -
         path.chmod(0o600)
 
 
+def test_a_symlink_is_not_a_secret(tmp_path: Path) -> None:
+    """``valid_name`` is meant to be the only way in, and a link does not go through it."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.write_text("borrowed", encoding="utf-8")
+    directory = tmp_path / "secrets"
+    directory.mkdir()
+    (directory / "STEWARD_CHAT_TOKEN_HOB").symlink_to(elsewhere)
+
+    assert sec.secret_names(directory) == []
+    assert sec.read_secret("STEWARD_CHAT_TOKEN_HOB", env={}, directory=directory) is None
+
+
 # -- the overlay -----------------------------------------------------------------------
 
 

@@ -18,6 +18,7 @@ could set ``STEWARD_CHAT_TOKEN_DISCORD_PIP`` could take Pip's identity, which is
 ``app_grants`` exists to prevent.
 """
 
+import os
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -27,6 +28,7 @@ from steward import chat as ch
 from steward import events as ev
 from steward import secrets as sec
 from steward.manifest import validate_path
+from steward.routes.auth import session_of
 from steward.routes.deps import Deps, _Body, _refuse
 
 #: Where a set secret was found. ``file`` is the secrets directory this endpoint writes to;
@@ -77,20 +79,48 @@ def router(deps: Deps) -> APIRouter:
         return found
 
     @routes.get("/secrets")
-    def list_secrets() -> dict[str, Any]:
+    def list_secrets(request: Request) -> dict[str, Any]:
         """List every credential slot, whether it is filled, and which route wants it.
 
+        Human callers only, unlike almost every other read in this API. A ``GET`` is safe
+        by method and a session credential reaches every safe method, so the refusal has to
+        be made here rather than by the gate — and it is worth making: no value is exposed,
+        but the *inventory* is. One resident could otherwise enumerate which slot carries
+        every other resident's identity and which of them are filled, which is the shape of
+        knowledge ``app_grants`` exists to keep on the human side.
+
         Three sources of names, unioned: the slots declared chat routes ask for, the files
-        in the secrets directory, and the ``STEWARD_CHAT_TOKEN_*`` variables still in this
+        in the secrets directory, and the ``STEWARD_CHAT_TOKEN_*`` variables in this
         process's environment. A slot no route claims is listed all the same — that is what
         a half-finished provisioning looks like, and hiding it would hide the thing an
         operator came here to see.
         """
+        if session_of(request) is not None:
+            _refuse(
+                403,
+                "session_credential_forbidden",
+                "which credentials the fleet holds is an operator's inventory; a session "
+                "that could read it would learn which slot carries every other resident's "
+                "identity, and which of them are filled",
+            )
         directory = sec.secrets_dir()
         wanted = claims()
-        on_disk = set(sec.secret_names(directory))
-        in_env = {name for name in ch.token_env_names() if name not in on_disk}
-        names = sorted(set(wanted) | on_disk | in_env)
+        # Set means *has a value*, never merely "the name exists". The burrow's compose file
+        # exports every declared token as ``${NAME:-}``, so on the machine this endpoint
+        # actually runs on every unwired bot has an empty variable — and a listing that
+        # counted those as set would tell an operator the one thing they came to disprove.
+        on_disk = {
+            name
+            for name in sec.secret_names(directory)
+            if sec.read_secret(name, env={}, directory=directory) is not None
+        }
+        environment = {
+            name: value
+            for name, value in os.environ.items()
+            if name.startswith(ch.TOKEN_ENV_PREFIX)
+        }
+        in_env = {name for name, value in environment.items() if value.strip()} - on_disk
+        names = sorted(set(wanted) | on_disk | set(environment) | set(sec.secret_names(directory)))
         return {
             "directory": str(directory),
             "secrets": [
@@ -114,14 +144,19 @@ def router(deps: Deps) -> APIRouter:
         happened under. The name is echoed because the caller chose it; the value is not,
         because a response body is the easiest thing in this system to end up in a log.
         """
+        if not sec.valid_name(name):
+            # Refused without quoting what was refused: a caller who pastes the token into
+            # the *name* would otherwise have it reflected straight back in the body.
+            _refuse(
+                422,
+                "invalid_secret_name",
+                "that is not a secret name; a name is an environment variable name — upper "
+                "case, digits and underscores, as in STEWARD_CHAT_TOKEN_DISCORD_HOB",
+            )
         try:
             sec.write_secret(name, body.value, directory=sec.secrets_dir())
         except sec.SecretError as error:
-            _refuse(
-                422,
-                "invalid_secret_name" if not sec.valid_name(name) else "invalid_secret_value",
-                str(error),
-            )
+            _refuse(422, "invalid_secret_value", str(error))
         # The name, and only the name, in both places a person can read afterwards. The
         # request log gets no body: ``deps.accept`` writes whatever detail it is handed
         # straight into ``steward.db``, and the body is the credential.

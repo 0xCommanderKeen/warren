@@ -1774,16 +1774,7 @@ class ChatBridge:
             self.transports = {self.transport.name: self.transport}
         if not self.operators_by_transport:
             self.operators_by_transport = {self.transport.name: self.operators}
-        for route in self.routes:
-            token = self.tokens.get(route.address.token_env)
-            listen = getattr(self.transports.get(route.address.transport), "listen", None)
-            if (
-                token
-                and route.route.listens_in
-                and callable(listen)
-                and not listen(token, route.route.listens_in)
-            ):
-                log.warning("%s: Discord listen channels could not be resolved", route.key)
+        self._register_listeners()
         if self.claims is None:
             self.claims = ResidentClaims(self.store)
         self.knocks = KnockLimiter(self.catchup_s)
@@ -1798,6 +1789,27 @@ class ChatBridge:
             emitter=self.emitter,
         )
         self.run_transitions = RunTransitions(self.store)
+
+    def _register_listeners(self) -> None:
+        """Tell each transport which rooms this bridge listens in, with which token.
+
+        Not a query: :meth:`DiscordTransport.listen` *stores* the bot id and the resolved
+        channel ids, and a route whose channels were never resolved polls nowhere. It runs
+        at construction and again on every reload (warren#462), because the whole point of a
+        reload is the case where neither the route nor its token existed at construction —
+        a Discord bot declared with ``listens_in`` and tokened through ``PUT /secrets/{name}``
+        would otherwise pass its identity check, report itself reachable, and hear nothing.
+        """
+        for route in self.routes:
+            token = self.tokens.get(route.address.token_env)
+            listen = getattr(self.transports.get(route.address.transport), "listen", None)
+            if (
+                token
+                and route.route.listens_in
+                and callable(listen)
+                and not listen(token, route.route.listens_in)
+            ):
+                log.warning("%s: Discord listen channels could not be resolved", route.key)
 
     @classmethod
     def from_path(  # noqa: PLR0913 — every knob is keyword-only and independently useful
@@ -1830,6 +1842,13 @@ class ChatBridge:
                 "cannot open a chat bridge over an invalid residents tree:\n"
                 + "\n".join(d.render() for d in result.errors)
             )
+        # The raw mapping, not the secrets overlay: what the transports and the operator
+        # list read from it are *settings* — an API base URL, a guild id, who steward
+        # answers — and none of them is a credential, so none of them belongs in a directory
+        # of credentials. The tokens are the exception and they read through
+        # :func:`tokens_from_env`, freshly, on every call — which is what lets ``reload``
+        # below pick up a file written after this process started (warren#462). Pre-mixing
+        # the two here would freeze the tokens at construction and undo that.
         source = os.environ if env is None else env
         if transport is not None and transports is not None:
             raise TypeError("pass transport or transports, not both")
@@ -1939,7 +1958,8 @@ class ChatBridge:
         # would hand the next session a different object for no reason.
         self.sessions.residents = tuple(route.resident for route in fresh.routes)
         self.sessions.library = fresh.library
-        live = {route.key for route in self.carried()}
+        self._register_listeners()
+        live = {route.key for route in self.routes}
         for key in [key for key in self._health if key not in live]:
             # A door that is no longer declared has no health to report. Left behind, it
             # would keep ``run`` awake believing something reachable still exists.

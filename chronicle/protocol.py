@@ -280,6 +280,12 @@ def _validate_discord_event(event):
     return None
 
 
+#: How long a credential slot's name may be here. Steward's own grammar bounds it at 128,
+#: and this is the gate for everything that is not steward — a name is an environment
+#: variable name, so anything longer is a payload pretending to be one.
+_SECRET_NAME_MAX = 128
+
+
 def _validate_secret_written(event):
     """A credential slot was filled. The name, and nothing else, ever.
 
@@ -290,7 +296,8 @@ def _validate_secret_written(event):
     payload = event["payload"]
     if set(payload) != {"secret"}:
         return "invalid secret fields"
-    if not _nonempty_text(payload.get("secret")):
+    name = payload.get("secret")
+    if not _nonempty_text(name) or len(name) > _SECRET_NAME_MAX:
         return "invalid payload.secret"
     return None
 

@@ -85,7 +85,11 @@ curl -sS "$STEWARD_URL/secrets" -H "Authorization: Bearer $STEWARD_TOKEN"   # na
 ```
 
 Within five minutes the chat daemon re-reads the directory and the route comes up — no
-`--force-recreate`, and no shell on the burrow. Nothing reads a value back out: there is no
+`--force-recreate`, and no shell on the burrow. The files land as `root:root` mode 0600,
+because the control-plane containers run as root: the deploy user owns the directory but
+cannot read what is inside it, so `tar`-ing `~/docker/warren/steward` as that user backs up
+the names and not the values. That is the intended shape — a credential written through the
+API is not one the shell is meant to read back — and `sudo` is how a person takes one out. Nothing reads a value back out: there is no
 `GET /secrets/{name}`, and unsetting a credential is still `rm` on the burrow followed by a
 restart of whatever held it.
 

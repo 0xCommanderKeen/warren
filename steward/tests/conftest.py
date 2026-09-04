@@ -144,7 +144,7 @@ def isolated_notifications(monkeypatch: pytest.MonkeyPatch) -> str:
 
 
 @pytest.fixture(autouse=True)
-def isolated_chat(monkeypatch: pytest.MonkeyPatch) -> str:
+def isolated_chat(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> str:
     """Point the chat bridge at a bot API that is not there, and give it no bots.
 
     Autouse and unconditional, exactly like :func:`isolated_notifications` and for a sharper
@@ -160,6 +160,11 @@ def isolated_chat(monkeypatch: pytest.MonkeyPatch) -> str:
     """
     monkeypatch.setenv("STEWARD_CHAT_API_URL", "http://127.0.0.1:1")
     monkeypatch.setenv("STEWARD_CHAT_POLL_TIMEOUT_S", "0")
+    # And the secrets directory, for the same reason one line down (warren#462): a token now
+    # resolves from a file before it resolves from a variable, and the default directory is
+    # an absolute path that a burrow really has. A suite that fell back to it would read the
+    # machine's live credentials on the one host where the tests matter most.
+    monkeypatch.setenv("STEWARD_SECRETS_DIR", str(tmp_path / "no-secrets-here"))
     monkeypatch.delenv("STEWARD_CHAT_OPERATORS", raising=False)
     for name in [key for key in os.environ if key.startswith("STEWARD_CHAT_TOKEN_")]:
         monkeypatch.delenv(name, raising=False)
