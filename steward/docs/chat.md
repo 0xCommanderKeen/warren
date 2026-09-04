@@ -293,13 +293,14 @@ delivery to land. Field rules are in [manifest.md](manifest.md#deliver-chat-and-
 ## Explicitly not in v0
 
 - **`needs_human` and task completions pushed into the chat.** Those are *notifications* —
-  one-way, nothing listens for a reply — and they already have a channel
-  ([warren#114](../src/steward/notify.py), ntfy). The bridge itself only ever speaks when
+  one-way, nothing listens for a reply — and the Discord notification transport sends those
+  knocks through the fleet webhook ([warren#418](../src/steward/notify.py)). The bridge itself only ever speaks when
   spoken to; a delivered routine is the scheduler speaking, through the bridge's egress.
 - **Approval buttons.** An approval is an authorisation, and "who pressed it" is a security
   question a v0 chat channel has no honest answer to.
-- **Discord, or any second transport.** The seam is a `ChatTransport` protocol with two
-  methods, so a second one is a class rather than a rewrite. There is no second one.
+- **Discord chat, or any second chat transport.** The notification webhook above is one-way;
+  it is not a Discord conversation. The seam is a `ChatTransport` protocol with two methods,
+  so a second chat transport is a class rather than a rewrite. There is no second one.
 - **Editing, reactions, photos, voice notes.** `allowed_updates: ["message"]`, text only;
   anything else is ignored rather than half-answered.
 - **A conversation the resident starts.** A delivered routine is a message the *manifest*

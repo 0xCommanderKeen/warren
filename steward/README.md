@@ -755,6 +755,7 @@ the scheduler and the API name the ones they need on startup.
 | `STEWARD_PUSH_REMOTE` | API | The remote that branch is on. Defaults to `origin`, which is what a `git clone` calls it; read only when `STEWARD_PUSH_BRANCH` is set. |
 | `STEWARD_MAX_DELEGATION_DEPTH` | delegation | How deep a chain of delegated work may run before steward refuses (default 3). `0` is the fleet-wide kill switch. |
 | `STEWARD_REPEAT_DENY_WINDOW_H` | approvals | Whole hours a `deny` goes on answering the same `(resident, action)` a session raises, so a looping resident cannot knock on every wake-up (default 12). `0` is the kill switch: every repeat knocks again. Anything that is not a whole number ≥ 0 is logged as a misconfiguration and the default is used. Steward's own knocks are never guarded — see [docs/approvals.md](docs/approvals.md). |
+| `STEWARD_NOTIFY_DISCORD_WEBHOOK` | notifications | Discord fleet webhook for residents declaring `notifications.transport: discord`. One-way only; each payload uses the resident's soul name as its username. |
 | `STEWARD_NTFY_URL` | notifications | The ntfy server outbound taps are POSTed to. Defaults to `https://ntfy.sh`, which is safe because the topic is derived and unguessable — point it at a self-hosted instance to keep even that off the public internet. |
 | `STEWARD_NTFY_TOKEN` | notifications | Bearer token for a protected ntfy instance. Optional, and never in a manifest. |
 | `STEWARD_NTFY_TIMEOUT_S` | notifications | How long one tap may take (default 2s). A tap is a courtesy; it may not cost a run. |

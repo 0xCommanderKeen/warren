@@ -51,6 +51,14 @@ def tapping(
     )
 
 
+def tapping_discord(*on: str, **overrides: object) -> ResidentManifest:
+    """Build a manifest that sends its taps through the fleet Discord webhook."""
+    return manifest(
+        notifications={"transport": "discord", "on": list(on) or ["needs_human"]},
+        **overrides,
+    )
+
+
 def needs_human(**payload: Any) -> ev.Event:  # noqa: ANN401 — one payload field per keyword
     """Build the knock the approval transition emits."""
     return ev.needs_human_event(
@@ -347,6 +355,75 @@ def test_an_untokened_transport_sends_no_authorization(
     assert "test" in seen[0]["body"]
 
 
+# ------------------------------------------------------------------ the Discord transport
+
+
+def test_a_reachable_discord_webhook_gets_content_and_the_residents_soul_name(
+    ntfy_server: tuple[str, list[dict[str, Any]]],
+) -> None:
+    url, seen = ntfy_server
+    resident = tapping_discord()
+    tap = nf.tap_for(resident, needs_human())
+    assert tap is not None
+
+    assert nf.DiscordTransport(webhook_url=url).send(resident, tap) is True
+
+    request = seen[0]
+    assert request["path"] == "/"
+    assert request["headers"]["Content-Type"] == "application/json; charset=utf-8"
+    assert json.loads(request["body"]) == {
+        "content": f"{tap.title}\n{tap.body}",
+        "username": "Testy",
+    }
+
+
+def test_discord_redacts_then_caps_content_at_its_message_limit(
+    ntfy_server: tuple[str, list[dict[str, Any]]],
+) -> None:
+    url, seen = ntfy_server
+    resident = tapping_discord()
+    secret = "sk-ant-api03-" + "A" * 60
+    tap = nf.Tap(kind="test", title=f"title {secret}", body="z" * 5_000)
+
+    assert nf.DiscordTransport(webhook_url=url).send(resident, tap) is True
+
+    content = json.loads(seen[0]["body"])["content"]
+    assert len(content) <= nf.DISCORD_CONTENT_MAX_CHARS
+    assert "sk-ant-api03" not in content
+    assert content.startswith(f"title {SECRET_REDACTION}\n")
+
+
+def test_an_unreachable_discord_is_a_false_and_a_log_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    resident = tapping_discord()
+    transport = nf.DiscordTransport(webhook_url="http://127.0.0.1:1")
+    with caplog.at_level(logging.WARNING, logger="steward.notify"):
+        assert transport.send(resident, nf.probe_tap(resident)) is False
+    assert "could not tap" in caplog.text
+    assert "discord" in caplog.text
+    assert resident.id in caplog.text
+
+
+def test_a_failed_discord_send_stops_trying_for_a_while(
+    ntfy_server: tuple[str, list[dict[str, Any]]],
+) -> None:
+    url, seen = ntfy_server
+    now = 0.0
+    resident = tapping_discord()
+    transport = nf.DiscordTransport(webhook_url="http://127.0.0.1:1", clock=lambda: now)
+    tap = nf.probe_tap(resident)
+
+    assert transport.send(resident, tap) is False
+    transport.webhook_url = url
+    now = nf.BREAKER_SECONDS - 1.0
+    assert transport.send(resident, tap) is False
+    assert seen == []
+    now = nf.BREAKER_SECONDS + 1.0
+    assert transport.send(resident, tap) is True
+    assert len(seen) == 1
+
+
 def test_an_unreachable_ntfy_is_a_false_and_a_log_line_and_nothing_else(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -445,6 +522,15 @@ def test_from_env_reads_the_process_environment_when_given_nothing(
         .address(tapping())
         .startswith("https://ntfy.example/steward-")
     )
+
+
+def test_from_env_adds_discord_only_when_the_fleet_webhook_is_configured() -> None:
+    assert nf.DISCORD not in nf.Notifier.from_env({}).transports
+    notifier = nf.Notifier.from_env({nf.DISCORD_WEBHOOK_ENV: "https://discord.example/hook"})
+    transport = notifier.transports[nf.DISCORD]
+    assert isinstance(transport, nf.DiscordTransport)
+    assert transport.webhook_url == "https://discord.example/hook"
+    assert "discord.example" not in transport.address(tapping_discord())
 
 
 # ------------------------------------------------------------------ whether to send
@@ -549,7 +635,7 @@ def test_describe_still_shows_the_address_of_a_block_being_wired_up(
 def test_the_manifest_kinds_are_the_event_types_they_claim_to_be() -> None:
     """``manifest`` cannot import ``events`` (events imports it), so the strings are checked."""
     assert NOTIFICATION_KINDS == (ev.NEEDS_HUMAN, ev.TASK_DONE)
-    assert set(NOTIFICATION_TRANSPORTS) == {nf.NTFY}
+    assert set(NOTIFICATION_TRANSPORTS) == {nf.NTFY, nf.DISCORD}
     assert set(nf._RENDERERS) == set(NOTIFICATION_KINDS)
 
 

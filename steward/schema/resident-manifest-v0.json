@@ -467,7 +467,10 @@
         "transport": {
           "anyOf": [
             {
-              "const": "ntfy",
+              "enum": [
+                "ntfy",
+                "discord"
+              ],
               "type": "string"
             },
             {

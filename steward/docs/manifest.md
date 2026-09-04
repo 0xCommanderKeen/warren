@@ -841,7 +841,7 @@ The grammar a session writes, the guardrails, and the lineage model are in
 
 ```yaml
 notifications:
-  transport: ntfy            # the only transport today; absent means this resident taps nobody
+  transport: discord         # ntfy | discord; absent means this resident taps nobody
   on: [needs_human]          # needs_human | task_done
   status: active             # active | pending | disabled
   note: Miha's phone         # a label, never an address
@@ -862,7 +862,9 @@ dimension beside `board`, `delegation` and `budgets` rather than a ninth route k
 manifest with no `notifications` block taps nobody, however loudly its resident knocks.
 Declaring a `transport` is the whole opt-in.
 
-**There is no address field, and that is deliberate.** An ntfy topic is *derived* from the
+**There is no address field, and that is deliberate.** Discord uses the fleet webhook from
+`STEWARD_NOTIFY_DISCORD_WEBHOOK`; its `username` is the resident's soul name, so one shared
+channel still says who knocked. An ntfy topic is *derived* from the
 resident's [`uid`](#top-level):
 
 ```
@@ -890,8 +892,9 @@ $ steward notify list                 # every resident: transport, kinds, and th
 $ steward notify test hob      # send one harmless tap and say whether it landed
 ```
 
-**No secrets, here or anywhere.** The ntfy server and its optional token are steward's own
-environment — `STEWARD_NTFY_URL` (default `https://ntfy.sh`), `STEWARD_NTFY_TOKEN`,
+**No secrets, here or anywhere.** The Discord webhook and the ntfy server and optional token
+are steward's own environment — `STEWARD_NOTIFY_DISCORD_WEBHOOK`, `STEWARD_NTFY_URL`
+(default `https://ntfy.sh`), `STEWARD_NTFY_TOKEN`,
 `STEWARD_NTFY_TIMEOUT_S`, and `STEWARD_NOTIFY_NAMESPACE`, which keeps two installations
 reading the same `residents/` tree (a laptop checkout and the NAS) off each other's phones.
 A manifest declares *that* a resident taps, never how to authenticate as one.
