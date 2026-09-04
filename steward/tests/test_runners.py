@@ -16,6 +16,7 @@ from typing import Literal
 import pytest
 
 from conftest import StubWriter
+from steward import deploy, events
 from steward import runners as r
 from steward.manifest import PermissionMode, ToolGrant
 from steward.manifest import Runner as RunnerSpec
@@ -990,6 +991,154 @@ def test_nothing_is_probed_for_a_placement_steward_did_not_build(
     monkeypatch.delenv(r.SESSION_EMITTER_ENV, raising=False)
 
     assert r.check_session_emitter(r.LOCAL_PLACEMENT) is None
+
+
+# --------------------------------- whether what a hook posts can be delivered (warren#449)
+
+
+EMITTER = "/opt/village/chronicle-emit.py"
+
+
+@pytest.fixture
+def local_emitter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Place a session locally with hooks that fire — the placement #449 is about."""
+    monkeypatch.setenv(r.SESSION_EMITTER_ENV, EMITTER)
+    monkeypatch.delenv(r.SESSION_ENV_PASSTHROUGH_ENV, raising=False)
+
+
+@pytest.mark.usefixtures("local_emitter")
+def test_a_local_session_that_cannot_authenticate_to_the_village_is_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The failure with no symptom: hooks fire, the outbox grows, the village stays empty.
+
+    A 401 is just another failed POST to the emitter, so nothing is lost and nothing
+    arrives — and the file it journals to is not the one `steward events flush` drains.
+    Both halves have to be in the line, or an operator reading it goes looking in the
+    wrong queue.
+    """
+    monkeypatch.setenv(r.CHRONICLE_TOKEN_ENV, "shared-ingest-secret")
+    monkeypatch.setenv(r.CHRONICLE_URL_ENV, "http://dxp2800:8737")
+
+    complaint = r.check_session_ingest(r.LOCAL_PLACEMENT)
+
+    assert complaint is not None
+    assert "http://dxp2800:8737" in complaint
+    assert "401" in complaint
+    assert "~/.chronicle/events.jsonl" in complaint
+    assert "steward events flush" in complaint
+    assert r.SESSION_ENV_PASSTHROUGH_ENV in complaint
+    assert "shared-ingest-secret" not in complaint
+
+
+@pytest.mark.usefixtures("local_emitter")
+def test_an_open_village_is_not_complained_about(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Where this host holds no ingest token the village wants none, and the events land.
+
+    The condition is deliberately the token *this host* holds rather than a probe of
+    somebody else's server: it is the same secret `deploy` writes into every resident's
+    `.env` and the same one steward's own emitter posts with, so an unset one is this
+    operator's own answer about their village.
+    """
+    monkeypatch.delenv(r.CHRONICLE_TOKEN_ENV, raising=False)
+
+    assert r.check_session_ingest(r.LOCAL_PLACEMENT) is None
+
+    monkeypatch.setenv(r.CHRONICLE_TOKEN_ENV, "   ")
+
+    assert r.check_session_ingest(r.LOCAL_PLACEMENT) is None
+
+
+@pytest.mark.usefixtures("local_emitter")
+def test_the_operator_hatch_ends_the_complaint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operator who took the trade knowingly is not warned about taking it.
+
+    This is the assertion that keeps the line honest rather than merely loud: naming
+    `CHRONICLE_TOKEN` in the passthrough really does deliver the events, and a warning that
+    survived the fix would train an operator to ignore it.
+    """
+    monkeypatch.setenv(r.CHRONICLE_TOKEN_ENV, "shared-ingest-secret")
+
+    assert r.check_session_ingest(r.LOCAL_PLACEMENT) is not None
+
+    monkeypatch.setenv(r.SESSION_ENV_PASSTHROUGH_ENV, f" {r.CHRONICLE_TOKEN_ENV} ,SSH_AUTH_SOCK")
+
+    assert r.check_session_ingest(r.LOCAL_PLACEMENT) is None
+
+
+def test_a_container_placed_session_is_authenticated_by_its_own_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`docker exec` runs the session in the container's environment, which has the token.
+
+    Measured 2026-09-04 against docker 27.3.1 and recorded in #449: `render_compose` writes
+    `CHRONICLE_URL` and `CHRONICLE_TOKEN` into every resident's service, so a provisioned
+    resident's hooks are already authenticated. Warning about it would be a false alarm on
+    every live resident there is.
+    """
+    monkeypatch.setenv(r.CHRONICLE_TOKEN_ENV, "shared-ingest-secret")
+
+    assert r.check_session_ingest(PLACED) is None
+    assert r.session_emitter_outbox(PLACED) is None
+
+
+def test_a_session_with_no_hooks_has_nothing_to_deliver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No emitter, no hooks, no events — and so nothing to say about their delivery."""
+    monkeypatch.setenv(r.CHRONICLE_TOKEN_ENV, "shared-ingest-secret")
+    monkeypatch.delenv(r.SESSION_EMITTER_ENV, raising=False)
+
+    assert r.check_session_ingest(r.LOCAL_PLACEMENT) is None
+    assert r.session_emitter_outbox(r.LOCAL_PLACEMENT) is None
+
+
+@pytest.mark.usefixtures("local_emitter")
+def test_the_outbox_reads_itself_through_the_emitters_own_status_flag(
+    stub_bin: StubWriter,
+) -> None:
+    """The evidence half: what the outbox says, not what two variables imply.
+
+    `--status` is the emitter's own flag and it opens one JSON file, which is why the probe
+    is cheap enough for a report to make.
+    """
+    log = stub_bin(
+        "python3", 'echo "$@" >> "$(dirname "$0")/ARGS"; echo "chronicle emitter outbox: stalled"'
+    )
+
+    assert r.session_emitter_outbox(r.LOCAL_PLACEMENT) == "chronicle emitter outbox: stalled"
+    assert (log.parent / "ARGS").read_text(encoding="utf-8").strip() == f"{EMITTER} --status"
+
+
+@pytest.mark.usefixtures("local_emitter")
+def test_an_emitter_that_cannot_be_asked_costs_the_evidence_and_not_the_report(
+    stub_bin: StubWriter,
+) -> None:
+    """An old emitter without the flag, a bad path, a hang: all just "no reading".
+
+    The complaint stands on its own without it, and a doctor that raised over a diagnostic
+    probe would be a report that fails when the thing it reports on fails.
+    """
+    stub_bin("python3", "echo 'unknown option' >&2; exit 2")
+
+    assert r.session_emitter_outbox(r.LOCAL_PLACEMENT) is None
+
+    stub_bin("python3", "echo ''")
+
+    assert r.session_emitter_outbox(r.LOCAL_PLACEMENT) is None
+
+
+def test_one_spelling_of_the_villages_two_variable_names() -> None:
+    """Three modules read `CHRONICLE_URL`/`CHRONICLE_TOKEN`; a second spelling is a drift.
+
+    `runners` compares the names against what a session inherits, `deploy` writes them into
+    a resident's `.env`, and `events` posts with them. If those ever named different
+    variables, `check_session_ingest` would be reasoning about a token nobody uses.
+    """
+    assert deploy.CHRONICLE_URL_ENV is r.CHRONICLE_URL_ENV
+    assert deploy.CHRONICLE_TOKEN_ENV is r.CHRONICLE_TOKEN_ENV
+    assert events.URL_ENV == r.CHRONICLE_URL_ENV
+    assert events.TOKEN_ENV == r.CHRONICLE_TOKEN_ENV
 
 
 # ------------------------------------------- what a brain may claim it spent (steward #129)

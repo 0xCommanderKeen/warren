@@ -570,6 +570,14 @@ rather than being lost — but it is not in the village.
   and their choice to make); per-resident ingest credentials are the real answer and are
   their own issue.
 
+  **`steward doctor` says so when it is true** (warren#449). Where this host holds a
+  `CHRONICLE_TOKEN` — the same one `deploy` writes into every resident's `.env`, so an unset
+  one is this operator's own answer about their village — and a locally placed resident's
+  session will not inherit it, doctor prints a yellow line naming the village, the 401, the
+  outbox that fills, and both ways out, with the emitter's own `--status` reading appended so
+  it says how long rather than only whether. Yellow and uncounted: the trade is legitimately
+  the operator's to make, but it may not be made by accident.
+
 ## `workspace` — where a session may act
 
 ```yaml

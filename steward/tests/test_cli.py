@@ -617,6 +617,77 @@ def test_doctor_says_when_a_local_placement_has_no_emitter_to_run(
     )
 
 
+def test_doctor_says_when_a_local_sessions_events_cannot_be_delivered_from_here(
+    runner: CliRunner,
+    stub_bin: StubWriter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    write_resident: ResidentWriter,
+) -> None:
+    """Hooks that fire are half the answer; whether they deliver is the other (warren#449).
+
+    A locally placed session inherits no `CHRONICLE_TOKEN`, so against a token-guarded
+    village every per-session event 401s and journals to an outbox nothing drains. Without
+    this line the symptom is an empty village three days later. Yellow and uncounted — the
+    operator may have chosen it — but never silent, and carrying the outbox's own reading
+    so it says *how long* rather than only *whether*.
+    """
+    stub_bin("claude", CURRENT_CLAUDE)
+    emitter = tmp_path / "chronicle-emit.py"
+    emitter.write_text("", encoding="utf-8")
+    stub_bin("python3", 'echo "chronicle emitter outbox: stalled; 41/500 queued"')
+    monkeypatch.setenv("STEWARD_SESSION_EMITTER", str(emitter))
+    monkeypatch.setenv("CHRONICLE_URL", "http://dxp2800:8737")
+    monkeypatch.setenv("CHRONICLE_TOKEN", "shared-ingest-secret")
+    monkeypatch.delenv("STEWARD_SESSION_ENV_PASSTHROUGH", raising=False)
+    monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state.json"))
+    manifest = write_resident({**valid_manifest(), "id": "local"}, directory="local")
+
+    result = runner.invoke(
+        main, ["doctor", str(manifest.parent.parent), "--db", str(tmp_path / "steward.db")]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert f"local: per-session events via {emitter}" in result.output
+    assert "rejected 401" in result.output
+    assert "~/.chronicle/events.jsonl" in result.output
+    assert "chronicle emitter outbox: stalled; 41/500 queued" in result.output
+    # The secret itself is never a thing a report prints.
+    assert "shared-ingest-secret" not in result.output
+
+
+def test_doctor_stays_quiet_about_delivery_when_the_village_wants_no_token(
+    runner: CliRunner,
+    stub_bin: StubWriter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    write_resident: ResidentWriter,
+) -> None:
+    """The warning has to be able to *not* fire, or it is decoration rather than a report.
+
+    Where this host holds no ingest token the village wants none and the hook events land,
+    so there is nothing to warn about and the emitter is never even asked for its outbox.
+    """
+    stub_bin("claude", CURRENT_CLAUDE)
+    emitter = tmp_path / "chronicle-emit.py"
+    emitter.write_text("", encoding="utf-8")
+    stub_bin("python3", 'echo "chronicle emitter outbox: stalled; 41/500 queued"')
+    monkeypatch.setenv("STEWARD_SESSION_EMITTER", str(emitter))
+    monkeypatch.setenv("CHRONICLE_URL", "http://localhost:8737")
+    monkeypatch.delenv("CHRONICLE_TOKEN", raising=False)
+    monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state.json"))
+    manifest = write_resident({**valid_manifest(), "id": "local"}, directory="local")
+
+    result = runner.invoke(
+        main, ["doctor", str(manifest.parent.parent), "--db", str(tmp_path / "steward.db")]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert f"local: per-session events via {emitter}" in result.output
+    assert "rejected 401" not in result.output
+    assert "chronicle emitter outbox" not in result.output
+
+
 @pytest.mark.usefixtures("on_operator_burrow")
 def test_doctor_is_red_when_the_container_has_no_emitter_to_run(
     runner: CliRunner, stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

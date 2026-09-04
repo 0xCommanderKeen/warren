@@ -85,7 +85,9 @@ from steward.runners import (
     check_cli_support,
     check_runner,
     check_session_emitter,
+    check_session_ingest,
     session_emitter,
+    session_emitter_outbox,
     skills_home,
 )
 from steward.scheduler import (
@@ -549,6 +551,17 @@ def _report_telemetry(resident: Resident, placement: Placement) -> int:
     `|| true` so that a missing emitter costs telemetry rather than denying every tool
     call, which means the resident runs, looks healthy, and says nothing.
 
+    A third line, yellow and uncounted, is the one warren#449 added: an emitter that is
+    there and hooks that fire still leave the second question open, which is whether what
+    they post can be *delivered* from here. A local session inherits no `CHRONICLE_TOKEN`,
+    so against a token-guarded village every per-session event 401s into an outbox nothing
+    drains — the hooks fire, the outbox grows, the village stays empty, and until this line
+    nothing anywhere said why. Uncounted for the same reason quiet is: an operator may
+    legitimately run a local resident against a guarded village and read its events out of
+    the outbox by hand, and `doctor` exiting non-zero over a choice somebody made would
+    make the exit status mean less, not more. It is the outbox reading appended to it that
+    makes it more than a warning — see :func:`~steward.runners.session_emitter_outbox`.
+
     Only `claude` residents are answerable at all. Which flags a session carries is
     `required_flags`' question, and it answers `()` for every other kind — a `codex` or
     `command` session is never handed a settings document, so a line about its hooks would
@@ -575,6 +588,14 @@ def _report_telemetry(resident: Resident, placement: Placement) -> int:
     # the difference between a report and an assertion.
     where = "" if placement.is_container else f" (${SESSION_EMITTER_ENV}, read here)"
     click.secho(f"{resident.id}: per-session events via {emitter}{where}", fg="bright_black")
+    undeliverable = check_session_ingest(placement)
+    if undeliverable:
+        outbox = session_emitter_outbox(placement)
+        click.secho(
+            f"{resident.id}: per-session events — {undeliverable}"
+            + (f"; {outbox}" if outbox else ""),
+            fg="yellow",
+        )
     return 0
 
 

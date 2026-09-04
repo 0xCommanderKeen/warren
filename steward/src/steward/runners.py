@@ -67,6 +67,8 @@ from steward.session_auth import SESSION_TOKEN_ENV
 __all__ = [
     "CHRONICLE_HOOKS",
     "CHRONICLE_MIRROR_ENV",
+    "CHRONICLE_TOKEN_ENV",
+    "CHRONICLE_URL_ENV",
     "CONTAINER_EMITTER",
     "COST_USD_MAX",
     "LOCAL_PLACEMENT",
@@ -93,10 +95,12 @@ __all__ = [
     "check_cli_support",
     "check_runner",
     "check_session_emitter",
+    "check_session_ingest",
     "hook_settings",
     "required_flags",
     "run_argv",
     "session_emitter",
+    "session_emitter_outbox",
     "session_environment",
     "skills_home",
     "substitute",
@@ -249,12 +253,17 @@ SESSION_ENV_PASSTHROUGH_ENV = "STEWARD_SESSION_ENV_PASSTHROUGH"
 #: ``CHRONICLE_TOKEN`` is not in this set, and that is a narrower statement than it looks.
 #: It is off the default allowlist for its own reason — one shared ingest secret whose
 #: holder can post events as any ``agent_id`` — and a session should not be given it. What
-#: a session loses without it is nothing durable: the emitter queues its events in
-#: ``events.jsonl.pending`` and a control-plane ``steward events flush`` delivers them under
-#: the control plane's own credential, so the events arrive either way. Naming it here is
-#: therefore an operator buying *live* emission at the price of that shared secret, and
-#: steward does not refuse it only because the choice is legitimately theirs to get wrong.
-#: Per-resident ingest credentials are the real answer, and are their own issue.
+#: a session loses without it depends on the village, and it is *not* nothing: against an
+#: open village the hook events land anyway, and against a token-guarded one every one of
+#: them is a 401 and journals to the hook emitter's own ``~/.chronicle/events.jsonl``.
+#: Nothing drains that file — ``steward events flush`` drains steward's *own* emitter's
+#: ``events.jsonl.pending``, a different queue under a different owner — so those events are
+#: neither lost nor delivered (warren#449). Naming it here is therefore an operator buying
+#: *live* emission at the price of that shared secret, and steward does not refuse it only
+#: because the choice is legitimately theirs to get wrong. What steward does instead is
+#: refuse to let the trade happen by accident: :func:`check_session_ingest` is where
+#: ``steward doctor`` gets the line that says a local session's events cannot be delivered
+#: from here. Per-resident ingest credentials are the real answer, and are their own issue.
 SESSION_ENV_REFUSED = frozenset({"STEWARD_TOKEN", SESSION_TOKEN_ENV})
 
 
@@ -503,6 +512,19 @@ SESSION_EMITTER_ENV = "STEWARD_SESSION_EMITTER"
 #: running on a machine that *does* have a chronicle dev server on 8737, where every
 #: production session would quietly duplicate its events into somebody's scratch village.
 CHRONICLE_MIRROR_ENV = "CHRONICLE_MIRROR"
+
+#: Where the village is, and the secret that gets in. Both are read here rather than only
+#: in :mod:`steward.deploy` because this module decides what a *session* is told, and
+#: :func:`check_session_ingest` needs to compare the two. ``deploy`` imports these names
+#: from here so there is one spelling of each; ``tests/test_runners.py`` holds them
+#: together with :mod:`steward.events`' own pair.
+CHRONICLE_URL_ENV = "CHRONICLE_URL"
+CHRONICLE_TOKEN_ENV = "CHRONICLE_TOKEN"  # noqa: S105 — a variable name, not a credential
+
+#: How long the emitter's own ``--status`` may take before doctor stops waiting. It reads
+#: one small JSON file and prints one line; a probe that hangs is a report that hangs, and
+#: this one is evidence attached to a warning rather than the warning itself.
+EMITTER_STATUS_TIMEOUT_S = 5.0
 
 
 def session_emitter(
@@ -1600,6 +1622,94 @@ def check_session_emitter(placement: Placement) -> str | None:
         f"{emitter} is not in {placement.container_name} — this resident's sessions run "
         f"and emit nothing; re-ship the image and re-provision"
     )
+
+
+def check_session_ingest(
+    placement: Placement, *, inherited: Mapping[str, str] | None = None
+) -> str | None:
+    """Return why a local session's hook events cannot be *delivered*, or ``None``.
+
+    :func:`check_session_emitter` asks whether the hooks fire. This asks the second
+    question, which #264 left open and warren#449 measured: a hook that fires still has to
+    post, and the emitter authenticates with ``CHRONICLE_TOKEN``.
+
+    Only **local** placement is answerable and only local placement needs answering.
+    ``docker exec`` runs a container-placed session in the container's own environment, and
+    ``render_compose`` writes both ``CHRONICLE_URL`` and ``CHRONICLE_TOKEN`` into every
+    resident's service, so a provisioned resident's hooks are already authenticated
+    (measured 2026-09-04 against docker 27.3.1). A local session gets
+    :data:`SESSION_ENV_BASE`, which carries the URL and deliberately not the token
+    (:data:`SESSION_ENV_REFUSED`'s comment argues why).
+
+    The condition is a comparison of two things this host already knows, so there is no
+    probe and no guess about somebody else's server: **this host holds an ingest token**
+    (so the village it points at wants one — it is the same token ``deploy`` writes into
+    every resident's ``.env`` and the same one steward's own emitter posts with), and
+    **the session will not inherit it**. Both, and every per-session event that resident
+    fires is a 401.
+
+    That failure is the worst-shaped one there is, which is why it is worth a function: a
+    401 is just another failed POST to the emitter, so the event is journaled rather than
+    lost — to ``~/.chronicle/events.jsonl``, the hook emitter's own outbox, which nothing
+    on the control plane drains (``steward events flush`` drains steward's *own* emitter's
+    ``events.jsonl.pending``, a different file). The hooks fire, the outbox grows, the
+    village stays empty, and nothing anywhere says why. This is the somewhere that says
+    why.
+
+    ``inherited`` is the same seam :func:`session_emitter` takes, and for the same reason:
+    doctor is reporting on the environment the *scheduler* will run in.
+    """
+    emitter = session_emitter(placement, inherited=inherited)
+    if emitter is None or placement.is_container:
+        return None
+    source = os.environ if inherited is None else inherited
+    if not (source.get(CHRONICLE_TOKEN_ENV) or "").strip():
+        return None
+    forwarded, _ = passthrough_names(source)
+    if CHRONICLE_TOKEN_ENV in (*SESSION_ENV_BASE, *ClaudeRunner.env_names, *forwarded):
+        return None
+    village = (source.get(CHRONICLE_URL_ENV) or "").strip() or "the village"
+    return (
+        f"{CHRONICLE_TOKEN_ENV} is set here but no session may inherit it, so every event "
+        f"this resident's hooks post to {village} is rejected 401 and journaled to the "
+        f"emitter's own ~/.chronicle/events.jsonl — an outbox nothing drains, because "
+        f"`steward events flush` drains steward's own queue, a different file. Place this "
+        f"resident in a container, where its compose environment carries the token, or "
+        f"name {CHRONICLE_TOKEN_ENV} in ${SESSION_ENV_PASSTHROUGH_ENV} and accept that "
+        f"every session then holds a secret that can post as any agent_id"
+    )
+
+
+def session_emitter_outbox(
+    placement: Placement, *, inherited: Mapping[str, str] | None = None
+) -> str | None:
+    """Return the hook emitter's own one-line outbox reading, or ``None`` when there is none.
+
+    Evidence for :func:`check_session_ingest`, not a check of its own. The complaint above
+    is an inference from two variables; this is the outbox itself saying how many events
+    are queued and when one was last acknowledged, which is the difference between "your
+    sessions would 401" and "your sessions have been 401ing for three days".
+
+    Local placement only, and for the same reason the complaint is: the file it reads lives
+    under the account this process runs as, which for a local session is also the account
+    the session runs as. Asking a container for its outbox would be asking a different
+    machine a question doctor has no line to print the answer on.
+
+    Never raises and never fails the report. The emitter ships ``--status`` precisely so an
+    operator can read this cheaply (it opens one JSON file), but an emitter path that does
+    not resolve, an old emitter without the flag, and a hang are all just "no reading" here
+    — the complaint stands on its own without it.
+    """
+    emitter = session_emitter(placement, inherited=inherited)
+    if emitter is None or placement.is_container:
+        return None
+    outcome = run_argv(["python3", emitter, "--status"], timeout_s=EMITTER_STATUS_TIMEOUT_S)
+    if not outcome.ok:
+        return None
+    for line in outcome.stdout.splitlines():
+        if line.strip():
+            return line.strip()
+    return None
 
 
 def check_cli_support(

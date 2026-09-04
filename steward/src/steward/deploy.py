@@ -67,6 +67,8 @@ from steward.manifest import (
     resolve_mount_host_path,
 )
 from steward.runners import (
+    CHRONICLE_TOKEN_ENV,
+    CHRONICLE_URL_ENV,
     COMMAND_TIMEOUT_S,
     LOCAL_PLACEMENT,
     TRANSFER_TIMEOUT_S,
@@ -180,10 +182,12 @@ COMPOSE_HEADER = (Path(__file__).parent / "templates" / "resident-compose.yaml")
 FALLBACK_MEMORY_PATH = "/data/memory"
 
 #: The two variables that carry the village's address and its shared secret into the
-#: container. Read from steward's own environment at provision time and written into the
-#: remote ``.env``; never into the compose file, never into a manifest, never into git.
-CHRONICLE_URL_ENV = "CHRONICLE_URL"
-CHRONICLE_TOKEN_ENV = "CHRONICLE_TOKEN"  # noqa: S105 — a variable name, not a credential
+#: container are :data:`~steward.runners.CHRONICLE_URL_ENV` and
+#: :data:`~steward.runners.CHRONICLE_TOKEN_ENV`, imported above rather than respelled here:
+#: ``runners`` compares the same two names against what a *session* inherits, and two
+#: spellings of one variable is how those answers drift apart. Read from steward's own
+#: environment at provision time and written into the remote ``.env``; never into the
+#: compose file, never into a manifest, never into git.
 STEWARD_URL_ENV = "STEWARD_URL"
 
 
