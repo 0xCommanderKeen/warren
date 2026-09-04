@@ -42,6 +42,12 @@ SESSION_WRITE_PATHS = frozenset({"/delegate"})
 #: ends in ``/`` so ``/skills-not-really`` can never inherit the skill-library door.
 def _session_grant_for(method: str, path: str) -> SessionGrant | None:
     """Name the grant for one exact method/route shape, or keep the door closed."""
+    if method == "POST" and path == "/residents":
+        return SessionGrant.RESIDENTS_DECLARE
+    if method == "POST" and path.startswith("/residents/") and path.endswith("/provision"):
+        resident_id = path.removeprefix("/residents/").removesuffix("/provision")
+        if resident_id and "/" not in resident_id:
+            return SessionGrant.RESIDENTS_DRY_RUN
     if method == "POST" and path == "/skills":
         return SessionGrant.SKILLS_WRITE
     if method == "PUT" and path.startswith("/skills/"):

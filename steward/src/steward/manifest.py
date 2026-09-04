@@ -197,12 +197,16 @@ UNRESTRICTED_TOOLS = "unrestricted"
 #: Named write doors a resident session may be granted. Closed here so a typo cannot
 #: silently become a permission that looks declared but never opens anything.
 SESSION_GRANT_SKILLS_WRITE = "skills.write"
+SESSION_GRANT_RESIDENTS_DECLARE = "residents.declare"
+SESSION_GRANT_RESIDENTS_DRY_RUN = "residents.dry_run"
 
 
 class SessionGrant(StrEnum):
     """A write door an authenticated resident session may cross."""
 
     SKILLS_WRITE = SESSION_GRANT_SKILLS_WRITE
+    RESIDENTS_DECLARE = SESSION_GRANT_RESIDENTS_DECLARE
+    RESIDENTS_DRY_RUN = SESSION_GRANT_RESIDENTS_DRY_RUN
 
 
 #: A built-in tool name as ``claude --tools`` spells it — ``Read``, ``Glob``, ``WebFetch``.

@@ -23,6 +23,7 @@ from steward.nursery import (
     NurseryReport,
     RetireReport,
 )
+from steward.routes.auth import session_of
 from steward.routes.deps import DOCUMENT_MAX_CHARS, Deps, _Body, _refuse
 from steward.skills import SkillLibrary, effective_skills, library_for
 
@@ -483,6 +484,13 @@ def router(deps: Deps) -> APIRouter:  # noqa: C901, PLR0915 — route factory is
             Default false, so the endpoint's old behaviour is its default behaviour: files
             for review and nothing else.
         """
+        if session_of(request) is not None and body.deploy:
+            _refuse(
+                403,
+                "session_credential_forbidden",
+                "deploying a resident reaches a host and starts a container; the "
+                "residents.declare grant only opens declaration with deploy: false",
+            )
         try:
             report = nursery(
                 body,
@@ -583,6 +591,13 @@ def router(deps: Deps) -> APIRouter:  # noqa: C901, PLR0915 — route factory is
         declaration whose bytes are in no commit comes back in ``warnings`` rather than as a
         refusal this endpoint has no way to resolve.
         """
+        if session_of(request) is not None and (body is None or not body.dry_run):
+            _refuse(
+                403,
+                "session_credential_forbidden",
+                "provisioning reaches a host and starts a container; the residents.dry_run "
+                "grant requires an explicit dry_run: true",
+            )
         asked = body or ProvisionPost()
         try:
             report = provisioner(
