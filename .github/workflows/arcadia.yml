@@ -12,12 +12,17 @@ on:
       # decorators, so a route added there must run this suite or nginx drifts
       # silently — which is what warren#242 was.
       - "steward/src/steward/api.py"
+      # …and the route factories beside it, which is where every route has actually
+      # been declared since they were split out. Listing only api.py meant a route
+      # added in routes/ never ran this suite — the same silent drift as #242.
+      - "steward/src/steward/routes/**"
       - ".github/workflows/arcadia.yml"
   pull_request:
     paths:
       - "arcadia/**"
       - "chronicle/tests/fixtures/state-contract/**"
       - "steward/src/steward/api.py"
+      - "steward/src/steward/routes/**"
       - ".github/workflows/arcadia.yml"
 
 concurrency:

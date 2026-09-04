@@ -244,6 +244,9 @@ export function createStewardClient({ baseUrl = "", fetch: fetchImpl, credential
     readConversation: (id, conversation, options) =>
       call(`/residents/${at(id)}/conversations/${at(conversation)}`, options),
     listRoutines: (options) => call("/routines", options),
+    // The org chart, computed from the manifests on every read (warren#441). No write
+    // half: an edge is moved by editing a declaration, not by dragging a box.
+    readOrg: (options) => call("/org", options),
     listJobs: (options) => call("/jobs", options),
     listApprovals: (status, options) => call("/approvals", { ...options, query: { status } }),
     // The one read that exists so a write can be believed: every mutating route answers

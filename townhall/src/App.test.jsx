@@ -630,8 +630,8 @@ describe("the shell itself", () => {
 
     const nav = screen.getByRole("navigation", { name: /sections/i });
     expect(within(nav).getAllByRole("link").map((link) => link.textContent)).toEqual([
-      "01Fleet", "02Residents", "03Routines", "04Approvals", "05Board", "06Skills", "07Budgets",
-      "08Diagnostics",
+      "01Fleet", "02Residents", "03Org", "04Routines", "05Approvals", "06Board", "07Skills",
+      "08Budgets", "09Diagnostics",
     ]);
     expect(within(nav).getByRole("link", { name: /fleet/i }).getAttribute("aria-current")).toBe("page");
     // The read path needs no token: the fleet renders without one being asked for.
