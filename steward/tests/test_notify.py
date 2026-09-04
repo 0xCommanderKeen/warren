@@ -371,6 +371,8 @@ def test_a_reachable_discord_webhook_gets_content_and_the_residents_soul_name(
     request = seen[0]
     assert request["path"] == "/"
     assert request["headers"]["Content-Type"] == "application/json; charset=utf-8"
+    # Discord's edge 403s a bare Python-urllib agent before reading the payload.
+    assert request["headers"]["User-Agent"] == nf.DISCORD_USER_AGENT
     assert json.loads(request["body"]) == {
         "content": f"{tap.title}\n{tap.body}",
         "username": "Testy",
