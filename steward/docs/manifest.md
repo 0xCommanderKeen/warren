@@ -1455,6 +1455,8 @@ skills/
   read-calendar/SKILL.md
   errands/SKILL.md
   write-blog-post/SKILL.md
+  vault-keeper/SKILL.md       # granted to the resident that keeps the Life vault
+  morning-digest/SKILL.md
 ```
 
 ```markdown

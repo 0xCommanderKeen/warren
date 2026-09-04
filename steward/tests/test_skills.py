@@ -452,7 +452,14 @@ def test_the_shipped_library_parses_and_has_a_default_set() -> None:
         "research",
         "write-journal",
     }
-    assert {"read-inbox", "read-calendar", "errands", "write-blog-post"} <= set(loaded.names)
+    assert {
+        "read-inbox",
+        "read-calendar",
+        "errands",
+        "write-blog-post",
+        "vault-keeper",
+        "morning-digest",
+    } <= set(loaded.names)
 
 
 def test_every_shipped_skill_is_written_for_a_session_to_read() -> None:
@@ -482,3 +489,29 @@ def test_a_resident_that_grants_nothing_still_holds_the_defaults(
     assert [s.name for s in sk.effective_skills(resident.manifest, library(tmp_path))] == [
         "write-journal"
     ]
+
+
+# ------------------------------------------------- the vault keeper's skills (warren#383)
+
+
+def test_the_vault_keeping_skills_are_granted_not_default() -> None:
+    """Keeping a vault is one resident's job; the library offers it, nobody holds it unasked."""
+    loaded = sk.load_library(LIBRARY)
+    for name in ("vault-keeper", "morning-digest"):
+        skill = loaded.get(name)
+        assert skill is not None, f"{name} is not in the shipped library"
+        assert not skill.default, f"{name} must be granted, not handed to every resident"
+
+
+def test_vault_keeper_points_at_the_vaults_own_conventions_rather_than_copying_them() -> None:
+    """The vault's CLAUDE.md is the authority; the skill points at it rather than copying it.
+
+    A copy would drift from Miha's own conventions the first time they edited them
+    (warren#383), so the phrases that are the vault's own must not appear in the skill.
+    """
+    skill = sk.load_library(LIBRARY).get("vault-keeper")
+    assert skill is not None
+    assert "/vault" in skill.body
+    assert "CLAUDE.md" in skill.body
+    for vault_only in ("Prime directive", "Update, don't duplicate", "Capture selectively"):
+        assert vault_only not in skill.body, "the vault's own text belongs in the vault"

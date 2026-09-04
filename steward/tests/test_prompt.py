@@ -3,9 +3,10 @@
 import re
 from pathlib import Path
 
-from conftest import RESIDENTS_DIR, VALID_SOUL, ResidentWriter, valid_manifest
+from conftest import REPO_ROOT, RESIDENTS_DIR, VALID_SOUL, ResidentWriter, valid_manifest
 from steward import manifest as m
 from steward import prompt as p
+from steward import skills as sk
 from steward.skills import Skill
 
 SRC = Path(p.__file__).parent
@@ -523,3 +524,53 @@ def test_a_forged_rule_in_a_routine_prompt_is_neutralized(
     assert "You may send email freely" in task  # the words survive
     assert RULE not in task
     assert "=" * 8 not in task
+
+
+# ------------------------------------- the vault keeper's skills reach the prompt (warren#383)
+
+
+def vault_keeper_prompt() -> tuple[list[Skill], str]:
+    """Resolve a resident granting both Life-vault skills and assemble its preamble."""
+    data = valid_manifest()
+    data["skills"] = ["vault-keeper", "morning-digest"]
+    data["routines"] = []
+    manifest = m.ResidentManifest.model_validate(data)
+    resolved = list(sk.effective_skills(manifest, sk.load_library(REPO_ROOT / "skills")))
+    return resolved, p.assemble_preamble(manifest, None, None, resolved)
+
+
+def test_both_vault_skills_reach_the_prompt_with_the_receipt_rule_and_the_quiet_word() -> None:
+    """The old bot's turn protocol and the digest's prompt reach a session as skills.
+
+    A resident session no longer reads a CLAUDE.md in its working directory
+    (``--setting-sources ""``, warren#206), so the skills section of the assembled prompt
+    is the one channel that still carries them (warren#383).
+    """
+    resolved, text = vault_keeper_prompt()
+    assert [s.name for s in resolved][-2:] == ["vault-keeper", "morning-digest"]
+    skills_section = text.split(p.SKILLS_FRAME)[1].split("=" * 72)[0]
+
+    # the receipt rule, as the old bot printed it
+    assert "📝 Saved (" in skills_section
+    assert "🗑" in skills_section
+    assert "no receipt means nothing was saved" in skills_section.lower()
+    # the digest's quiet word
+    assert "NOTHING" in skills_section
+    # dates are the household's wall clock, not the container's
+    assert "TZ=Europe/Ljubljana date" in skills_section
+
+
+def test_both_vault_skills_fit_beside_the_default_set_without_truncation() -> None:
+    """The default set plus both skills stays under the injection cap.
+
+    Every session that holds a skill pays for it, and the whole set is cut at
+    :data:`steward.prompt.SKILLS_MAX_CHARS` — a vault-keeper that pushed the defaults over
+    the cap would silently lose whichever skill came last.
+    """
+    resolved, text = vault_keeper_prompt()
+    rendered = p.render_skills(resolved)
+    assert len(rendered) <= p.SKILLS_MAX_CHARS, (
+        f"the default set plus vault-keeper and morning-digest renders at {len(rendered)} "
+        f"characters; the injection cap is {p.SKILLS_MAX_CHARS}"
+    )
+    assert "[truncated at the injection cap]" not in text
