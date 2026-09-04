@@ -458,6 +458,8 @@ def test_the_shipped_library_parses_and_has_a_default_set() -> None:
         "write-blog-post",
         "vault-keeper",
         "morning-digest",
+        "write-skill",
+        "raise-resident",
     } <= set(loaded.names)
 
 

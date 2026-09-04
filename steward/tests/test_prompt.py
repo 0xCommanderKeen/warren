@@ -614,3 +614,78 @@ def test_both_vault_skills_fit_beside_the_default_set_without_truncation() -> No
         f"characters; the injection cap is {p.SKILLS_MAX_CHARS}"
     )
     assert "[truncated at the injection cap]" not in text
+
+
+def hr_prompt() -> tuple[list[Skill], str]:
+    """Resolve a resident granting both of HR's crafts and assemble its preamble."""
+    data = valid_manifest()
+    data["skills"] = ["write-skill", "raise-resident"]
+    data["routines"] = []
+    manifest = m.ResidentManifest.model_validate(data)
+    resolved = list(sk.effective_skills(manifest, sk.load_library(REPO_ROOT / "skills")))
+    return resolved, p.assemble_preamble(manifest, None, None, resolved)
+
+
+def hr_skills_section() -> str:
+    """Return just the skills block of HR's preamble."""
+    _, text = hr_prompt()
+    return text.split(p.SKILLS_FRAME)[1].split("=" * 72)[0]
+
+
+def test_write_skill_reaches_the_prompt_with_the_pointer_the_defaults_and_the_receipt() -> None:
+    """The three rules a session would otherwise get wrong reach it as prose (warren#412).
+
+    The description rule and the ``defaults`` refusal are the two the Mac's skill-writing
+    skills exist to teach; the commit hash is what makes a written skill checkable by the
+    person who asked for it.
+    """
+    resolved, _ = hr_prompt()
+    assert "write-skill" in [s.name for s in resolved]
+    section = hr_skills_section()
+
+    # the description is a pointer, and a pointer says when to reach the material
+    assert "Use when" in section
+    # a fleet-wide default is a human grant, never the writer's
+    assert "defaults: true" in section
+    assert "never yours to set" in section
+    # the reply ends on something Miha can go and read
+    assert "commit hash" in section
+    assert "🧩" in section
+    # the two caps are quoted at the sizes the code actually enforces
+    assert f"{sk.BODY_MAX_CHARS:,}-character body cap" in section
+    assert f"{p.SKILLS_MAX_CHARS:,}-character prompt budget" in section
+
+
+def test_raise_resident_reaches_the_prompt_with_the_skeleton_the_rehearsal_and_the_knock() -> None:
+    """Declaring is not provisioning, and the knock is what keeps them apart (warren#413).
+
+    ``deploy: false`` and ``dry_run: true`` are the two flags the granted doors refuse
+    without, so a session that has not read them here spends its turn on a 403.
+    """
+    resolved, _ = hr_prompt()
+    assert "raise-resident" in [s.name for s in resolved]
+    section = hr_skills_section()
+
+    # the skeleton is declared, never deployed
+    assert '"deploy": false' in section
+    # the rehearsal that proves the manifest builds
+    assert '{"dry_run": true}' in section
+    # one decision, and nothing moves until it is answered
+    assert "Provision " in section
+    assert "nothing happens until you say" in section.lower()
+
+
+def test_both_hr_skills_fit_beside_the_default_set_without_truncation() -> None:
+    """The default set plus both HR crafts stays under the injection cap.
+
+    Karen holds both at once (warren#410), so the pair is the set that has to fit: a
+    ``raise-resident`` that pushed the total over the cap would silently lose whichever
+    skill rendered last.
+    """
+    resolved, text = hr_prompt()
+    rendered = p.render_skills(resolved)
+    assert len(rendered) <= p.SKILLS_MAX_CHARS, (
+        f"the default set plus write-skill and raise-resident renders at {len(rendered)} "
+        f"characters; the injection cap is {p.SKILLS_MAX_CHARS}"
+    )
+    assert "[truncated at the injection cap]" not in text
