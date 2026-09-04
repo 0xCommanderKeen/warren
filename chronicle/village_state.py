@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import json
 from collections import defaultdict
 
 from identity import fallback_identity
@@ -21,7 +22,9 @@ SCHEMA_VERSION = 1
 #: one in the village, decide its state, refresh its clock, or age its mood. A stranger
 #: messaging a resident's chat bot at three in the morning must not make the village show
 #: that resident at work.
-AMBIENT_TYPES = frozenset({"chat_message_dropped", "resident_declared", "resident_retired"})
+AMBIENT_TYPES = frozenset(
+    {"chat_message_dropped", "resident_declared", "resident_retired"}
+)
 #: Outbound Discord audit facts are visible actions but not activity evidence. They may
 #: supply the timeline's newest sentence, but never create or keep a villager present,
 #: refresh its clock, change its working/resting state, or influence its mood.
@@ -44,6 +47,57 @@ TASK_ORIGIN_TYPES = frozenset({"task_posted", "task_delegated"})
 #: Everything the ``tasks`` ledger folds. A transition for a task whose origin this log
 #: never saw is dropped rather than inventing the job it belongs to.
 TASK_LEDGER_TYPES = TASK_ORIGIN_TYPES | {"task_claimed", "task_done", "task_failed"}
+
+
+def _task_event_identity(event):
+    """Stable final tie-breaker for equal-time task facts."""
+    payload = event["payload"]
+    values = (
+        event["type"],
+        event["ts"],
+        event["agent_id"],
+        event["project"],
+        payload["task_id"],
+        payload["title"],
+        payload.get("claimant", ""),
+        json.dumps(
+            payload.get("required_skills", []),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        json.dumps(
+            payload.get("artifacts", []), ensure_ascii=False, separators=(",", ":")
+        ),
+        payload.get("reason", ""),
+        payload.get("parent_task_id", ""),
+    )
+    if event["type"] == "task_delegated":
+        values += (payload["from"], payload["to"], payload["route"], payload["depth"])
+    return "\0".join(str(value) for value in values)
+
+
+def _task_tie_rank(event):
+    """Semantic order for task facts sharing one millisecond."""
+    if event["type"] in TASK_ORIGIN_TYPES:
+        return 0
+    if event["type"] == "task_failed" and reopened_by_lease(event["payload"]):
+        return 1
+    if event["type"] == "task_claimed":
+        return 2
+    if event["type"] == "task_failed":
+        return 3
+    return 4
+
+
+def later_task_event(candidate, current):
+    """Whether candidate is authoritative under the protocol's task order."""
+    candidate_at, current_at = _instant(candidate["ts"]), _instant(current["ts"])
+    if candidate_at != current_at:
+        return candidate_at > current_at
+    candidate_rank, current_rank = _task_tie_rank(candidate), _task_tie_rank(current)
+    if candidate_rank != current_rank:
+        return candidate_rank > current_rank
+    return _task_event_identity(candidate) > _task_event_identity(current)
 
 
 def reopened_by_lease(payload):
@@ -489,7 +543,7 @@ def project_village(
     exact, projects = _resident_indexes(resident_manifests)
 
     approvals, approval_by_id = [], {}
-    tasks, task_by_id, task_transitions = [], {}, {}
+    tasks, task_by_id, task_origins, task_transitions = [], {}, {}, {}
     journals, journal_by_key = [], {}
     routines, routine_by_run = [], {}
     artifacts = []
@@ -508,6 +562,12 @@ def project_village(
             task_id = payload["task_id"]
             record = task_by_id.get(task_id)
             if kind in TASK_ORIGIN_TYPES:
+                current_origin = task_origins.get(task_id)
+                if current_origin is not None and not later_task_event(
+                    event, current_origin
+                ):
+                    continue
+                task_origins[task_id] = event
                 if record is None:
                     record = _opened_row(event)
                     task_by_id[task_id] = record
@@ -531,6 +591,11 @@ def project_village(
                 # open board. Only the newest is worth holding: every transition
                 # overwrites all three fields it owns. Nothing is invented — one whose
                 # row never opens is discarded with the rest of the unclaimed evidence.
+                current_transition = task_transitions.get(task_id)
+                if current_transition is not None and not later_task_event(
+                    event, current_transition
+                ):
+                    continue
                 task_transitions[task_id] = event
                 if record is not None:
                     _move_row(record, event)
@@ -681,7 +746,8 @@ def project_village(
         visible_history = [
             item
             for item in history
-            if item[1]["type"] not in {"heartbeat", "resident_declared", "resident_retired"}
+            if item[1]["type"]
+            not in {"heartbeat", "resident_declared", "resident_retired"}
         ]
         acted = [
             item
@@ -707,7 +773,10 @@ def project_village(
             manifest = {
                 "home": declared["home"],
                 "file": None,
-                "meta": {key: declared[key] for key in ("name", "char", "accent", "role", "summary")},
+                "meta": {
+                    key: declared[key]
+                    for key in ("name", "char", "accent", "role", "summary")
+                },
             }
         meta = (manifest or {}).get("meta") or (manifest or {}).get("soul") or {}
         state = (
@@ -715,7 +784,13 @@ def project_village(
             if pending or last["type"] == "needs_human"
             else (
                 "resting"
-                if last["type"] in {"idle", "routine_finished", "needs_human_resolved", "resident_declared"}
+                if last["type"]
+                in {
+                    "idle",
+                    "routine_finished",
+                    "needs_human_resolved",
+                    "resident_declared",
+                }
                 else "failed"
                 if last["type"] in {"tool_failed", "routine_failed", "task_failed"}
                 else "stale"

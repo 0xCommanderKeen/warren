@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
-import json
 import threading
 
+import retention
 from village_state import ProjectionPolicy, project_village
 
 
@@ -17,8 +17,17 @@ class StateCoordinator:
     adapter injectable makes the coordinator testable without files or HTTP.
     """
 
-    def __init__(self, read_events, read_residents, policy=None, capabilities=None):
+    def __init__(
+        self,
+        read_events,
+        read_residents,
+        policy=None,
+        capabilities=None,
+        *,
+        read_updates=None,
+    ):
         self._read_events = read_events
+        self._read_updates = read_updates
         self._read_residents = read_residents
         self._policy = policy or ProjectionPolicy()
         self._capabilities = capabilities or {}
@@ -27,6 +36,9 @@ class StateCoordinator:
         self._signature = None
         self._generation = 0
         self._log_generation = None
+        self._fold = retention.ProjectionFold()
+        self._initialized = False
+        self._cursor = None
 
     def evaluate(self, evaluated_at=None):
         evaluated_at = evaluated_at or dt.datetime.now(dt.UTC)
@@ -34,7 +46,19 @@ class StateCoordinator:
             # Capture, project, and publish as one serialized operation. Otherwise
             # a slow projection of an older cursor can overtake a newer one and be
             # assigned the higher public generation.
-            events, cursor, log_generation = self._read_events()
+            if not self._initialized or self._read_updates is None:
+                events, cursor, log_generation = self._read_events()
+                events = self._fold.replace(events, evaluated_at)
+                self._initialized = True
+            else:
+                updates, cursor, log_generation, reset = self._read_updates(
+                    self._cursor
+                )
+                if reset:
+                    events = self._fold.replace(updates, evaluated_at)
+                else:
+                    events = self._fold.extend(updates, evaluated_at)
+            self._cursor = cursor
             residents = self._read_residents()
             candidate = project_village(
                 events,
@@ -48,9 +72,7 @@ class StateCoordinator:
             semantic = dict(candidate)
             semantic.pop("generation", None)
             semantic.pop("evaluated_at", None)
-            signature = json.dumps(
-                semantic, sort_keys=True, separators=(",", ":"), allow_nan=False
-            )
+            signature = semantic
             if self._snapshot is not None and signature == self._signature:
                 return self._snapshot
             self._generation += 1

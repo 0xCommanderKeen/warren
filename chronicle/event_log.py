@@ -20,6 +20,13 @@ def _reject_json_constant(value):
     raise json.JSONDecodeError("non-standard JSON constant", value, 0)
 
 
+def _decode_record(line):
+    try:
+        return json.loads(line, parse_constant=_reject_json_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+
 @dataclasses.dataclass(frozen=True)
 class EventCursor:
     """Validated event-log position with explicit resume policy."""
@@ -274,18 +281,26 @@ class EventLog:
                 with open(self.path, "rb") as stream:
                     stat = os.fstat(stream.fileno())
                     for line in stream:
-                        try:
-                            events.append(
-                                json.loads(line, parse_constant=_reject_json_constant)
-                            )
-                        except (UnicodeDecodeError, json.JSONDecodeError):
-                            events.append(None)
+                        events.append(_decode_record(line))
                     cursor = EventCursor.issued(
                         boot_id, stat, self._generation, stat.st_size
                     ).format()
             except FileNotFoundError:
                 cursor = EventCursor.issued(boot_id, None, self._generation, 0).format()
             return events, cursor, self._generation
+
+    def projection_updates(self, raw_cursor):
+        """Read and parse only complete records after a server-issued cursor.
+
+        A changed namespace (restart, replacement, or rotation generation) resets the
+        read to byte zero, making the canonical live log the rebuild authority.
+        """
+        cursor = EventCursor.parse(raw_cursor)
+        if cursor.boot_id is None:
+            raise ValueError("projection cursors must be server-issued")
+        records, current, reset = self.read_records(cursor.boot_id, cursor)
+        events = [_decode_record(line) for _, line in records]
+        return events, current.format(), current.generation, reset
 
     def read_records(self, boot_id, cursor):
         with self.lock:

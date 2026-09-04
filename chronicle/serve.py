@@ -976,6 +976,7 @@ class Runtime:
                 "jobs": True,
                 "routines": True,
             },
+            read_updates=self.event_log.projection_updates,
         )
 
     def projection_inputs(self):
