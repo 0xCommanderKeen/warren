@@ -399,7 +399,9 @@ def make_bridge(
         transport: ch.ChatTransport | None = None,
         runner: Runner | None = None,
         operators: frozenset[str] = frozenset({OPERATOR}),
+        operators_by_transport: dict[str, frozenset[str]] | None = None,
         tokens: dict[str, str] | None = None,
+        transports: dict[str, ch.ChatTransport] | None = None,
         guard: RunGuard | None = None,
         hooks: WakeHooks | None = None,
     ) -> ch.ChatBridge:
@@ -410,6 +412,8 @@ def make_bridge(
             store=store,
             tokens=tokens if tokens is not None else {"STEWARD_CHAT_TOKEN_TESTY": FAKE_BOT_TOKEN},
             operators=operators,
+            operators_by_transport=operators_by_transport or {},
+            transports=transports or {},
             transport=transport if transport is not None else FakeTransport(),
             emitter=sink,
             workdir=tmp_path / "fallback",
@@ -461,7 +465,9 @@ def test_the_report_names_the_variable_the_token_belongs_in(
 
 def test_the_report_never_carries_the_token_itself(write_resident: ResidentWriter, tmp_path: Path):
     resident = load_manifest(write_resident(chat_manifest(tmp_path / "memory")))
-    [report] = ch.describe_chat([resident], {"STEWARD_CHAT_TOKEN_TESTY": FAKE_BOT_TOKEN})
+    [report] = ch.describe_chat(
+        [resident], {"STEWARD_CHAT_TOKEN_TESTY": FAKE_BOT_TOKEN, ch.OPERATORS_ENV: OPERATOR}
+    )
     assert report.token_set
     assert report.reachable
     assert FAKE_BOT_TOKEN not in json.dumps(report.to_dict())
@@ -1086,18 +1092,22 @@ def test_no_sweep_follows_a_message_that_opened_no_session(make_bridge: BridgeMa
 # --------------------------------------------------------------------------------------
 
 
-def test_a_bridge_with_no_operators_refuses_to_start(make_bridge: BridgeMaker):
+def test_a_route_with_no_operators_is_shut_rather_than_fatal(make_bridge: BridgeMaker):
     bridge = make_bridge(operators=frozenset())
 
-    with pytest.raises(ch.ChatError, match=ch.OPERATORS_ENV):
-        bridge.require_ready()
+    bridge.require_ready()
+
+    assert bridge.reachable() == []
+    assert any(ch.OPERATORS_ENV in problem for problem in bridge.preflight())
 
 
 def test_a_bot_with_no_token_is_named_at_startup(make_bridge: BridgeMaker):
     bridge = make_bridge(tokens={})
 
-    with pytest.raises(ch.ChatError, match="STEWARD_CHAT_TOKEN_TESTY"):
-        bridge.require_ready()
+    bridge.require_ready()
+
+    assert bridge.reachable() == []
+    assert any("STEWARD_CHAT_TOKEN_TESTY" in problem for problem in bridge.preflight())
 
 
 def test_a_fleet_with_no_chat_route_has_nothing_to_poll(make_bridge: BridgeMaker, tmp_path: Path):
@@ -1107,6 +1117,96 @@ def test_a_fleet_with_no_chat_route_has_nothing_to_poll(make_bridge: BridgeMaker
 
     with pytest.raises(ch.ChatError, match="no resident declares an active chat route"):
         bridge.require_ready()
+
+
+class FlakyDiscord(FakeTransport):
+    """A Discord bot whose token stops naming anybody, and later starts again."""
+
+    name = "discord"
+
+    def __init__(
+        self, batches: Sequence[list[ch.Message] | None] = (), *, known: bool = True
+    ) -> None:
+        """Queue the batches a poll returns, and say whether ``/users/@me`` answers."""
+        super().__init__(batches)
+        self.known = known
+
+    def identity(self, token: str) -> str | None:
+        """Name the bot, or refuse to — the check warren#456 is about."""
+        del token
+        return "@fake" if self.known else None
+
+
+def test_a_discord_bot_nobody_can_identify_leaves_telegram_talking(
+    discord_api: DiscordApi, make_bridge: BridgeMaker, tmp_path: Path
+):
+    """warren#456: one route's preflight exited the daemon and took every other door with it."""
+    discord_api.queue("GET", "/users/@me", (403, {"message": "401: Unauthorized"}))
+    declared = chat_manifest(tmp_path / "memory")
+    declared["routes"].append(
+        {"id": "discord", "kind": CHAT_ROUTE_KIND, "address": "discord:testy", "status": "active"}
+    )
+    telegram = FakeTransport([[message()]])
+    bridge = make_bridge(
+        declared,
+        tokens={
+            "STEWARD_CHAT_TOKEN_TESTY": FAKE_BOT_TOKEN,
+            "STEWARD_CHAT_TOKEN_DISCORD_TESTY": FAKE_DISCORD_TOKEN,
+        },
+        transports={"telegram": telegram, "discord": ch.DiscordTransport(base_url=discord_api.url)},
+        operators_by_transport={
+            "telegram": frozenset({OPERATOR}),
+            "discord": frozenset({"31337"}),
+        },
+    )
+
+    bridge.require_ready()
+    outcomes = bridge.poll_once()
+
+    shut = [outcome for outcome in outcomes if outcome.status is ch.ChatStatus.UNREACHABLE]
+    assert [outcome.route for outcome in shut] == ["discord"]
+    assert shut[0].reason is not None
+    assert "could not identify a Discord bot" in shut[0].reason
+    assert [outcome.status for outcome in outcomes if outcome.route == "chat"] == [
+        ch.ChatStatus.ANSWERED
+    ]
+    assert len(telegram.sent) == 1
+
+
+def test_a_daemon_keeps_running_with_every_route_shut(make_bridge: BridgeMaker):
+    bridge = make_bridge(tokens={})
+
+    outcomes = bridge.run(max_polls=2, sleep=lambda _seconds: None)
+
+    assert [outcome.status for outcome in outcomes] == [ch.ChatStatus.UNREACHABLE]
+
+
+def test_a_shut_route_is_reported_when_it_shuts_and_not_on_every_pass(make_bridge: BridgeMaker):
+    bridge = make_bridge(tokens={})
+
+    first = bridge.poll_once()
+
+    assert [outcome.status for outcome in first] == [ch.ChatStatus.UNREACHABLE]
+    assert bridge.poll_once() == []
+
+
+def test_a_route_that_heals_comes_back_without_a_restart(make_bridge: BridgeMaker, tmp_path: Path):
+    later = NOW + timedelta(seconds=ch.ROUTE_RECHECK_S + 1)
+    declared = chat_manifest(tmp_path / "memory")
+    declared["routes"][-1]["address"] = "discord:testy"
+    transport = FlakyDiscord([[message(sender=f"{ch.DISCORD}:31337", at=later)]], known=False)
+    bridge = make_bridge(
+        declared,
+        tokens={"STEWARD_CHAT_TOKEN_DISCORD_TESTY": FAKE_DISCORD_TOKEN},
+        transports={"discord": transport},
+        operators_by_transport={"discord": frozenset({"31337"})},
+    )
+
+    assert [outcome.status for outcome in bridge.poll_once(NOW)] == [ch.ChatStatus.UNREACHABLE]
+    assert transport.polls == []
+    transport.known = True
+
+    assert [outcome.status for outcome in bridge.poll_once(later)] == [ch.ChatStatus.ANSWERED]
 
 
 def test_a_second_bridge_refuses_to_poll_the_same_bots(make_bridge: BridgeMaker):
@@ -1554,6 +1654,7 @@ def test_chat_list_discovers_a_discord_bot_handle(
     discord_api.queue("GET", "/users/@me", (200, {"id": "42", "username": "Pip"}))
     monkeypatch.setenv("STEWARD_CHAT_TOKEN_DISCORD_TESTY", FAKE_DISCORD_TOKEN)
     monkeypatch.setenv(ch.DISCORD_API_URL_ENV, discord_api.url)
+    monkeypatch.setenv(ch.OPERATORS_ENV, "discord:31337")
 
     result = runner.invoke(main, ["chat", "list", "--residents", str(tree)])
 
@@ -1603,6 +1704,9 @@ def _discord_bridge(  # noqa: PLR0913, PLR0917 — fixture dependencies plus one
     declared = chat_manifest(tmp_path / "memory")
     declared["routes"][-1]["address"] = "discord:testy"
     resident = load_manifest(write_resident(declared))
+    # The daemon identifies the bot before it polls it (warren#456), so the fake API has to
+    # answer that too — a token nobody can put a name to is a route that never opens.
+    discord_api.queue("GET", "/users/@me", (200, {"id": "42", "username": "Testy"}))
     discord_api.queue("POST", "/users/@me/channels", (200, {"id": "900"}))
     discord_api.queue("GET", "/channels/900/messages?limit=1", (200, [discord_message("99")]))
     discord_api.queue("GET", "/channels/900/messages?after=99&limit=50", (200, [incoming]))
@@ -1775,6 +1879,7 @@ def test_chat_list_names_the_variable_and_never_prints_the_token(
     runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path, monkeypatch
 ):
     monkeypatch.setenv("STEWARD_CHAT_TOKEN_TESTY", FAKE_BOT_TOKEN)
+    monkeypatch.setenv(ch.OPERATORS_ENV, OPERATOR)
     tree = write_resident(chat_manifest(tmp_path / "memory")).parent.parent
 
     result = runner.invoke(main, ["chat", "list", "--residents", str(tree)])
@@ -1860,7 +1965,9 @@ def test_a_discord_route_names_its_missing_token(write_resident: ResidentWriter,
     [report] = ch.describe_chat([resident], {})
 
     assert not report.reachable
-    assert report.note == "no token: set STEWARD_CHAT_TOKEN_DISCORD_TESTY to the bot token"
+    assert report.note == (
+        "no token — set STEWARD_CHAT_TOKEN_DISCORD_TESTY to the token issued for discord:testy"
+    )
 
 
 def test_chat_list_reports_unknown_configured_discord_rooms(
@@ -1882,10 +1989,12 @@ def test_chat_list_reports_unknown_configured_discord_rooms(
         {
             "STEWARD_CHAT_TOKEN_DISCORD_TESTY": FAKE_BOT_TOKEN,
             "STEWARD_CHAT_DISCORD_GUILD": "home",
+            ch.OPERATORS_ENV: "discord:31337",
         },
         transports={"discord": DiscordRooms()},
     )
 
+    assert report.reachable, "an unknown room breaks posts_to and nothing else"
     assert report.note == "unknown Discord channel name(s): missing"
 
 
@@ -1908,11 +2017,39 @@ def test_chat_list_reports_unknown_configured_discord_listen_channels(
         {
             "STEWARD_CHAT_TOKEN_DISCORD_TESTY": FAKE_BOT_TOKEN,
             "STEWARD_CHAT_DISCORD_GUILD": "home",
+            ch.OPERATORS_ENV: "discord:31337",
         },
         transports={"discord": DiscordRooms()},
     )
 
+    assert report.reachable, "an unknown room breaks listens_in and nothing else"
     assert report.note == "unknown Discord channel name(s): missing"
+
+
+def test_chat_list_and_the_daemon_shut_a_route_on_the_same_facts(
+    write_resident: ResidentWriter, store: Store, tmp_path: Path
+):
+    """The listing an operator reads and the daemon's own view are one check (warren#456)."""
+    resident = load_manifest(write_resident(chat_manifest(tmp_path / "memory")))
+    # A token, a transport, a transcript — and nobody in STEWARD_CHAT_OPERATORS. This is the
+    # shape that used to print `reachable` while the daemon silently never polled it.
+    env = {"STEWARD_CHAT_TOKEN_TESTY": FAKE_BOT_TOKEN}
+    bridge = ch.ChatBridge(
+        routes=ch.chat_routes([resident]),
+        store=store,
+        tokens=ch.tokens_from_env(env),
+        operators=ch.operators_from_env(env),
+        transport=FakeTransport(),
+        clock=lambda: NOW,
+        state_path=tmp_path / "state" / "scheduler.json",
+    )
+
+    [report] = ch.describe_chat([resident], env, transports={"telegram": FakeTransport()})
+
+    assert not report.reachable
+    assert bridge.reachable() == []
+    assert report.note is not None
+    assert any(report.note in problem for problem in bridge.preflight())
 
 
 def test_a_resident_with_nowhere_to_keep_a_conversation_says_so(tmp_path: Path):
@@ -1934,14 +2071,33 @@ def test_a_remote_memory_is_no_place_for_a_transcript(tmp_path: Path):
     assert "remote reference" in complaint
 
 
-def test_a_bridge_over_a_resident_that_cannot_keep_a_transcript_refuses_to_start(
+def test_a_bridge_over_a_resident_that_cannot_keep_a_transcript_shuts_that_route(
     make_bridge: BridgeMaker, tmp_path: Path
 ):
     declared = chat_manifest(tmp_path / "memory")
     declared["memory"] = {"kind": "file", "path": str(tmp_path / "memory.md")}
     bridge = make_bridge(declared)
 
+    bridge.require_ready()
+
+    assert bridge.reachable() == []
     assert any("nowhere to keep a conversation" in problem for problem in bridge.preflight())
+
+
+def test_chat_list_says_a_resident_has_nowhere_to_keep_a_conversation(
+    write_resident: ResidentWriter, tmp_path: Path
+):
+    declared = chat_manifest(tmp_path / "memory")
+    declared["memory"] = {"kind": "file", "path": str(tmp_path / "memory.md")}
+    resident = load_manifest(write_resident(declared))
+
+    [report] = ch.describe_chat(
+        [resident], {"STEWARD_CHAT_TOKEN_TESTY": FAKE_BOT_TOKEN, ch.OPERATORS_ENV: OPERATOR}
+    )
+
+    assert not report.reachable
+    assert report.note is not None
+    assert "nowhere to keep a conversation" in report.note
 
 
 def test_a_bridge_names_a_transport_it_cannot_carry_at_startup(

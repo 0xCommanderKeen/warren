@@ -122,6 +122,7 @@ __all__ = [
     "OPERATORS_ENV",
     "POLL_TIMEOUT_ENV",
     "REPLY_MAX_CHARS",
+    "ROUTE_RECHECK_S",
     "SEND_TIMEOUT_S",
     "TOKEN_ENV_PREFIX",
     "TRANSCRIPT_KEEP_TURNS",
@@ -139,12 +140,15 @@ __all__ = [
     "Drop",
     "KnockLimiter",
     "Message",
+    "RouteCheck",
+    "RouteHealth",
     "RoutineDelivery",
     "TelegramTransport",
     "Transcript",
     "Turn",
     "chat_complaint",
     "chat_routes",
+    "check_route",
     "describe_chat",
     "operators_from_env",
     "poll_timeout_from_env",
@@ -217,6 +221,16 @@ UNREACHABLE_SLEEP_S = 5.0
 #: How long a bridge waits after an idle pass. Small, because a long poll has already done
 #: the waiting; it exists so a transport that answers instantly cannot spin.
 IDLE_SLEEP_S = 1.0
+
+#: How often a route that could not carry a conversation is asked again (warren#456). What
+#: :func:`check_route` reads is not all fixed at startup: a bot re-enabled in Discord's
+#: Developer Portal, permissions corrected on an application, an API that answered nothing
+#: for a minute — each of those heals on the far side of the wire, and the identity call is
+#: how steward finds out. A daemon that asked once would stay half-deaf until a person
+#: happened to notice. What a recheck cannot heal is this process's *environment*: tokens
+#: and the operator list are read at startup, so correcting one in the burrow's ``.env``
+#: still needs the service recreated — a container's environment does not change under it.
+ROUTE_RECHECK_S = 300.0
 
 #: How late a message may be and still be answered. The scheduler's number and the
 #: scheduler's reason (:data:`steward.scheduler.DEFAULT_CATCHUP_S`): Telegram holds
@@ -449,6 +463,25 @@ def chat_routes(residents: Sequence[Resident]) -> list[ChatRoute]:
 
 
 @dataclass(frozen=True, slots=True)
+class RouteHealth:
+    """Whether one route could carry a conversation when steward last asked, and when.
+
+    The unit warren#456 broke the daemon's startup check into. A problem found here belongs
+    to *this* route and says nothing about the one next door, so it closes one doorway
+    instead of the whole burrow's — and because it is stamped with the moment it was
+    measured, it can be asked again rather than believed for the life of the process.
+    """
+
+    problems: tuple[str, ...]
+    checked_at: datetime
+
+    @property
+    def reachable(self) -> bool:
+        """Report whether an operator could get an answer through this route right now."""
+        return not self.problems
+
+
+@dataclass(frozen=True, slots=True)
 class ChatReport:
     """What one declared chat route is, and whether an operator could talk through it.
 
@@ -484,6 +517,57 @@ class ChatReport:
             "note": self.note,
             "bot": self.bot,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class RouteCheck:
+    """What one look at a route found: its bot's name, if any, and what is wrong with it."""
+
+    bot: str | None
+    problems: tuple[str, ...]
+
+
+def check_route(
+    resident: Resident,
+    address: Address,
+    *,
+    token: str | None,
+    transport: ChatTransport | None,
+    operators: frozenset[str],
+) -> RouteCheck:
+    """Return why this one route cannot carry a conversation, nearest thing to fix first.
+
+    The single place the question is asked (warren#456). ``steward chat list`` renders the
+    first problem as the route's note and the daemon shuts a route that has any, so a second
+    copy of this cascade would drift the day one of them learned a new problem — and an
+    operator reading a listing that disagrees with the log is worse off than one reading
+    neither.
+
+    Every problem here is a fact about *this* route and says nothing about the doorway next
+    door, which is precisely why none of them may close it. They widen outwards: this bot,
+    then this transport's operator list, then this resident's memory.
+    """
+    if transport is None:
+        return RouteCheck(
+            bot=None, problems=(f"steward cannot carry chat over {address.transport!r}",)
+        )
+    problems: list[str] = []
+    bot = None
+    if not token:
+        problems.append(f"no token — set {address.token_env} to the token issued for {address}")
+    elif address.transport == DISCORD:
+        bot = _transport_identity(transport, token)
+        if bot is None:
+            problems.append(f"{address.token_env} could not identify a Discord bot")
+    if not operators:
+        problems.append(
+            f"{OPERATORS_ENV} has no {address.transport!r} operators, so steward would "
+            "answer nobody"
+        )
+    complaint = chat_complaint(resident.manifest)
+    if complaint is not None:
+        problems.append(complaint)
+    return RouteCheck(bot=bot, problems=tuple(problems))
 
 
 def describe_chat(
@@ -526,23 +610,34 @@ def describe_chat(
             )
             continue
         token_set = address.token_env in tokens
-        note = route.note
         transport = available.get(address.transport)
-        bot = None
-        if transport is None:
-            note = f"transport {address.transport!r} is not one steward can carry chat over"
-        elif not route.accepts_chat:
-            note = note or f"declared and silent: status is {route.status!r}"
-        elif not token_set:
-            note = f"no token: set {address.token_env} to the bot token"
-        elif address.transport == DISCORD:
-            bot, note = _discord_diagnostics(
-                transport,
-                tokens[address.token_env],
-                [*route.posts_to, *route.listens_in],
-                source,
-                note,
+        # A silent route is not checked any further: nothing polls a `pending` doorway, so
+        # naming what its token would need to be is answering a question nobody asked.
+        # Otherwise this listing and the daemon shut a route on exactly the same facts —
+        # one :func:`check_route`, two readers. Room posting is deliberately not one of
+        # those facts: an unknown channel name breaks ``posts_to``/``listens_in`` and
+        # nothing else, so it is reported (`room`) without closing the door.
+        check = (
+            RouteCheck(
+                bot=None,
+                problems=(route.note or f"declared and silent: status is {route.status!r}",),
             )
+            if transport is not None and not route.accepts_chat
+            else check_route(
+                resident,
+                address,
+                token=tokens.get(address.token_env),
+                transport=transport,
+                operators=operators_from_env(source, transport=address.transport),
+            )
+        )
+        rooms = [*route.posts_to, *route.listens_in]
+        problems = list(check.problems)
+        room = (
+            _room_complaint(transport, tokens[address.token_env], rooms, source)
+            if transport is not None and check.bot is not None and rooms
+            else None
+        )
         reports.append(
             ChatReport(
                 resident=resident.id,
@@ -551,12 +646,9 @@ def describe_chat(
                 status=route.status,
                 token_env=address.token_env,
                 token_set=token_set,
-                reachable=route.accepts_chat
-                and token_set
-                and transport is not None
-                and (address.transport != DISCORD or bot is not None),
-                note=note,
-                bot=bot,
+                reachable=not problems,
+                note=problems[0] if problems else (room or route.note),
+                bot=check.bot,
             )
         )
     return reports
@@ -575,29 +667,28 @@ def _transport_identity(transport: ChatTransport, token: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _discord_diagnostics(
+def _room_complaint(
     transport: ChatTransport,
     token: str,
     channel_names: Sequence[str],
     env: Mapping[str, str],
-    note: str | None,
-) -> tuple[str | None, str | None]:
-    """Return Discord identity and any operator-facing room configuration problem."""
-    bot = _transport_identity(transport, token)
-    if bot is None:
-        return None, "the configured Discord token could not identify its bot"
-    if not channel_names:
-        return bot, note
+) -> str | None:
+    """Return what is wrong with this route's Discord rooms, or ``None``.
+
+    Reported but never a closure (warren#456): an unknown name in ``posts_to`` or
+    ``listens_in`` breaks that channel and leaves the conversation itself working, so it is
+    a note beside a reachable route rather than one of :func:`check_route`'s problems.
+    """
     guild = (env.get("STEWARD_CHAT_DISCORD_GUILD") or "").strip()
     if not guild:
-        return bot, "room posting is configured but STEWARD_CHAT_DISCORD_GUILD is not set"
+        return "room posting is configured but STEWARD_CHAT_DISCORD_GUILD is not set"
     channels = _transport_channels(transport, token, guild)
     if channels is None:
-        return bot, "the configured Discord guild's channels could not be resolved"
+        return "the configured Discord guild's channels could not be resolved"
     unknown = [name for name in channel_names if name not in channels]
     if unknown:
-        return bot, "unknown Discord channel name(s): " + ", ".join(unknown)
-    return bot, note
+        return "unknown Discord channel name(s): " + ", ".join(unknown)
+    return None
 
 
 def _transport_channels(
@@ -1624,13 +1715,16 @@ class ChatBridge:
     timeout_s: int = DEFAULT_CHAT_TIMEOUT_S
     catchup_s: float = DEFAULT_CATCHUP_S
     idle_sleep_s: float = IDLE_SLEEP_S
+    #: How long a route's health is believed before it is measured again.
+    recheck_s: float = ROUTE_RECHECK_S
     state_path: Path | None = None
     sessions: ResidentSessions = field(init=False, repr=False)
     run_transitions: RunTransitions = field(init=False, repr=False)
     #: What stops a stranger deciding how much of the village an operator can see.
     knocks: KnockLimiter = field(init=False, repr=False)
     _offsets: dict[str, int] = field(default_factory=dict, init=False, repr=False)
-    _identities: dict[str, str | None] = field(default_factory=dict, init=False, repr=False)
+    #: One :class:`RouteHealth` per carried route, keyed by :attr:`ChatRoute.key`.
+    _health: dict[str, RouteHealth] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Build the shared lifecycle from the bridge's existing dependencies."""
@@ -1732,66 +1826,126 @@ class ChatBridge:
         return self.tokens.get(route.address.token_env)
 
     def deliverable(self) -> list[ChatRoute]:
-        """Return the routes this process can actually poll: declared, and with a token."""
+        """Return the routes somebody has at least handed a token: declared, and configured.
+
+        The question ``steward chat run`` asks before it starts — a burrow where nobody has
+        set a single token is an idle daemon rather than an error. Whether a route can
+        actually carry a message is a further question, and a live one: :meth:`reachable`.
+        """
         return [
             route
             for route in self.routes
             if self.token_for(route) and route.address.transport in self.transports
         ]
 
+    def carried(self) -> list[ChatRoute]:
+        """Return the declared routes whose transport this process can actually speak."""
+        return [route for route in self.routes if route.address.transport in self.transports]
+
+    def reachable(self, now: datetime | None = None) -> list[ChatRoute]:
+        """Return the routes an operator could get an answer through, re-asking if stale."""
+        self._refresh_health(now if now is not None else self.clock())
+        return [route for route in self.carried() if self._health[route.key].reachable]
+
+    def _refresh_health(self, now: datetime) -> list[ChatOutcome]:
+        """Re-ask every stale route whether it can carry a conversation; report what changed.
+
+        Only *changes* are reported, and that is the whole reason this returns anything: a
+        route that has been shut since Tuesday belongs in ``steward chat list``, not in a
+        line of the daemon's log every second. A route that comes back says so too, because
+        the operator who fixed it is owed the news as much as the one who broke it.
+        """
+        changed: list[ChatOutcome] = []
+        for route in self.carried():
+            previous = self._health.get(route.key)
+            if (
+                previous is not None
+                and (now - previous.checked_at).total_seconds() < self.recheck_s
+            ):
+                continue
+            problems = check_route(
+                route.resident,
+                route.address,
+                token=self.token_for(route),
+                transport=self.transports.get(route.address.transport),
+                operators=self._operators_for(route.address.transport),
+            ).problems
+            self._health[route.key] = RouteHealth(problems=problems, checked_at=now)
+            if previous is not None and previous.problems == problems:
+                continue
+            if problems:
+                reason = "; ".join(problems)
+                log.warning("%s: not reachable — %s", route.key, reason)
+                changed.append(
+                    ChatOutcome(
+                        resident_id=route.resident.id,
+                        route=route.route_id,
+                        status=ChatStatus.UNREACHABLE,
+                        reason=reason,
+                    )
+                )
+            elif previous is not None:
+                log.info("%s: reachable again", route.key)
+        return changed
+
+    def blocking_problems(self) -> list[str]:
+        """Return why no conversation could happen here at all. Empty means some could.
+
+        The one class that stays fatal (warren#456), and both members are facts about the
+        *fleet* rather than about a route: nothing declares a chat route, or nothing declares
+        one this build can carry. Neither heals without a manifest or an image change, so a
+        daemon that kept polling on them would be polling nothing, for ever.
+        """
+        if not self.routes:
+            return [
+                (
+                    "no resident declares an active chat route, so there is nothing to poll; "
+                    "add routes: [{kind: chat, address: telegram:<bot>, status: active}] to a "
+                    "manifest"
+                )
+            ]
+        if not self.carried():
+            names = sorted({route.address.transport for route in self.routes})
+            return [
+                (
+                    f"this bridge carries {', '.join(sorted(self.transports))!r}, but no "
+                    "active route uses it; "
+                    f"declared transports: {', '.join(names)}"
+                )
+            ]
+        return []
+
     def preflight(self) -> list[str]:
-        """Return why this bridge cannot carry a conversation. Empty means ready.
+        """Return everything standing between this bridge and a conversation. Empty is ready.
 
         The chat half of :meth:`steward.scheduler.Scheduler.check`, and asked for the same
         reason: a bot with no token, a resident with nowhere to keep a transcript, or an
         operator list nobody filled in should be a complaint at a reasonable hour rather than
         a message that silently goes unanswered at midnight.
+
+        It reports two classes together and they are acted on apart (warren#456):
+        :meth:`blocking_problems` refuses to start the process, while a per-route problem
+        only shuts its own route and is asked again every :data:`ROUTE_RECHECK_S` seconds.
         """
-        problems: list[str] = []
-        carried = [route for route in self.routes if route.address.transport in self.transports]
-        if self.routes and not carried:
-            names = sorted({route.address.transport for route in self.routes})
-            problems.append(
-                f"this bridge carries {', '.join(sorted(self.transports))!r}, but no active "
-                "route uses it; "
-                f"declared transports: {', '.join(names)}"
-            )
+        problems = self.blocking_problems()
+        self._refresh_health(self.clock())
         problems.extend(
-            (f"{OPERATORS_ENV} has no {name!r} operators, so steward would answer nobody")
-            for name in sorted({route.address.transport for route in carried})
-            if not self._operators_for(name)
+            f"{route.key}: {problem}"
+            for route in self.carried()
+            for problem in self._health[route.key].problems
         )
-        for route in carried:
-            token = self.token_for(route)
-            if not token:
-                problems.append(
-                    f"{route.key}: no token — set {route.address.token_env} to the token "
-                    f"issued for {route.address}"
-                )
-            elif route.address.transport == DISCORD:
-                if route.key not in self._identities:
-                    self._identities[route.key] = _transport_identity(
-                        self.transports[DISCORD], token
-                    )
-                identity = self._identities[route.key]
-                if identity is None:
-                    problems.append(
-                        f"{route.key}: {route.address.token_env} could not identify a Discord bot"
-                    )
-            complaint = chat_complaint(route.resident.manifest)
-            if complaint is not None:
-                problems.append(f"{route.key}: {complaint}")
-        if not self.routes:
-            problems.append(
-                "no resident declares an active chat route, so there is nothing to poll; "
-                "add routes: [{kind: chat, address: telegram:<bot>, status: active}] to a "
-                "manifest"
-            )
         return problems
 
     def require_ready(self) -> None:
-        """Raise :class:`ChatError` unless at least one conversation could actually happen."""
-        problems = self.preflight()
+        """Raise :class:`ChatError` unless some conversation could happen through this process.
+
+        Deliberately narrower than :meth:`preflight` (warren#456). It used to raise on
+        everything preflight found, so one resident's unusable Discord token exited the
+        daemon — and because there is one process for every route, a healthy Telegram bot on
+        another resident went dark with it and stayed dark through nine restarts. A problem
+        that belongs to one route now stays there.
+        """
+        problems = self.blocking_problems()
         if problems:
             raise ChatError("\n".join(problems))
 
@@ -1806,9 +1960,10 @@ class ChatBridge:
                 refresh(moment)
             except Exception as exc:  # noqa: BLE001 — mirror context cannot stop chat
                 log.warning("Discord guild mirror refresh failed: %s", exc)
-        outcomes: list[ChatOutcome] = []
-        for route in self.deliverable():
-            outcomes.extend(self._poll_route(route, moment))
+        outcomes: list[ChatOutcome] = self._refresh_health(moment)
+        for route in self.carried():
+            if self._health[route.key].reachable:
+                outcomes.extend(self._poll_route(route, moment))
         self._report_storms(moment)
         return outcomes
 
@@ -1835,7 +1990,7 @@ class ChatBridge:
     def _poll_route(self, route: ChatRoute, now: datetime) -> list[ChatOutcome]:
         """Poll one bot and answer everything it hands over, oldest first."""
         token = self.token_for(route)
-        if token is None:  # pragma: no cover — deliverable() already filtered these out
+        if token is None:  # pragma: no cover — reachable() already filtered these out
             return []
         try:
             messages = self.transports[route.address.transport].poll(
@@ -2311,6 +2466,9 @@ class ChatBridge:
         That is also why nothing accumulates unless the loop is bounded — a list holding one
         record per message answered since Tuesday is a leak, not a report.
         """
+        # Only the problems that make this *process* pointless (warren#456). A route that
+        # cannot carry a message is reported by the first pass and skipped by every one
+        # after it, until a recheck finds it healthy again.
         self.require_ready()
         outcomes: list[ChatOutcome] = []
         polls = 0
@@ -2328,7 +2486,14 @@ class ChatBridge:
                     )
                 if max_polls is not None:
                     outcomes.extend(pass_outcomes)
-                if any(outcome.status is ChatStatus.UNREACHABLE for outcome in pass_outcomes):
+                if not any(health.reachable for health in self._health.values()):
+                    # Every door is shut, each for a reason that is re-asked on a timer.
+                    # Waiting for that timer is the whole of the work left, so wait for it
+                    # rather than spinning through empty passes a second apart. Read off the
+                    # health the pass above just measured, so the loop never asks the clock
+                    # a second time and never re-checks a route outside a pass.
+                    sleep(self.recheck_s)
+                elif any(outcome.status is ChatStatus.UNREACHABLE for outcome in pass_outcomes):
                     sleep(UNREACHABLE_SLEEP_S)
                 elif not pass_outcomes:
                     sleep(self.idle_sleep_s)
