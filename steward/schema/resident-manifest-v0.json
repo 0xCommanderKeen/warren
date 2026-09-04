@@ -772,7 +772,9 @@
     "SessionGrant": {
       "description": "A write door an authenticated resident session may cross.",
       "enum": [
-        "skills.write"
+        "skills.write",
+        "residents.declare",
+        "residents.dry_run"
       ],
       "title": "SessionGrant",
       "type": "string"

@@ -160,13 +160,22 @@ audit trail it leaves behind. So a named operator gets their own credential too
 The write allowlist below is about **sessions** and is untouched by operator credentials.
 It exists to keep a running resident out of human acts, and an operator is the human.
 
-**What a session may reach.** Every `GET`, plus `POST /delegate`. A resident whose current
-manifest declares `session_grants: [skills.write]` may also `POST /skills` and `PUT` an
-ungranted skill. It may not set `defaults: true` (a fleet-wide grant is a human act) or
-replace a skill any resident manifest already grants. Those narrowings and every other
-write path are `403 session_credential_forbidden`, naming the act, and nothing is recorded.
-The allowlist consults the resident named by the live credential; request data cannot name
-a different one. Adding a route does not make it session-reachable by accident.
+**What a session may reach.** Every `GET`, plus `POST /delegate`. Named `session_grants`
+may open three deliberately narrow doors beside that permanent allowlist:
+
+- `skills.write` permits `POST /skills` and `PUT` of an ungranted skill. It may not set
+  `defaults: true` or replace a skill any resident manifest already grants.
+- `residents.declare` permits `POST /residents` with `deploy: false` only. The skeleton is
+  validated and committed exactly like an operator's, authored by the session resident.
+- `residents.dry_run` permits `POST /residents/{id}/provision` with an explicit
+  `dry_run: true` only. It returns the full bundle, compose, command, next-fire and
+  environment-key plan without reaching a host.
+
+The narrowings and every other write path are `403 session_credential_forbidden`, naming
+the act, and nothing is recorded. In particular, declaration edits and retirement stay
+closed even to a session holding both resident grants. The allowlist consults the resident
+named by the live credential; request data cannot name a different one. Adding a route does
+not make it session-reachable by accident.
 
 That allowlist is what makes the write API (steward #214) safe to have at all. A resident
 that could `PUT` its own declaration would be choosing the rules it is held to, and one
@@ -197,12 +206,12 @@ worth knowing:
   escalation boundary. A session that could decide would be answering its own knock, and
   every guarantee downstream of "a human decided", expiry's deny-by-default included,
   would only be as strong as the session not noticing.
-- **`POST /residents`** — declaring a resident is a human act.
+- **`POST /residents`** — declaring a resident is a human act unless the caller holds
+  `residents.declare`; even then, deployment remains human-only.
 - **`POST /residents/{id}/provision`** — provisioning is starting a container on a machine
-  over ssh. A session that could do it would be building its own colleagues, or itself
-  again. Named separately from declaring, and matched ahead of it, because the two are
-  different acts and a refusal that called this one "declaring" would be describing
-  something the caller did not try.
+  over ssh. `residents.dry_run` opens only its no-host planning form. Named separately from
+  declaring, and matched ahead of it, because the two are different acts and a refusal that
+  called this one "declaring" would be describing something the caller did not try.
 - **`POST /residents/{id}/retire`** — retiring is ending a resident: a mark in git, a
   container stopped, a village token removed. A session that could do it would be deciding
   which of its colleagues carries on, or dismissing itself. Matched ahead of declaring for
@@ -1077,9 +1086,9 @@ move the *typing* into a control panel while keeping every guarantee that rule b
 
 Four rules hold for all of them.
 
-Declaration writes are human-only. Skill writes also accept the deliberately narrower
-`skills.write` session grant described under
-[Three kinds of caller](#three-kinds-of-caller).
+Declaration updates are human-only. A new skeleton may also be written with the narrow
+`residents.declare` session grant, and skill writes accept the similarly narrow
+`skills.write` grant described under [Three kinds of caller](#three-kinds-of-caller).
 
 **An invalid write is never written.** The candidate is applied to a throwaway *copy* of
 the tree and validated there with the same gate `steward validate` runs, and only a copy

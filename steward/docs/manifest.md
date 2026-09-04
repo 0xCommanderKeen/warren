@@ -182,11 +182,13 @@ the default skills without asking, so re-granting one says nothing and is left o
 ## `session_grants` — narrow API write doors
 
 Absent means none. The value is a list of closed, named doors; an unknown name or a value
-that is not a list fails manifest validation at `session_grants`. The only door in v0 is:
+that is not a list fails manifest validation at `session_grants`. The doors in v0 are:
 
 ```yaml
 session_grants:
   - skills.write
+  - residents.declare
+  - residents.dry_run
 ```
 
 `skills.write` lets this resident's live session credential reach `POST /skills` and
@@ -194,6 +196,12 @@ session_grants:
 refused because granting a skill to the fleet is a human act, and a session cannot `PUT`
 a skill named in any resident manifest because that would rewrite already-granted
 instructions. Every other session write remains closed.
+
+`residents.declare` opens `POST /residents` only for a declaration with `deploy: false`;
+the accepted skeleton is validated and committed under the session resident's identity.
+`residents.dry_run` opens `POST /residents/{id}/provision` only with an explicit
+`dry_run: true`, returning the same plan an operator sees without reaching the host.
+Neither door permits declaration edits, retirement, deployment, or real provisioning.
 
 A name the library does not have fails validation with the closest match named:
 

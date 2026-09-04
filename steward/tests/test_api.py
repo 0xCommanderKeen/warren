@@ -4372,11 +4372,12 @@ def test_reload_picks_up_a_routine_added_since_startup(
 def test_a_session_may_not_write_anything_the_fleet_is_declared_by(
     writable: Callable[..., Harness],
 ) -> None:
-    """The allowlist holds by construction; this is the proof, route by route.
+    """Without named grants, the allowlist holds by construction, route by route.
 
     A resident editing its own charter would be choosing the rules it is held to, and a
     resident writing a skill would be handing itself instructions nobody approved. Both are
-    refused for the same reason `POST /residents` always was.
+    refused unless the manifest opens the corresponding narrow door; declaration edits
+    remain closed under every grant.
     """
     harness = writable()
     credential = open_session_run(harness)
@@ -4466,6 +4467,96 @@ def test_a_granted_session_cannot_grant_everyone_or_rewrite_a_granted_skill(
         ).status_code
         == 200
     )
+
+
+def test_a_session_granted_residents_declare_can_only_declare_without_deploying(
+    writable: Callable[..., Harness],
+) -> None:
+    manifest = copy.deepcopy(valid_manifest())
+    manifest["session_grants"] = ["residents.declare"]
+    harness = writable(manifest=manifest)
+    credential = open_session_run(harness)
+
+    declared = harness.client.post(
+        "/residents", json=NEW_RESIDENT | {"deploy": False}, headers=as_session(credential)
+    )
+    deploying = harness.client.post(
+        "/residents",
+        json=NEW_RESIDENT | {"id": "deployed-colleague", "deploy": True},
+        headers=as_session(credential),
+    )
+
+    assert declared.status_code == 201, declared.text
+    assert declared.json()["commit"]["committed"]
+    assert "test-agent (session) <test-agent-session@localhost>" in last_commit(harness)
+    assert deploying.status_code == 403
+    assert "deploying" in deploying.json()["detail"]["message"]
+    assert not (harness.residents_dir / "deployed-colleague").exists()
+
+
+@pytest.mark.usefixtures("village")
+def test_a_session_granted_residents_dry_run_gets_the_plan_without_reaching_the_host(
+    api: ApiFactory, tmp_path: Path
+) -> None:
+    manifest = copy.deepcopy(valid_manifest())
+    manifest["session_grants"] = ["residents.dry_run"]
+    host = LocalTransport(root=tmp_path / "nas")
+    harness = api(manifest=manifest, transport=host)
+    credential = open_session_run(harness)
+
+    response = harness.client.post(
+        "/residents/test-agent/provision",
+        json={"dry_run": True},
+        headers=as_session(credential),
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["dry_run"] is True
+    assert {"files", "compose", "commands", "env_keys"} <= set(body["provision"])
+    assert "next_fires" in body["register"]
+    assert not host.touched
+
+
+@pytest.mark.parametrize("body", [None, {"dry_run": False}])
+def test_a_session_granted_residents_dry_run_cannot_provision_for_real(
+    api: ApiFactory, body: dict[str, bool] | None
+) -> None:
+    manifest = copy.deepcopy(valid_manifest())
+    manifest["session_grants"] = ["residents.dry_run"]
+    harness = api(manifest=manifest)
+    credential = open_session_run(harness)
+
+    response = harness.client.post(
+        "/residents/test-agent/provision", json=body, headers=as_session(credential)
+    )
+
+    assert response.status_code == 403
+    assert "provisioning" in response.json()["detail"]["message"]
+
+
+def test_resident_session_grants_never_open_declaration_edits_or_retirement(
+    writable: Callable[..., Harness],
+) -> None:
+    manifest = copy.deepcopy(valid_manifest())
+    manifest["session_grants"] = ["residents.declare", "residents.dry_run"]
+    harness = writable(manifest=manifest)
+    credential = open_session_run(harness)
+
+    declaration_edit = harness.client.put(
+        "/residents/test-agent/declaration",
+        json={"manifest": manifest},
+        headers=as_session(credential),
+    )
+    retirement = harness.client.post(
+        "/residents/test-agent/retire",
+        json={"dry_run": True},
+        headers=as_session(credential),
+    )
+
+    assert declaration_edit.status_code == 403
+    assert retirement.status_code == 403
+    assert harness.store.requests() == []
 
 
 def test_a_session_may_still_read_the_declaration_it_is_bound_by(

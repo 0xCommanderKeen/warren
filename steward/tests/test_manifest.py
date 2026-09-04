@@ -667,13 +667,13 @@ def test_unknown_field_is_rejected(write_resident: ResidentWriter) -> None:
 
 def test_session_grants_accept_only_named_doors(write_resident: ResidentWriter) -> None:
     data = valid_manifest()
-    data["session_grants"] = ["skills.write"]
+    data["session_grants"] = ["skills.write", "residents.declare", "residents.dry_run"]
     assert m.validate_manifest(write_resident(data)).ok
 
     data["session_grants"] = ["skills.destroy"]
     unknown = m.validate_manifest(write_resident(data))
     assert "session_grants[0]" in {item.field_path for item in unknown.diagnostics}
-    assert "skills.write" in problem_for(unknown, "session_grants[0]")
+    assert "residents.declare" in problem_for(unknown, "session_grants[0]")
 
     data["session_grants"] = "skills.write"
     not_a_list = m.validate_manifest(write_resident(data))
