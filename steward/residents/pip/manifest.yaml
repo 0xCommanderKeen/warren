@@ -48,6 +48,13 @@ routes:
     note: >-
       Pip's own Telegram bot, and the fleet's chat canary. Pending until
       STEWARD_CHAT_TOKEN_PIP is set on the burrow — see docs/chat.md.
+  - id: discord
+    kind: chat
+    address: discord:pip
+    status: pending
+    note: >-
+      Pip's Discord DM canary. Pending until STEWARD_CHAT_TOKEN_DISCORD_PIP and a
+      discord:<user-id> operator are set on the burrow — see docs/chat.md.
 
 app_grants: []
 
