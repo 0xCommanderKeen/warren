@@ -458,6 +458,8 @@ def test_the_shipped_library_parses_and_has_a_default_set() -> None:
         "write-blog-post",
         "vault-keeper",
         "morning-digest",
+        "write-skill",
+        "raise-resident",
     } <= set(loaded.names)
 
 
@@ -509,6 +511,21 @@ def test_the_vault_keeping_skills_are_granted_not_default() -> None:
         skill = loaded.get(name)
         assert skill is not None, f"{name} is not in the shipped library"
         assert not skill.default, f"{name} must be granted, not handed to every resident"
+
+
+def test_hrs_two_crafts_are_granted_not_default() -> None:
+    """Writing skills and drafting residents is one resident's job, not the fleet's.
+
+    ``write-skill``'s own body says ``defaults: true`` is never the writer's to set
+    (warren#412); shipping either of these as a default would be the library breaking its
+    own rule on the way in.
+    """
+    loaded = sk.load_library(LIBRARY)
+    for name in ("write-skill", "raise-resident"):
+        skill = loaded.get(name)
+        assert skill is not None, f"{name} is not in the shipped library"
+        assert not skill.default, f"{name} must be granted, not handed to every resident"
+        assert skill.description, f"{name} needs a description; it is what triggers it"
 
 
 def test_vault_keeper_points_at_the_vaults_own_conventions_rather_than_copying_them() -> None:
