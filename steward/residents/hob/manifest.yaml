@@ -81,6 +81,10 @@ runner:
   kind: claude
   model: claude-opus-5
   placement: container
+  # A headless session cannot answer a permission prompt, and Hob's work is git: pull,
+  # commit, push. Nothing narrower lets those run (warren#391); the container, the
+  # mounts and the workspace are the boundary. Narrow on evidence — warren#388.
+  permission_mode: bypassPermissions
 
 budgets:
   daily_cost_usd: 10.0
@@ -102,8 +106,8 @@ deploy:
       mode: ro
 
 routines:
-  # Delivery to chat (reply NOTHING ⇒ send nothing) is warren#385; until then the
-  # digest is written and harvested but not sent.
+  # The digest goes to the phone through the chat route (warren#385); NOTHING is the
+  # one reply that sends nothing.
   - id: morning-digest
     schedule: "0 8 * * *"
     schedule_tz: Europe/Ljubljana
@@ -114,6 +118,8 @@ routines:
       - morning-digest
     timeout_s: 600
     enabled: true
+    deliver: chat
+    quiet_word: NOTHING
   - id: close-of-day
     schedule: "30 22 * * *"
     schedule_tz: Europe/Ljubljana

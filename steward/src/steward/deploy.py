@@ -397,6 +397,17 @@ def render_compose(
             "CHRONICLE_URL": ("${CHRONICLE_URL:?steward writes this into .env at provision time}"),
             "CHRONICLE_TOKEN": "${CHRONICLE_TOKEN-}",
             "STEWARD_RESIDENT": resident.id,
+            # The resident image runs as root (no USER: the vault and key mounts are
+            # root-owned), and the claude CLI refuses `--permission-mode
+            # bypassPermissions` for root — "cannot be used with root/sudo privileges" —
+            # unless IS_SANDBOX=1 says the process is already inside a sandbox. This
+            # container is that sandbox: the mounts under deploy.mounts and the
+            # workspace grant are the boundary, not the CLI's per-call prompt, which a
+            # headless session could never answer anyway. Stated here for every
+            # resident because it is true of every resident; it changes nothing for a
+            # manifest that names no permission mode. Measured 2026-09-04 in
+            # steward-hob against CLI 2.1.243 (warren#391).
+            "IS_SANDBOX": "1",
         },
         "volumes": [
             f"./memory:{memory_path}",
