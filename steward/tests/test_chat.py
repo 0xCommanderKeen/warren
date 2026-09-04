@@ -465,7 +465,9 @@ def test_the_report_names_the_variable_the_token_belongs_in(
 
 def test_the_report_never_carries_the_token_itself(write_resident: ResidentWriter, tmp_path: Path):
     resident = load_manifest(write_resident(chat_manifest(tmp_path / "memory")))
-    [report] = ch.describe_chat([resident], {"STEWARD_CHAT_TOKEN_TESTY": FAKE_BOT_TOKEN})
+    [report] = ch.describe_chat(
+        [resident], {"STEWARD_CHAT_TOKEN_TESTY": FAKE_BOT_TOKEN, ch.OPERATORS_ENV: OPERATOR}
+    )
     assert report.token_set
     assert report.reachable
     assert FAKE_BOT_TOKEN not in json.dumps(report.to_dict())
@@ -1652,6 +1654,7 @@ def test_chat_list_discovers_a_discord_bot_handle(
     discord_api.queue("GET", "/users/@me", (200, {"id": "42", "username": "Pip"}))
     monkeypatch.setenv("STEWARD_CHAT_TOKEN_DISCORD_TESTY", FAKE_DISCORD_TOKEN)
     monkeypatch.setenv(ch.DISCORD_API_URL_ENV, discord_api.url)
+    monkeypatch.setenv(ch.OPERATORS_ENV, "discord:31337")
 
     result = runner.invoke(main, ["chat", "list", "--residents", str(tree)])
 
@@ -1876,6 +1879,7 @@ def test_chat_list_names_the_variable_and_never_prints_the_token(
     runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path, monkeypatch
 ):
     monkeypatch.setenv("STEWARD_CHAT_TOKEN_TESTY", FAKE_BOT_TOKEN)
+    monkeypatch.setenv(ch.OPERATORS_ENV, OPERATOR)
     tree = write_resident(chat_manifest(tmp_path / "memory")).parent.parent
 
     result = runner.invoke(main, ["chat", "list", "--residents", str(tree)])
@@ -1961,7 +1965,9 @@ def test_a_discord_route_names_its_missing_token(write_resident: ResidentWriter,
     [report] = ch.describe_chat([resident], {})
 
     assert not report.reachable
-    assert report.note == "no token: set STEWARD_CHAT_TOKEN_DISCORD_TESTY to the bot token"
+    assert report.note == (
+        "no token — set STEWARD_CHAT_TOKEN_DISCORD_TESTY to the token issued for discord:testy"
+    )
 
 
 def test_chat_list_reports_unknown_configured_discord_rooms(
@@ -1983,10 +1989,12 @@ def test_chat_list_reports_unknown_configured_discord_rooms(
         {
             "STEWARD_CHAT_TOKEN_DISCORD_TESTY": FAKE_BOT_TOKEN,
             "STEWARD_CHAT_DISCORD_GUILD": "home",
+            ch.OPERATORS_ENV: "discord:31337",
         },
         transports={"discord": DiscordRooms()},
     )
 
+    assert report.reachable, "an unknown room breaks posts_to and nothing else"
     assert report.note == "unknown Discord channel name(s): missing"
 
 
@@ -2009,11 +2017,39 @@ def test_chat_list_reports_unknown_configured_discord_listen_channels(
         {
             "STEWARD_CHAT_TOKEN_DISCORD_TESTY": FAKE_BOT_TOKEN,
             "STEWARD_CHAT_DISCORD_GUILD": "home",
+            ch.OPERATORS_ENV: "discord:31337",
         },
         transports={"discord": DiscordRooms()},
     )
 
+    assert report.reachable, "an unknown room breaks listens_in and nothing else"
     assert report.note == "unknown Discord channel name(s): missing"
+
+
+def test_chat_list_and_the_daemon_shut_a_route_on_the_same_facts(
+    write_resident: ResidentWriter, store: Store, tmp_path: Path
+):
+    """The listing an operator reads and the daemon's own view are one check (warren#456)."""
+    resident = load_manifest(write_resident(chat_manifest(tmp_path / "memory")))
+    # A token, a transport, a transcript — and nobody in STEWARD_CHAT_OPERATORS. This is the
+    # shape that used to print `reachable` while the daemon silently never polled it.
+    env = {"STEWARD_CHAT_TOKEN_TESTY": FAKE_BOT_TOKEN}
+    bridge = ch.ChatBridge(
+        routes=ch.chat_routes([resident]),
+        store=store,
+        tokens=ch.tokens_from_env(env),
+        operators=ch.operators_from_env(env),
+        transport=FakeTransport(),
+        clock=lambda: NOW,
+        state_path=tmp_path / "state" / "scheduler.json",
+    )
+
+    [report] = ch.describe_chat([resident], env, transports={"telegram": FakeTransport()})
+
+    assert not report.reachable
+    assert bridge.reachable() == []
+    assert report.note is not None
+    assert any(report.note in problem for problem in bridge.preflight())
 
 
 def test_a_resident_with_nowhere_to_keep_a_conversation_says_so(tmp_path: Path):
@@ -2055,7 +2091,9 @@ def test_chat_list_says_a_resident_has_nowhere_to_keep_a_conversation(
     declared["memory"] = {"kind": "file", "path": str(tmp_path / "memory.md")}
     resident = load_manifest(write_resident(declared))
 
-    [report] = ch.describe_chat([resident], {"STEWARD_CHAT_TOKEN_TESTY": FAKE_BOT_TOKEN})
+    [report] = ch.describe_chat(
+        [resident], {"STEWARD_CHAT_TOKEN_TESTY": FAKE_BOT_TOKEN, ch.OPERATORS_ENV: OPERATOR}
+    )
 
     assert not report.reachable
     assert report.note is not None

@@ -216,10 +216,12 @@ Discord token that names no bot, a resident with nowhere to keep a transcript.
 **A route's problem is a route's problem** (warren#456). None of the above stops the daemon:
 the route is marked unreachable, the reason is said once in the log and stands in this
 listing, every other route keeps being polled, and the shut one is asked again every five
-minutes — so a token corrected in the burrow's environment or an API that was down comes back
-without anybody recreating the service. Only two things refuse to start `steward chat run`,
-and both mean the process has nothing to do at all: no resident declares an active chat
-route, or none declares one on a transport this build can carry.
+minutes — so a bot re-enabled in Discord's Developer Portal, or an API that was down, comes
+back without anybody recreating the service. A **token** is not one of those: it is read
+from the environment at startup, so correcting it in `.env` still needs the service
+recreated. Only two things refuse to start `steward chat run`, and both mean the process has
+nothing to do at all: no resident declares an active chat route, or none declares one on a
+transport this build can carry.
 
 ### 6. Run the daemon
 

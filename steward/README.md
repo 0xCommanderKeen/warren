@@ -234,10 +234,13 @@ every answered message, so a handoff written mid-conversation is delivered befor
 read the reply.
 
 One process carries every route, so no route may take it down (warren#456): a bot the token
-cannot identify, an unset variable or a resident with nowhere to keep a transcript marks
-that one doorway unreachable in `steward chat list` and in the log, is re-asked every five
-minutes, and leaves every other conversation running. The daemon refuses to start only when
-nothing declares a chat route it could carry.
+cannot identify, an unset variable, an operator list with nobody on that transport or a
+resident with nowhere to keep a transcript marks that one doorway unreachable — in the log
+and in `steward chat list`, which decides on the same facts — and leaves every other
+conversation running. What is asked again every five minutes is what can change on the far
+side of the wire; a corrected token, like any environment variable, still needs the service
+recreated. The daemon refuses to start only when nothing declares a chat route it could
+carry.
 
 It is a separate process sharing the scheduler's state directory — which is exactly what
 the cross-process session claim (warren#111) is for — and long polling means every
