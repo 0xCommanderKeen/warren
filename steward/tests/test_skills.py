@@ -7,6 +7,7 @@ import pytest
 
 from conftest import REPO_ROOT, ResidentWriter, SkillWriter, valid_manifest
 from steward import manifest as m
+from steward import prompt as p
 from steward import skills as sk
 
 LIBRARY = REPO_ROOT / "skills"
@@ -452,7 +453,14 @@ def test_the_shipped_library_parses_and_has_a_default_set() -> None:
         "research",
         "write-journal",
     }
-    assert {"read-inbox", "read-calendar", "errands", "write-blog-post"} <= set(loaded.names)
+    assert {
+        "read-inbox",
+        "read-calendar",
+        "errands",
+        "write-blog-post",
+        "vault-keeper",
+        "morning-digest",
+    } <= set(loaded.names)
 
 
 def test_every_shipped_skill_is_written_for_a_session_to_read() -> None:
@@ -482,3 +490,73 @@ def test_a_resident_that_grants_nothing_still_holds_the_defaults(
     assert [s.name for s in sk.effective_skills(resident.manifest, library(tmp_path))] == [
         "write-journal"
     ]
+
+
+# ------------------------------------------------------ the Life Agent's skills (warren#383)
+
+
+def test_the_life_agent_skills_are_granted_not_default() -> None:
+    """Keeping a vault is one resident's job; the library offers it, nobody holds it unasked."""
+    loaded = sk.load_library(LIBRARY)
+    for name in ("vault-keeper", "morning-digest"):
+        skill = loaded.get(name)
+        assert skill is not None, f"{name} is not in the shipped library"
+        assert skill.description
+        assert not skill.default, f"{name} must be granted, not handed to every resident"
+
+
+def test_vault_keeper_points_at_the_vaults_own_conventions_rather_than_copying_them() -> None:
+    """The vault's CLAUDE.md is the authority; the skill points at it rather than copying it.
+
+    A copy would drift from Miha's own conventions the first time they edited them
+    (warren#383).
+    """
+    skill = sk.load_library(LIBRARY).get("vault-keeper")
+    assert skill is not None
+    assert "/vault" in skill.body
+    assert "CLAUDE.md" in skill.body
+    assert "Prime directive" not in skill.body, "the vault's own text belongs in the vault"
+
+
+def test_both_skills_reach_the_prompt_with_the_receipt_rule_and_the_quiet_word() -> None:
+    """The old bot's turn protocol and the digest's prompt reach a session as skills.
+
+    A resident session no longer reads a CLAUDE.md in its working directory
+    (``--setting-sources ""``, warren#206), so the skills section of the assembled prompt
+    is the one channel that still carries them (warren#383).
+    """
+    library = sk.load_library(LIBRARY)
+    manifest = manifest_with("vault-keeper", "morning-digest")
+    resolved = sk.effective_skills(manifest, library)
+    assert [s.name for s in resolved][-2:] == ["vault-keeper", "morning-digest"]
+
+    text = p.assemble_preamble(manifest, None, None, resolved)
+    skills_section = text.split(p.SKILLS_FRAME)[1].split("=" * 72)[0]
+
+    # the receipt rule, as the old bot printed it
+    assert "📝 Saved (" in skills_section
+    assert "🗑" in skills_section
+    assert "no receipt means nothing was saved" in skills_section.lower()
+    # the digest's quiet word
+    assert "NOTHING" in skills_section
+    # dates are the household's wall clock, not the container's
+    assert "TZ=Europe/Ljubljana date" in skills_section
+
+
+def test_vault_keeper_fits_beside_the_default_set_without_truncation() -> None:
+    """The default set plus both skills stays under the injection cap.
+
+    Every session that holds a skill pays for it, and the whole set is cut at
+    :data:`steward.prompt.SKILLS_MAX_CHARS` — a vault-keeper that pushed the defaults over
+    the cap would silently lose whichever skill came last.
+    """
+    library = sk.load_library(LIBRARY)
+    manifest = manifest_with("vault-keeper", "morning-digest")
+    resolved = sk.effective_skills(manifest, library)
+    rendered = p.render_skills(resolved)
+    assert len(rendered) <= p.SKILLS_MAX_CHARS, (
+        f"the default set plus vault-keeper and morning-digest renders at {len(rendered)} "
+        f"characters; the injection cap is {p.SKILLS_MAX_CHARS}"
+    )
+    text = p.assemble_preamble(manifest, None, None, resolved)
+    assert "[truncated at the injection cap]" not in text
