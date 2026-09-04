@@ -287,6 +287,24 @@ class EventLog:
                 cursor = EventCursor.issued(boot_id, None, self._generation, 0).format()
             return events, cursor, self._generation
 
+    def projection_updates(self, raw_cursor):
+        """Read and parse only complete records after a server-issued cursor.
+
+        A changed namespace (restart, replacement, or rotation generation) resets the
+        read to byte zero, making the canonical live log the rebuild authority.
+        """
+        cursor = EventCursor.parse(raw_cursor)
+        if cursor.boot_id is None:
+            raise ValueError("projection cursors must be server-issued")
+        records, current, reset = self.read_records(cursor.boot_id, cursor)
+        events = []
+        for _, line in records:
+            try:
+                events.append(json.loads(line, parse_constant=_reject_json_constant))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                events.append(None)
+        return events, current.format(), current.generation, reset
+
     def read_records(self, boot_id, cursor):
         with self.lock:
             self._maybe_rotate_locked()

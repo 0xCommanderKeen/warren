@@ -9,6 +9,44 @@ from tests.test_village_state import NOW, event
 
 
 class StateCoordinatorTests(unittest.TestCase):
+    def test_reads_only_new_projection_inputs_after_the_initial_build(self):
+        old = [event("tool_called", tool="Read") for _ in range(100)]
+        newest = event("idle", minutes=1)
+        update_calls = []
+
+        def updates(cursor):
+            update_calls.append(cursor)
+            return [newest], "cursor-2", 1, False
+
+        coordinator = StateCoordinator(
+            lambda: (old, "cursor-1", 1),
+            lambda: [],
+            ProjectionPolicy(),
+            read_updates=updates,
+        )
+        coordinator.evaluate(NOW)
+        changed = coordinator.evaluate(NOW + dt.timedelta(minutes=1))
+
+        self.assertEqual(["cursor-1"], update_calls)
+        self.assertEqual("cursor-2", changed["cursor"])
+        self.assertEqual("resting", changed["villagers"][0]["state"])
+
+    def test_a_projection_cursor_reset_rebuilds_from_the_canonical_live_log(self):
+        initial = event("tool_called", tool="Read")
+        retained = event("idle", minutes=1)
+        coordinator = StateCoordinator(
+            lambda: ([initial], "cursor-1", 0),
+            lambda: [],
+            ProjectionPolicy(),
+            read_updates=lambda _cursor: ([retained], "cursor-2", 1, True),
+        )
+        coordinator.evaluate(NOW)
+        rebuilt = coordinator.evaluate(NOW + dt.timedelta(minutes=1))
+
+        self.assertEqual("cursor-2", rebuilt["cursor"])
+        self.assertEqual("resting", rebuilt["villagers"][0]["state"])
+        self.assertEqual(1, rebuilt["log_generation"])
+
     def test_atomically_publishes_new_generations_and_ignores_no_change(self):
         evidence = [event("tool_called", tool="Read")]
         coordinator = StateCoordinator(

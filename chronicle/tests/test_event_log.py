@@ -488,6 +488,34 @@ class EventLogTests(unittest.TestCase):
         self.assertTrue(cursor.endswith(f":{self.path.stat().st_size}"))
         self.assertEqual(generation, 0)
 
+    def test_projection_updates_parse_only_records_after_the_cursor(self):
+        for index in range(200):
+            self.assertTrue(self.log.append(self.event(f"old-{index}")))
+        _, cursor, _ = self.log.projection_inputs("a" * 32)
+        newest = self.event("newest")
+        self.assertTrue(self.log.append(newest))
+
+        with patch("event_log.json.loads", wraps=json.loads) as loads:
+            events, next_cursor, generation, reset = self.log.projection_updates(cursor)
+
+        self.assertEqual([newest], events)
+        self.assertEqual(1, loads.call_count)
+        self.assertNotEqual(cursor, next_cursor)
+        self.assertEqual(0, generation)
+        self.assertFalse(reset)
+
+    def test_projection_updates_rebuild_after_rotation_changes_the_cursor_namespace(self):
+        first = self.event("first")
+        self.assertTrue(self.log.append(first))
+        _, cursor, _ = self.log.projection_inputs("a" * 32)
+        self.log._generation += 1
+
+        events, _, generation, reset = self.log.projection_updates(cursor)
+
+        self.assertEqual([first], events)
+        self.assertEqual(1, generation)
+        self.assertTrue(reset)
+
 
 if __name__ == "__main__":
     unittest.main()
