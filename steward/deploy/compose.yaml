@@ -18,6 +18,8 @@
 # that same .env by deploy/deploy.sh so that a rollback is "edit one line, `up -d`". The
 # deploy key that pushes the residents checkout is the file residents-key beside them,
 # mode 0600, mounted into the API and nothing else (deploy/README.md says how it is made).
+# Each daemon's local event log and undelivered queue instead live under ./data, named by
+# service below: they are operational state, not configuration, and survive a recreate.
 #
 # The residents tree is NOT the image's (warren#351). It is a git checkout on the burrow —
 # ~/docker/warren/steward/residents-repo, a sparse clone of this repository on the branch
@@ -47,32 +49,34 @@
 # the mount every container-placed resident is "unprovisioned" to the scheduler no matter
 # what was provisioned, and it refuses to start.
 
+x-steward-environment: &steward-environment
+  STEWARD_STATE: /data/state.json
+  STEWARD_BURROW: dxp2800
+  # The deploy user's home on this machine: what every ~/ in a manifest or a rendered
+  # path means to the API, the scheduler and the watchdog alike, instead of the image's
+  # /root. The residents mount below sits at the same path in every container.
+  STEWARD_BURROW_HOME: /home/Miha
+  # The village, through arcadia's origin, which proxies /events to chronicle on 8738.
+  CHRONICLE_URL: http://dockerhost:8737
+  # Read by the API alone: every commit the write API makes is pushed to this branch of
+  # the checkout's origin. Best effort — a save is durable before the push starts, and a
+  # burrow that cannot reach GitHub answers "committed, not pushed" and carries on. Never
+  # main: nothing lands there without a pull request, and a push to any other branch
+  # deploys nothing, so a charter edit cannot loop into a rollout of the fleet it edited.
+  STEWARD_PUSH_BRANCH: burrow/residents
+  # Bot tokens stay in the .env beside this compose file. Empty defaults let a fresh
+  # burrow come up green before chat is wired; the chat daemon names what it awaits.
+  STEWARD_CHAT_TOKEN_PIP: ${STEWARD_CHAT_TOKEN_PIP:-}
+  STEWARD_CHAT_TOKEN_HOB: ${STEWARD_CHAT_TOKEN_HOB:-}
+  STEWARD_CHAT_OPERATORS: ${STEWARD_CHAT_OPERATORS:-}
+  TZ: Europe/Ljubljana
+
 x-steward: &steward
   image: steward-cp:${STEWARD_IMAGE_TAG:?written by deploy/deploy.sh into .env}
   restart: unless-stopped
   init: true
   env_file: .env
-  environment:
-    STEWARD_STATE: /data/state.json
-    STEWARD_BURROW: dxp2800
-    # The deploy user's home on this machine: what every ~/ in a manifest or a rendered
-    # path means to the API, the scheduler and the watchdog alike, instead of the image's
-    # /root. The residents mount below sits at the same path in every container.
-    STEWARD_BURROW_HOME: /home/Miha
-    # The village, through arcadia's origin, which proxies /events to chronicle on 8738.
-    CHRONICLE_URL: http://dockerhost:8737
-    # Read by the API alone: every commit the write API makes is pushed to this branch of
-    # the checkout's origin. Best effort — a save is durable before the push starts, and a
-    # burrow that cannot reach GitHub answers "committed, not pushed" and carries on. Never
-    # main: nothing lands there without a pull request, and a push to any other branch
-    # deploys nothing, so a charter edit cannot loop into a rollout of the fleet it edited.
-    STEWARD_PUSH_BRANCH: burrow/residents
-    # Bot tokens stay in the .env beside this compose file. Empty defaults let a fresh
-    # burrow come up green before chat is wired; the chat daemon names what it awaits.
-    STEWARD_CHAT_TOKEN_PIP: ${STEWARD_CHAT_TOKEN_PIP:-}
-    STEWARD_CHAT_TOKEN_HOB: ${STEWARD_CHAT_TOKEN_HOB:-}
-    STEWARD_CHAT_OPERATORS: ${STEWARD_CHAT_OPERATORS:-}
-    TZ: Europe/Ljubljana
+  environment: *steward-environment
   extra_hosts:
     - "dockerhost:host-gateway"
   # No volumes here: a YAML merge is shallow and a list does not merge, so every service
@@ -82,6 +86,9 @@ services:
   api:
     <<: *steward
     container_name: steward-api
+    environment:
+      <<: *steward-environment
+      STEWARD_EVENTS_FALLBACK: /data/events/api.jsonl
     ports:
       - "8802:8801"
     volumes:
@@ -102,6 +109,9 @@ services:
   scheduler:
     <<: *steward
     container_name: steward-scheduler
+    environment:
+      <<: *steward-environment
+      STEWARD_EVENTS_FALLBACK: /data/events/scheduler.jsonl
     volumes:
       - ./data:/data
       - ./residents-repo:/checkout:ro
@@ -115,6 +125,9 @@ services:
   watchdog:
     <<: *steward
     container_name: steward-watchdog
+    environment:
+      <<: *steward-environment
+      STEWARD_EVENTS_FALLBACK: /data/events/watchdog.jsonl
     volumes:
       - ./data:/data
       - ./residents-repo:/checkout:ro
@@ -127,6 +140,9 @@ services:
   chat:
     <<: *steward
     container_name: steward-chat
+    environment:
+      <<: *steward-environment
+      STEWARD_EVENTS_FALLBACK: /data/events/chat.jsonl
     volumes:
       - ./data:/data
       - ./residents-repo:/checkout:ro

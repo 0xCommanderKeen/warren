@@ -89,6 +89,23 @@ def test_nothing_reads_the_tree_baked_into_the_image(services: dict[str, Any]) -
         assert "/app/skills" not in " ".join(service["command"]), name
 
 
+def test_every_daemon_keeps_its_event_queue_on_the_data_volume(
+    services: dict[str, Any],
+) -> None:
+    """A deploy recreates containers, so undelivered events must survive under /data."""
+    paths = {
+        name: service["environment"]["STEWARD_EVENTS_FALLBACK"]
+        for name, service in services.items()
+    }
+
+    assert paths == {
+        "api": "/data/events/api.jsonl",
+        "scheduler": "/data/events/scheduler.jsonl",
+        "watchdog": "/data/events/watchdog.jsonl",
+        "chat": "/data/events/chat.jsonl",
+    }
+
+
 def test_the_daemons_read_one_tree(services: dict[str, Any]) -> None:
     """A watchdog reading a wider list than the scheduler fires would report ghosts."""
     assert residents_of(services["scheduler"]) == residents_of(services["watchdog"])
