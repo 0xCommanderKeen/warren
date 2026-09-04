@@ -55,6 +55,7 @@ from steward.budgets import BudgetGuard
 from steward.chat import RoutineDelivery
 from steward.claims import ONE_SESSION_PER_RESIDENT, ResidentClaims
 from steward.deploy import Transport
+from steward.manifest import SessionGrant, validate_manifest
 from steward.nursery import (
     CommitIdentity,
     NurseryReport,
@@ -547,6 +548,16 @@ def create_app(  # noqa: PLR0913 — injectable collaborators are the public tes
     )
 
     session_principal, operator_principal = _principal_lookups(db, now)
+
+    def session_grants(resident_id: str) -> tuple[SessionGrant, ...]:
+        """Read the named resident's current declaration at the write door."""
+        result = validate_manifest(
+            residents_dir / resident_id / "manifest.yaml", settings.skills_dir
+        )
+        if not result.ok or not result.residents:
+            return ()
+        return tuple(result.residents[0].manifest.session_grants)
+
     lifespan = _lifespan_for(outbox, approvals, now, approval_expiry_interval_s)
     app = FastAPI(
         title="steward",
@@ -557,7 +568,15 @@ def create_app(  # noqa: PLR0913 — injectable collaborators are the public tes
         openapi_url=None,
         dependencies=[
             Depends(HTTPBearer(auto_error=False)),
-            Depends(_auth_dependency(token, session_principal, operator_principal, compare_digest)),
+            Depends(
+                _auth_dependency(
+                    token,
+                    session_principal,
+                    operator_principal,
+                    session_grants,
+                    compare_digest,
+                )
+            ),
         ],
         responses={
             401: {

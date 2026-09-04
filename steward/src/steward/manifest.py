@@ -65,6 +65,7 @@ __all__ = [
     "ROUTINE_DELIVER_CHAT",
     "SCHEMA_VERSION",
     "SECRET_REDACTION",
+    "SESSION_GRANT_SKILLS_WRITE",
     "UNRESTRICTED_TOOLS",
     "VOICE_MAX_CHARS",
     "AppGrant",
@@ -86,6 +87,7 @@ __all__ = [
     "Routine",
     "RoutineDeliverKind",
     "Runner",
+    "SessionGrant",
     "Severity",
     "SkillGrant",
     "SoulDocument",
@@ -191,6 +193,17 @@ MANY_FIRES_DISPLAY_THRESHOLD = 24
 #: anything" is then one grep over the tree, not an audit of which key is absent from which
 #: file. It is also the one word that makes ``tools`` safe to require of every manifest.
 UNRESTRICTED_TOOLS = "unrestricted"
+
+#: Named write doors a resident session may be granted. Closed here so a typo cannot
+#: silently become a permission that looks declared but never opens anything.
+SESSION_GRANT_SKILLS_WRITE = "skills.write"
+
+
+class SessionGrant(StrEnum):
+    """A write door an authenticated resident session may cross."""
+
+    SKILLS_WRITE = SESSION_GRANT_SKILLS_WRITE
+
 
 #: A built-in tool name as ``claude --tools`` spells it — ``Read``, ``Glob``, ``WebFetch``.
 #: Names only. ``--tools`` takes names *from the built-in set*, not the rule syntax that
@@ -1590,6 +1603,10 @@ class ResidentManifest(_Model):
     soul: SoulIdentity
     charter: Charter
     skills: list[SkillGrantInput] = Field(description="Granted capabilities (may be empty).")
+    session_grants: list[SessionGrant] = Field(
+        default_factory=list,
+        description="Named steward API write doors this resident's sessions may cross.",
+    )
     memory: Memory
     routes: list[Route] = Field(description="Declared inbound channels (may be empty).")
     app_grants: list[AppGrant] = Field(description="Declared app access (may be empty).")

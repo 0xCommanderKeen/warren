@@ -107,6 +107,7 @@ from steward.manifest import (
     ResidentManifest,
     Route,
     Runner,
+    SessionGrant,
     SkillGrant,
     SkillGrantInput,
     SoulDocument,
@@ -203,6 +204,10 @@ class NewResident(BaseModel):
     # the API happily took a list of names — and townhall's nursery form sends names
     # (warren#321).
     skills: list[SkillGrantInput] = Field(default_factory=list, description="Granted capabilities.")
+    session_grants: list[SessionGrant] = Field(
+        default_factory=list,
+        description="Named steward API write doors granted to this resident's sessions.",
+    )
     memory: Memory | None = Field(default=None, description="Memory location; derived if absent.")
     routes: list[Route] = Field(default_factory=list, description="Declared inbound channels.")
     app_grants: list[AppGrant] = Field(default_factory=list, description="Declared app access.")
@@ -306,6 +311,7 @@ def _manifest_model(spec: NewResident, *, home: int, uid: UUID | None = None) ->
             soul=SoulIdentity(name=spec.name, char=spec.char, accent=spec.accent, role=spec.role),
             charter=spec.charter,
             skills=spec.skills,
+            session_grants=spec.session_grants,
             memory=spec.resolved_memory(),
             routes=spec.routes,
             app_grants=spec.app_grants,
@@ -830,6 +836,7 @@ SPEC_FIELDS: tuple[str, ...] = (
     "soul",
     "charter",
     "skills",
+    "session_grants",
     "memory",
     "routes",
     "app_grants",

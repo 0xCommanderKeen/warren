@@ -95,6 +95,7 @@ def isolated_chronicle_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (
         "CHRONICLE_URL",
         "CHRONICLE_TOKEN",
+        "STEWARD_URL",
         "BURROW_URL",
         "BURROW_TOKEN",
         "STEWARD_SESSION_EMITTER",

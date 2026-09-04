@@ -9,6 +9,7 @@ from pydantic import Field
 from steward import authoring as au
 from steward.input_bounds import IDENTIFIER_MAX_CHARS
 from steward.manifest import validate_path
+from steward.routes.auth import session_of
 from steward.routes.deps import DOCUMENT_MAX_CHARS, Deps, _Body, _refuse
 from steward.skills import SkillLibrary, effective_skills, library_for
 
@@ -49,7 +50,7 @@ class SkillPost(SkillBody):
     )
 
 
-def router(deps: Deps) -> APIRouter:  # noqa: C901 — route factory is assembly
+def router(deps: Deps) -> APIRouter:  # noqa: C901, PLR0915 — route factory is assembly
     """Build the skill routes around one application collaborator graph."""
     routes = APIRouter()
     settings = deps.settings
@@ -142,11 +143,43 @@ def router(deps: Deps) -> APIRouter:  # noqa: C901 — route factory is assembly
             ),
         }
 
+    def guard_session_write(document: au.SkillDocument, request: Request, *, created: bool) -> None:
+        """Keep the granted session door narrower than the human skill editor."""
+        principal = session_of(request)
+        if principal is None:
+            return
+        if document.default:
+            _refuse(
+                403,
+                "session_credential_forbidden",
+                "making a skill a fleet-wide default is a human grant; a session may not "
+                "grant instructions to every resident",
+            )
+        if created:
+            return
+        result = validate_path(residents_dir, settings.skills_dir)
+        existing = library_for(residents_dir, settings.skills_dir).get(document.name)
+        holders = [
+            resident.id
+            for resident in result.residents
+            if document.name in {grant.id for grant in resident.manifest.skills}
+        ]
+        if existing is not None and existing.default:
+            holders.insert(0, "every resident (fleet default)")
+        if holders:
+            _refuse(
+                403,
+                "session_credential_forbidden",
+                f"rewriting skill {document.name!r} would rewrite instructions already granted "
+                f"by a manifest ({', '.join(holders)}); that is a human act",
+            )
+
     @routes.post("/skills", status_code=201)
     def create_skill(body: SkillPost, request: Request) -> dict[str, Any]:
         """Add a skill to the library.
 
-        **Human callers only.** Refuses an existing name rather than overwriting it: a
+        Human callers, or a session granted ``skills.write``. Refuses an existing name
+        rather than overwriting it: a
         ``POST`` that quietly replaced somebody's skill would make "add" and "rewrite" the
         same button.
 
@@ -154,13 +187,15 @@ def router(deps: Deps) -> APIRouter:  # noqa: C901 — route factory is assembly
         by every resident in the fleet without any manifest granting it, so this one flag
         changes what every session is given.
         """
+        document = au.SkillDocument(
+            name=body.name,
+            description=body.description,
+            body=body.body,
+            default=body.defaults,
+        )
+        guard_session_write(document, request, created=True)
         return write_one_skill(
-            au.SkillDocument(
-                name=body.name,
-                description=body.description,
-                body=body.body,
-                default=body.defaults,
-            ),
+            document,
             request,
             created=True,
         )
@@ -169,12 +204,15 @@ def router(deps: Deps) -> APIRouter:  # noqa: C901 — route factory is assembly
     def update_skill(name: str, body: SkillBody, request: Request) -> dict[str, Any]:
         """Replace one skill in the library, if it still validates for the whole fleet.
 
-        **Human callers only**, like every write here.
+        Human callers, or a session granted ``skills.write`` when no resident manifest
+        already grants this skill.
         """
+        document = au.SkillDocument(
+            name=name, description=body.description, body=body.body, default=body.defaults
+        )
+        guard_session_write(document, request, created=False)
         return write_one_skill(
-            au.SkillDocument(
-                name=name, description=body.description, body=body.body, default=body.defaults
-            ),
+            document,
             request,
             created=False,
             expected_revision=body.revision,

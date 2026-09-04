@@ -769,6 +769,14 @@
       "title": "Runner",
       "type": "object"
     },
+    "SessionGrant": {
+      "description": "A write door an authenticated resident session may cross.",
+      "enum": [
+        "skills.write"
+      ],
+      "title": "SessionGrant",
+      "type": "string"
+    },
     "SkillGrant": {
       "additionalProperties": false,
       "description": "A named, reusable capability granted to a resident.\n\nThe id names a skill in the library (``skills/<id>/SKILL.md``), and a name the\nlibrary does not have fails validation with the closest match named. The default\nskills every resident holds are not listed here: a grant is what this resident has\n*on top* of them.",
@@ -971,6 +979,14 @@
         ]
       },
       "title": "Skills",
+      "type": "array"
+    },
+    "session_grants": {
+      "description": "Named steward API write doors this resident's sessions may cross.",
+      "items": {
+        "$ref": "#/$defs/SessionGrant"
+      },
+      "title": "Session Grants",
       "type": "array"
     },
     "memory": {

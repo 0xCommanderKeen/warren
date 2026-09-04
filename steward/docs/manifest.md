@@ -31,6 +31,7 @@ value fails validation and is never stored. Credentials live outside both repos,
 | `soul` | yes | Identity dimension — see below. |
 | `charter` | yes | Purpose and obligations — see below. |
 | `skills` | yes | Capability dimension (may be an empty list). |
+| `session_grants` | no | Named steward write doors this resident's sessions may cross. Defaults to `[]`. |
 | `memory` | yes | Memory dimension. |
 | `routes` | yes | Route dimension (may be an empty list). |
 | `app_grants` | yes | App access dimension (may be an empty list). |
@@ -177,6 +178,22 @@ skills:
 
 A grant is what this resident holds **on top of the default set** — every resident gets
 the default skills without asking, so re-granting one says nothing and is left out.
+
+## `session_grants` — narrow API write doors
+
+Absent means none. The value is a list of closed, named doors; an unknown name or a value
+that is not a list fails manifest validation at `session_grants`. The only door in v0 is:
+
+```yaml
+session_grants:
+  - skills.write
+```
+
+`skills.write` lets this resident's live session credential reach `POST /skills` and
+`PUT /skills/{name}`. It does not make the session a human operator: `defaults: true` is
+refused because granting a skill to the fleet is a human act, and a session cannot `PUT`
+a skill named in any resident manifest because that would rewrite already-granted
+instructions. Every other session write remains closed.
 
 A name the library does not have fails validation with the closest match named:
 

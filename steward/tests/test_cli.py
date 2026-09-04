@@ -3304,6 +3304,7 @@ def nas(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> LocalTransport:
     monkeypatch.setattr("steward.nursery.transport_for", lambda _target, _env=None: host)
     monkeypatch.setenv("CHRONICLE_URL", "http://dxp2800:8737")
     monkeypatch.setenv("CHRONICLE_TOKEN", "cli-village-token")
+    monkeypatch.setenv("STEWARD_URL", "http://dxp2800:8802")
     return host
 
 

@@ -838,6 +838,14 @@
           "runner": {
             "$ref": "#/components/schemas/Runner"
           },
+          "session_grants": {
+            "description": "Named steward API write doors this resident's sessions may cross.",
+            "items": {
+              "$ref": "#/components/schemas/SessionGrant"
+            },
+            "title": "Session Grants",
+            "type": "array"
+          },
           "skills": {
             "description": "Granted capabilities (may be empty).",
             "items": {
@@ -1010,6 +1018,14 @@
           "runner": {
             "$ref": "#/components/schemas/Runner",
             "description": "Which brain this resident runs on."
+          },
+          "session_grants": {
+            "description": "Named steward API write doors granted to this resident's sessions.",
+            "items": {
+              "$ref": "#/components/schemas/SessionGrant"
+            },
+            "title": "Session Grants",
+            "type": "array"
           },
           "skills": {
             "description": "Granted capabilities.",
@@ -1351,6 +1367,14 @@
         },
         "title": "Runner",
         "type": "object"
+      },
+      "SessionGrant": {
+        "description": "A write door an authenticated resident session may cross.",
+        "enum": [
+          "skills.write"
+        ],
+        "title": "SessionGrant",
+        "type": "string"
       },
       "SkillBody": {
         "additionalProperties": false,
@@ -2826,7 +2850,7 @@
         "summary": "List Skills"
       },
       "post": {
-        "description": "Add a skill to the library.\n\n**Human callers only.** Refuses an existing name rather than overwriting it: a\n``POST`` that quietly replaced somebody's skill would make \"add\" and \"rewrite\" the\nsame button.\n\n``defaults: true`` deserves a second look before sending. A default skill is held\nby every resident in the fleet without any manifest granting it, so this one flag\nchanges what every session is given.",
+        "description": "Add a skill to the library.\n\nHuman callers, or a session granted ``skills.write``. Refuses an existing name\nrather than overwriting it: a\n``POST`` that quietly replaced somebody's skill would make \"add\" and \"rewrite\" the\nsame button.\n\n``defaults: true`` deserves a second look before sending. A default skill is held\nby every resident in the fleet without any manifest granting it, so this one flag\nchanges what every session is given.",
         "operationId": "create_skill_skills_post",
         "requestBody": {
           "content": {
@@ -2923,7 +2947,7 @@
         "summary": "Get Skill"
       },
       "put": {
-        "description": "Replace one skill in the library, if it still validates for the whole fleet.\n\n**Human callers only**, like every write here.",
+        "description": "Replace one skill in the library, if it still validates for the whole fleet.\n\nHuman callers, or a session granted ``skills.write`` when no resident manifest\nalready grants this skill.",
         "operationId": "update_skill_skills__name__put",
         "parameters": [
           {
