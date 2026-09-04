@@ -1,7 +1,7 @@
 """The residents actually shipped in this repo must always validate."""
 
 from conftest import PROJECT_AGENT_FIXTURE, REPO_ROOT, RESIDENTS_DIR
-from steward import journal
+from steward import board, journal
 from steward import manifest as m
 from steward.skills import default_skills, effective_names, load_library, missing_skills
 
@@ -41,6 +41,24 @@ def test_hob_is_the_vault_keeper_declared_on_the_burrow() -> None:
     assert all(routine.schedule_tz == "Europe/Ljubljana" for routine in hob.manifest.routines), (
         "'resident-local time' has to be written down: the NAS is not the household"
     )
+
+
+def test_hob_takes_letters_from_his_neighbours() -> None:
+    """Hob's delegation door, so a neighbour can hand him vault work (warren#438).
+
+    Read through ``delegation_routes`` and :func:`steward.board.delegation_residents` —
+    the accessor that answers "where may steward deliver today" and the function the
+    dispatch sweep actually drains. A route that validates but leaves Hob out of that
+    drain would be a door nobody opens, and reading the raw list back cannot tell.
+    """
+    hob = m.load_manifest(RESIDENTS_DIR / "hob" / "manifest.yaml")
+    assert "inbox" in hob.delegation_routes, "a pending or absent door takes no letters"
+    door = hob.route("inbox")
+    assert door is not None
+    assert door.address == "steward:delegation"
+
+    residents = m.validate_tree(RESIDENTS_DIR).residents
+    assert "hob" in {resident.id for resident in board.delegation_residents(residents)}
 
 
 def test_a_project_scoped_fixture_has_no_agent_identity() -> None:

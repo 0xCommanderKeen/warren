@@ -270,7 +270,7 @@ nothing — and a refused block still knocks at a human's door. The grammar, the
 and the lineage model are in [docs/delegation.md](docs/delegation.md).
 
 ```console
-$ steward delegate sender-resident --to hob --route handoff --title "…"
+$ steward delegate sender-resident --to hob --route inbox --title "…"
 $ steward inbox hob            # what is waiting, from whom, at what depth
 $ steward task lineage <task_id>      # the whole chain, root first
 ```
@@ -427,7 +427,7 @@ other fleet-wide lines, below the per-resident block:
 ```console
 $ steward doctor
 …
-hob: inbox 0 open via handoff
+hob: inbox 0 open via inbox
 topology: docker at dxp2800's own docker answers as dxp2800 27.3.1
 hob: container hob on dxp2800 — supervised from here
 watchdog: last pass …
