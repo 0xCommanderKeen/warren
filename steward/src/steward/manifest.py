@@ -127,6 +127,7 @@ SCHEMA_VERSION = 0
 VILLAGE_HOME_MIN = 0
 VILLAGE_HOME_MAX = 7
 VOICE_MAX_CHARS = 1200
+DISCORD_CHANNEL_NAME_MAX_CHARS = 100
 VOICE_HEADING = "## Voice"
 
 #: The charter and the identity section are the two parts of a preamble that are **never**
@@ -961,6 +962,29 @@ class Route(_Model):
     address: str = Field(min_length=1, description="Reference to the channel, not a secret.")
     status: Literal["active", "pending", "disabled"] = "active"
     note: str | None = None
+    posts_to: list[str] = Field(
+        default_factory=list,
+        description="Discord channel names this resident may post to. Empty denies posting.",
+    )
+
+    @field_validator("posts_to")
+    @classmethod
+    def _clean_post_channels(cls, value: list[str]) -> list[str]:
+        cleaned = [name.strip() for name in value]
+        if any(not name or len(name) > DISCORD_CHANNEL_NAME_MAX_CHARS for name in cleaned):
+            raise ValueError(
+                "posts_to entries must be non-empty channel names of at most 100 chars"
+            )
+        if len(set(cleaned)) != len(cleaned):
+            raise ValueError("posts_to channel names must be unique")
+        return cleaned
+
+    @model_validator(mode="after")
+    def _posts_belong_to_discord_chat(self) -> Self:
+        cleaned = self.posts_to
+        if cleaned and (self.kind != CHAT_ROUTE_KIND or not self.address.startswith("discord:")):
+            raise ValueError("posts_to is allowed only on a Discord chat route")
+        return self
 
     @property
     def accepts_delegation(self) -> bool:
@@ -1079,7 +1103,7 @@ class Notifications(_Model):
 
 
 class AppGrant(_Model):
-    """A declared grant to use an external application. Identifier and status only."""
+    """A declared app grant; Discord scopes are the first enforced capabilities."""
 
     id: str = Field(pattern=SLUG_PATTERN)
     name: str = Field(min_length=1, description="Human label, e.g. Gmail.")
@@ -1089,6 +1113,20 @@ class AppGrant(_Model):
         default=None,
         description="Where the grant is administered, e.g. a settings URL.",
     )
+
+    @model_validator(mode="after")
+    def _only_discord_has_known_scopes(self) -> Self:
+        if not self.scopes:
+            return self
+        if self.id != "discord":
+            raise ValueError("scopes are only enforced for id 'discord'; omit them for other apps")
+        known = frozenset({"channels.manage", "threads.manage", "messages.pin", "members.read"})
+        unknown = sorted(set(self.scopes) - known)
+        if unknown:
+            raise ValueError(f"unknown Discord scope(s): {', '.join(unknown)}")
+        if len(set(self.scopes)) != len(self.scopes):
+            raise ValueError("Discord scopes must be unique")
+        return self
 
 
 #: One directory in a ``workspace`` grant. Not stripped, like a tool name and a skill id:
@@ -1857,6 +1895,7 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "routes.kind": "kind: email  (delegation makes the route deliverable)",
     "routes.address": "address: mailbox:household  (a reference, not a credential)",
     "routes.status": "status: active",
+    "routes.posts_to": "posts_to: [household]  (Discord channel names this resident may post to)",
     "notifications": "notifications: {transport: ntfy, on: [needs_human]}",
     "notifications.transport": "transport: ntfy  (omit the block entirely to tap nobody)",
     "notifications.on": "on: [needs_human, task_done]",
@@ -1866,7 +1905,7 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "app_grants.id": "id: gmail",
     "app_grants.name": "name: Gmail",
     "app_grants.status": "status: granted  (granted | pending | revoked)",
-    "app_grants.scopes": "scopes: [gmail.readonly]",
+    "app_grants.scopes": "scopes: [channels.manage, members.read]  (only for id: discord)",
     "app_grants.status_ref": "status_ref: https://myaccount.google.com/permissions",
     "tools": "tools: [Read, Glob, Grep]  (or: tools: unrestricted)",
     "workspace": "workspace: [/data/library/books]  (absolute paths)",

@@ -52,6 +52,46 @@ def hob() -> m.Resident:
     return m.load_manifest(RESIDENTS_DIR / "hob" / "manifest.yaml")
 
 
+def test_discord_protocol_is_rendered_only_with_a_nonempty_posts_allowlist(
+    write_resident: ResidentWriter,
+) -> None:
+    plain = m.load_manifest(write_resident()).manifest
+    assert "HOW TO POST TO DISCORD" not in p.assemble_preamble(plain, None)
+
+    data = valid_manifest()
+    data["routes"].append(
+        {
+            "id": "discord",
+            "kind": "chat",
+            "address": "discord:testy",
+            "status": "active",
+            "posts_to": ["household"],
+        }
+    )
+    allowed = m.load_manifest(write_resident(data)).manifest
+    rendered = p.assemble_preamble(allowed, None)
+    assert "HOW TO POST TO DISCORD" in rendered
+    assert "Allowed channels: household" in rendered
+
+
+def test_discord_admin_protocol_lists_only_granted_verbs(write_resident: ResidentWriter) -> None:
+    data = valid_manifest()
+    data["app_grants"] = [
+        {
+            "id": "discord",
+            "name": "Discord",
+            "status": "granted",
+            "scopes": ["channels.manage"],
+        }
+    ]
+    manifest = m.load_manifest(write_resident(data)).manifest
+    rendered = p.assemble_preamble(manifest, None)
+    assert "create_channel" in rendered
+    assert "set_topic" in rendered
+    assert "archive_thread" not in rendered
+    assert " delete" not in rendered.lower()
+
+
 # ------------------------------------------------------------------------------- order
 
 

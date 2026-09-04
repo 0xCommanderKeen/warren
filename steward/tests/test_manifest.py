@@ -314,6 +314,35 @@ def test_credential_shaped_key_at_top_level_is_rejected(write_resident: Resident
 
 
 @pytest.mark.parametrize(
+    "scope", ["channels.manage", "threads.manage", "messages.pin", "members.read"]
+)
+def test_discord_grant_accepts_each_enforced_scope(
+    write_resident: ResidentWriter, scope: str
+) -> None:
+    data = valid_manifest()
+    data["app_grants"] = [
+        {"id": "discord", "name": "Discord", "status": "granted", "scopes": [scope]}
+    ]
+    assert m.validate_manifest(write_resident(data)).ok
+
+
+def test_discord_grant_rejects_an_unknown_scope(write_resident: ResidentWriter) -> None:
+    data = valid_manifest()
+    data["app_grants"] = [
+        {"id": "discord", "name": "Discord", "status": "granted", "scopes": ["guild.delete"]}
+    ]
+    result = m.validate_manifest(write_resident(data))
+    assert "unknown Discord scope" in problem_for(result, "app_grants[0]")
+
+
+def test_non_discord_grant_refuses_scopes(write_resident: ResidentWriter) -> None:
+    data = valid_manifest()
+    data["app_grants"][0]["scopes"] = ["gmail.readonly"]
+    result = m.validate_manifest(write_resident(data))
+    assert "only enforced for id 'discord'" in problem_for(result, "app_grants[0]")
+
+
+@pytest.mark.parametrize(
     ("value", "expected"),
     [
         ("sk-abcdefghijklmnopqrstuvwxyz0123", "an inline API key"),
@@ -336,6 +365,40 @@ def test_inline_secret_values_are_rejected(
     result = m.validate_manifest(write_resident(data))
     assert not result.ok
     assert expected in problem_for(result, "routes[0].address")
+
+
+def test_discord_room_allowlist_is_only_valid_on_discord_chat_routes(
+    write_resident: ResidentWriter,
+) -> None:
+    data = valid_manifest()
+    data["routes"].append(
+        {
+            "id": "rooms",
+            "kind": "chat",
+            "address": "telegram:testy",
+            "posts_to": ["household"],
+        }
+    )
+    result = m.validate_manifest(write_resident(data))
+    assert not result.ok
+    assert "posts_to is allowed only" in problem_for(result, "routes[1]")
+
+
+def test_discord_room_allowlist_rejects_duplicate_or_blank_names(
+    write_resident: ResidentWriter,
+) -> None:
+    data = valid_manifest()
+    data["routes"].append(
+        {
+            "id": "rooms",
+            "kind": "chat",
+            "address": "discord:testy",
+            "posts_to": ["household", " household "],
+        }
+    )
+    result = m.validate_manifest(write_resident(data))
+    assert not result.ok
+    assert "unique" in problem_for(result, "routes[1].posts_to")
 
 
 def test_opaque_blob_where_a_reference_is_expected_is_rejected(

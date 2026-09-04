@@ -5,7 +5,7 @@ import shutil
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -108,6 +108,29 @@ def make_dispatcher(
 
 def types(sink: ev.NullEmitter) -> list[str]:
     return [event.type for event in sink.events if event.type != ev.RESIDENT_DECLARED]
+
+
+def test_shared_session_harvest_includes_discord_post_outcomes(
+    make_dispatcher: Dispatch,
+) -> None:
+    class Posts:
+        residents: tuple[Resident, ...] = ()
+
+        def harvest(
+            self,
+            manifest: ResidentManifest,
+            output: str,
+            now: datetime | None = None,
+        ) -> tuple[str, ...]:
+            assert (manifest.id, output, now) == ("test-agent", "finished", NOW)
+            return ("posted",)
+
+    dispatcher = make_dispatcher()
+    dispatcher.poster = cast("Any", Posts())
+
+    result = dispatcher.harvest_session(dispatcher.residents[0].manifest, "finished", now=NOW)
+
+    assert result.posts == ("posted",)
 
 
 # ------------------------------------------------------------------------ opting in

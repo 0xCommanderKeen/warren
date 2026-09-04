@@ -154,6 +154,7 @@ class SessionHarvest:
 
     raised: tuple[object, ...] = ()
     handed_over: tuple[object, ...] = ()
+    posts: tuple[object, ...] = ()
 
 
 @runtime_checkable
@@ -498,6 +499,7 @@ class SessionResult:
     journal_path: Path | None = None
     raised: tuple[object, ...] = ()
     handed_over: tuple[object, ...] = ()
+    posts: tuple[object, ...] = ()
 
     def require_result(self) -> RunResult:
         """Return a real run result, rejecting use on a rehearsal conclusion."""
@@ -711,6 +713,12 @@ class ResidentSessions:
         prompt = ""
         try:
             self._require_revalidated(admission)
+            memory_fd = (
+                admission.declared_identity.descriptor
+                if admission.declared_identity is not None
+                else None
+            )
+            self._prepare_session(resident, admission.admitted_at, memory_fd)
             skills = self._provision(admission)
             journal_entry = self._journal_for(resident)
             decisions = self._decisions_for(resident)
@@ -778,6 +786,7 @@ class ResidentSessions:
             journal_path,
             harvested.raised,
             harvested.handed_over,
+            harvested.posts,
         )
 
     def revalidate(self, admission: Admission) -> Refusal | None:
@@ -929,6 +938,17 @@ class ResidentSessions:
         return self._journal_call(
             resident, lambda: journal.latest_entry(resident.manifest, source=resident.path)
         )
+
+    def _prepare_session(self, resident: Resident, now: datetime, memory_fd: int | None) -> None:
+        """Invoke an optional shared pre-session context refresh without widening hooks."""
+        if self.hooks is None:
+            return
+        prepare = getattr(self.hooks, "prepare_session", None)
+        if callable(prepare):
+            try:
+                prepare(resident, now, memory_fd)
+            except Exception as exc:  # noqa: BLE001 — missing mirror context cannot stop a session
+                log.warning("%s: could not refresh pre-session context: %s", resident.id, exc)
 
     def _decisions_for(self, resident: Resident) -> str | None:
         if self.hooks is None:

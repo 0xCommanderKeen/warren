@@ -290,6 +290,10 @@ the permission and the receiver's route is the whole of the agreement. See
 
 ## What this is not
 
+Delegation and [Discord room posts](chat.md#discord-room-posts) share the final
+`===STEWARD-ACTIONS===` harvest point. A `<delegate>` creates work for another resident;
+a `<discord post>` publishes bounded text through a separately allowlisted chat route.
+
 - **Not synchronous.** The sender finishes its turn and stops; it never waits for an
   answer, and there is no reply channel back into the same session. If the sender needs the
   result, the receiver's work product is where it appears.

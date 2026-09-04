@@ -3,7 +3,7 @@
     "schemas": {
       "AppGrant": {
         "additionalProperties": false,
-        "description": "A declared grant to use an external application. Identifier and status only.",
+        "description": "A declared app grant; Discord scopes are the first enforced capabilities.",
         "properties": {
           "id": {
             "pattern": "^[a-z0-9][a-z0-9-]*$",
@@ -1153,6 +1153,14 @@
               }
             ],
             "title": "Note"
+          },
+          "posts_to": {
+            "description": "Discord channel names this resident may post to. Empty denies posting.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Posts To",
+            "type": "array"
           },
           "status": {
             "default": "active",

@@ -67,7 +67,7 @@ def valid_manifest() -> dict[str, Any]:
             {"id": "schedule", "kind": "cron", "address": "steward:scheduler"},
         ],
         "app_grants": [
-            {"id": "burrow", "name": "Burrow", "status": "granted", "scopes": ["events.write"]},
+            {"id": "burrow", "name": "Burrow", "status": "granted"},
         ],
         "tools": "unrestricted",
         "runner": {"kind": "claude", "model": "claude-opus-5"},

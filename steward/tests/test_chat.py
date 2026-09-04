@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from click.testing import CliRunner
@@ -1157,6 +1157,12 @@ def discord_api() -> Iterator[DiscordApi]:
         def do_POST(self) -> None:
             self._answer("POST")
 
+        def do_PATCH(self) -> None:
+            self._answer("PATCH")
+
+        def do_PUT(self) -> None:
+            self._answer("PUT")
+
         def _answer(self, method: str) -> None:
             length = int(self.headers.get("Content-Length") or 0)
             payload = json.loads(self.rfile.read(length)) if length else None
@@ -1225,6 +1231,123 @@ def test_discord_discovers_the_bot_handle(discord_api: DiscordApi):
     transport = ch.DiscordTransport(base_url=discord_api.url)
 
     assert transport.identity(FAKE_DISCORD_TOKEN) == "@Pip"
+
+
+def test_discord_resolves_text_channels_by_name(discord_api: DiscordApi):
+    discord_api.queue(
+        "GET",
+        "/guilds/home/channels",
+        (
+            200,
+            [
+                {"id": "42", "name": "household", "type": 0},
+                {"id": "43", "name": "voice", "type": 2},
+            ],
+        ),
+    )
+    transport = ch.DiscordTransport(base_url=discord_api.url)
+
+    assert transport.channels(FAKE_DISCORD_TOKEN, "home") == {"household": "42"}
+    assert discord_api.calls[0][3] == f"Bot {FAKE_DISCORD_TOKEN}"
+
+
+def test_discord_refuses_ambiguous_channel_names(discord_api: DiscordApi):
+    discord_api.queue(
+        "GET",
+        "/guilds/home/channels",
+        (
+            200,
+            [
+                {"id": "42", "name": "announcements", "type": 0},
+                {"id": "43", "name": "announcements", "type": 0},
+            ],
+        ),
+    )
+    transport = ch.DiscordTransport(base_url=discord_api.url)
+
+    assert transport.channels(FAKE_DISCORD_TOKEN, "home") is None
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "payload"),
+    [
+        ("POST", "/guilds/home/channels", {"name": "news", "type": 0}),
+        ("PATCH", "/channels/42", {"topic": "Today"}),
+        ("POST", "/channels/42/threads", {"name": "chores", "type": 11}),
+        ("PATCH", "/channels/77", {"archived": True}),
+        ("PUT", "/channels/42/pins/99", None),
+    ],
+)
+def test_discord_admin_makes_exactly_one_authenticated_rest_call(
+    discord_api: DiscordApi,
+    method: str,
+    path: str,
+    payload: dict[str, object] | None,
+):
+    discord_api.queue(method, path, (200, {}))
+    transport = ch.DiscordTransport(base_url=discord_api.url)
+
+    assert transport.admin(FAKE_DISCORD_TOKEN, method, path, payload)
+    assert discord_api.calls == [(method, path, payload, f"Bot {FAKE_DISCORD_TOKEN}")]
+
+
+def test_discord_reads_channels_and_members_for_the_guild_mirror(discord_api: DiscordApi):
+    discord_api.queue("GET", "/guilds/home/channels", (200, [{"id": "42"}]))
+    discord_api.queue(
+        "GET",
+        "/guilds/home/members?limit=1000",
+        (200, [{"user": {"id": "7"}, "joined_at": "2026-09-01T10:00:00Z"}]),
+    )
+    transport = ch.DiscordTransport(base_url=discord_api.url)
+
+    assert transport.guild_snapshot(FAKE_DISCORD_TOKEN, "home") == {
+        "channels": [{"id": "42"}],
+        "members": [{"user": {"id": "7"}, "joined_at": "2026-09-01T10:00:00Z"}],
+    }
+
+
+def test_discord_guild_mirror_drains_every_member_page(discord_api: DiscordApi):
+    first = [
+        {"user": {"id": str(index)}, "joined_at": "2026-09-01T10:00:00Z"}
+        for index in range(1, 1001)
+    ]
+    final = [{"user": {"id": "1001"}, "joined_at": "2026-09-02T10:00:00Z"}]
+    discord_api.queue("GET", "/guilds/home/channels", (200, []))
+    discord_api.queue("GET", "/guilds/home/members?limit=1000", (200, first))
+    discord_api.queue("GET", "/guilds/home/members?limit=1000&after=1000", (200, final))
+    transport = ch.DiscordTransport(base_url=discord_api.url)
+
+    snapshot = transport.guild_snapshot(FAKE_DISCORD_TOKEN, "home")
+    assert snapshot is not None
+    members = snapshot["members"]
+    assert isinstance(members, list)
+    assert len(members) == 1001
+
+
+def test_discord_resolves_only_threads_in_the_configured_guild(discord_api: DiscordApi):
+    discord_api.queue(
+        "GET",
+        "/guilds/home/threads/active",
+        (200, {"threads": [{"id": "77"}, {"id": "not-a-snowflake"}]}),
+    )
+    transport = ch.DiscordTransport(base_url=discord_api.url)
+
+    assert transport.threads(FAKE_DISCORD_TOKEN, "home") == frozenset({"77"})
+
+
+def test_each_chat_poll_applies_the_mirror_cadence(store: Store):
+    class Hooks:
+        def __init__(self) -> None:
+            self.moments: list[datetime] = []
+
+        def refresh_discord_mirrors(self, now: datetime) -> None:
+            self.moments.append(now)
+
+    hooks = Hooks()
+    bridge = ch.ChatBridge(routes=[], store=store, hooks=cast("Any", hooks))
+
+    assert bridge.poll_once(NOW) == []
+    assert hooks.moments == [NOW]
 
 
 def test_discord_chunks_replies_below_its_limit(discord_api: DiscordApi):
@@ -1614,6 +1737,32 @@ def test_a_discord_route_names_its_missing_token(write_resident: ResidentWriter,
 
     assert not report.reachable
     assert report.note == "no token: set STEWARD_CHAT_TOKEN_DISCORD_TESTY to the bot token"
+
+
+def test_chat_list_reports_unknown_configured_discord_rooms(
+    write_resident: ResidentWriter, tmp_path: Path
+):
+    declared = chat_manifest(tmp_path / "memory")
+    declared["routes"][-1].update(address="discord:testy", posts_to=["household", "missing"])
+    resident = load_manifest(write_resident(declared))
+
+    class DiscordRooms(FakeTransport):
+        name = "discord"
+
+        def channels(self, token: str, guild: str) -> dict[str, str]:
+            assert (token, guild) == (FAKE_BOT_TOKEN, "home")
+            return {"household": "42"}
+
+    [report] = ch.describe_chat(
+        [resident],
+        {
+            "STEWARD_CHAT_TOKEN_DISCORD_TESTY": FAKE_BOT_TOKEN,
+            "STEWARD_CHAT_DISCORD_GUILD": "home",
+        },
+        transports={"discord": DiscordRooms()},
+    )
+
+    assert report.note == "unknown Discord channel name(s): missing"
 
 
 def test_a_resident_with_nowhere_to_keep_a_conversation_says_so(tmp_path: Path):

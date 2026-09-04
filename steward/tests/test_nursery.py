@@ -727,7 +727,7 @@ HAND_WRITTEN = {
     "routes": [
         {"id": "inbox", "kind": "delegation", "address": "steward:note-keeper", "note": "letters"}
     ],
-    "app_grants": [{"id": "gmail", "name": "Gmail", "status": "granted", "scopes": ["readonly"]}],
+    "app_grants": [{"id": "gmail", "name": "Gmail", "status": "granted"}],
 }
 
 
