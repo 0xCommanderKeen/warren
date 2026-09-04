@@ -401,6 +401,23 @@ def test_discord_room_allowlist_rejects_duplicate_or_blank_names(
     assert "unique" in problem_for(result, "routes[1].posts_to")
 
 
+def test_discord_listen_allowlist_is_bounded_and_only_valid_on_discord_chat_routes(
+    write_resident: ResidentWriter,
+) -> None:
+    data = valid_manifest()
+    data["routes"].append(
+        {
+            "id": "rooms",
+            "kind": "chat",
+            "address": "discord:testy",
+            "listens_in": [f"room-{index}" for index in range(11)],
+        }
+    )
+    result = m.validate_manifest(write_resident(data))
+    assert not result.ok
+    assert "at most 10" in problem_for(result, "routes[1].listens_in")
+
+
 def test_opaque_blob_where_a_reference_is_expected_is_rejected(
     write_resident: ResidentWriter,
 ) -> None:

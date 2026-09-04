@@ -318,20 +318,22 @@ delivery to land. Field rules are in
 | `STEWARD_CHAT_DISCORD_GUILD` | Guild id whose allowlisted channel names are resolved for resident posts. |
 | `STEWARD_CHAT_POLL_TIMEOUT_S` | How long one `getUpdates` waits for a message (default 25s). The socket timeout is this plus ten seconds. |
 
-## Discord DMs
+## Discord DMs and channel mentions
 
 A `discord:<ref>` route is a second implementation of the same `ChatTransport` boundary.
-It polls only the configured operators' DM channels and sends replies with
+It polls the configured operators' DM channels plus explicitly allowlisted guild channels,
+and sends replies with
 `POST /channels/{channel-id}/messages`; it does not connect to the Gateway and the bot
-therefore appears offline. Guild messages and mentions are deliberately left to the future
-Gateway worker below.
+therefore appears offline. Only messages that mention the bot are readable in guild channels
+without privileged Message Content intent.
 
 Create one application per resident in the Discord Developer Portal, add its bot, and copy
 the bot token into `STEWARD_CHAT_TOKEN_DISCORD_<REF>`. Do not paste the token into a
 manifest. Add `discord:<your-user-id>` to `STEWARD_CHAT_OPERATORS`, then declare an active
-route such as `address: discord:pip`. Invite the bot with Discord's OAuth2 URL Generator:
-select the `bot` scope; this DM-only transport requests no guild permissions. The operator
-and bot must share a server before Discord allows the operator to open the DM.
+route such as `address: discord:pip`. Invite the bot with Discord's OAuth2 URL Generator
+and select the `bot` scope. DM-only use needs no guild permissions. Channel listening also
+needs View Channel and Read Message History in each configured channel. The operator and bot
+must share a server before Discord allows the operator to open the DM.
 The resulting zero-permission invite has this form (replace the placeholder with the
 application's ID):
 
@@ -351,7 +353,7 @@ At startup steward opens one DM channel per configured Discord operator and seed
 from that channel's newest message, so deployment never answers old conversation history.
 Each pass fetches at most 50 newer messages. Replies are split at 1,900 characters, and a
 Discord `429` sleeps for the supplied `retry_after` before one bounded retry. Messages from
-unlisted users, non-private conversations, and other bots receive silence and produce the
+unlisted users, non-allowlisted public conversations, and other bots receive silence and produce the
 same bounded `chat_message_dropped` evidence as Telegram.
 
 There is one REST-specific limit: Discord exposes no endpoint that lists every inbound DM
@@ -364,6 +366,21 @@ discovering arbitrary unknown-account DMs belongs to Gateway ingestion.
 prints the discovered handle, for example `pip/discord: discord:pip — reachable, bot @Pip`.
 That makes a token copied from the wrong resident's application visible before the daemon
 starts answering.
+
+### Discord channel mentions
+
+A Discord chat route may add `listens_in: [household, projects]`, up to ten channel names.
+Steward resolves those names against `STEWARD_CHAT_DISCORD_GUILD` once when the daemon starts,
+reports unknown names in `steward chat list`, and polls each channel once per pass. Empty or
+absent keeps the existing DM-only behavior.
+
+Each channel cursor starts at its newest message, so a restart never answers history. Steward
+ignores ordinary channel talk and reacts only when Discord's message payload says the bot's
+own user id was mentioned. A named operator's mention fires a normal chat session, keeps a
+rolling transcript for that channel, and replies in the same channel with a reference to the
+triggering message. A non-operator mention gets silence plus `chat_message_dropped`. This REST
+loop does not follow threads or see unmentioned messages; presence, typing, and those richer
+interactions remain Gateway work.
 
 ## Discord room posts
 

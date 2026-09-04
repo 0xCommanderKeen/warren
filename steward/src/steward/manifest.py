@@ -130,6 +130,7 @@ VILLAGE_HOME_MIN = 0
 VILLAGE_HOME_MAX = 7
 VOICE_MAX_CHARS = 1200
 DISCORD_CHANNEL_NAME_MAX_CHARS = 100
+DISCORD_LISTEN_CHANNELS_MAX = 10
 VOICE_HEADING = "## Voice"
 
 #: The charter and the identity section are the two parts of a preamble that are **never**
@@ -979,24 +980,34 @@ class Route(_Model):
         default_factory=list,
         description="Discord channel names this resident may post to. Empty denies posting.",
     )
+    listens_in: list[str] = Field(
+        default_factory=list,
+        max_length=DISCORD_LISTEN_CHANNELS_MAX,
+        description=(
+            "Discord channel names where this resident may answer mentions. Empty listens "
+            "only in operator DMs."
+        ),
+    )
 
-    @field_validator("posts_to")
+    @field_validator("posts_to", "listens_in")
     @classmethod
-    def _clean_post_channels(cls, value: list[str]) -> list[str]:
+    def _clean_discord_channels(cls, value: list[str]) -> list[str]:
         cleaned = [name.strip() for name in value]
         if any(not name or len(name) > DISCORD_CHANNEL_NAME_MAX_CHARS for name in cleaned):
             raise ValueError(
-                "posts_to entries must be non-empty channel names of at most 100 chars"
+                "Discord channel entries must be non-empty channel names of at most 100 chars"
             )
         if len(set(cleaned)) != len(cleaned):
-            raise ValueError("posts_to channel names must be unique")
+            raise ValueError("Discord channel names must be unique within an allowlist")
         return cleaned
 
     @model_validator(mode="after")
-    def _posts_belong_to_discord_chat(self) -> Self:
-        cleaned = self.posts_to
-        if cleaned and (self.kind != CHAT_ROUTE_KIND or not self.address.startswith("discord:")):
+    def _channels_belong_to_discord_chat(self) -> Self:
+        discord_chat = self.kind == CHAT_ROUTE_KIND and self.address.startswith("discord:")
+        if self.posts_to and not discord_chat:
             raise ValueError("posts_to is allowed only on a Discord chat route")
+        if self.listens_in and not discord_chat:
+            raise ValueError("listens_in is allowed only on a Discord chat route")
         return self
 
     @property
@@ -1913,6 +1924,9 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "routes.address": "address: mailbox:household  (a reference, not a credential)",
     "routes.status": "status: active",
     "routes.posts_to": "posts_to: [household]  (Discord channel names this resident may post to)",
+    "routes.listens_in": (
+        "listens_in: [household]  (Discord channels where @mentions may start a session)"
+    ),
     "notifications": "notifications: {transport: ntfy, on: [needs_human]}",
     "notifications.transport": "transport: ntfy  (omit the block entirely to tap nobody)",
     "notifications.on": "on: [needs_human, task_done]",

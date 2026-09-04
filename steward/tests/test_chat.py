@@ -342,6 +342,8 @@ def message(  # noqa: PLR0913 — one keyword per fact a test varies about a mes
     at: datetime = NOW,
     private: bool = True,
     bot: bool = False,
+    allowed_public: bool = False,
+    reply_to: str | None = None,
 ) -> ch.Message:
     """Build one inbound message, already parsed."""
     return ch.Message(
@@ -350,8 +352,15 @@ def message(  # noqa: PLR0913 — one keyword per fact a test varies about a mes
         sender=sender,
         text=text,
         at=at,
-        private=private,
+        access=(
+            ch.ConversationAccess.ALLOWLISTED_PUBLIC
+            if allowed_public
+            else ch.ConversationAccess.PRIVATE
+            if private
+            else ch.ConversationAccess.PUBLIC
+        ),
         bot=bot,
+        reply_to=reply_to,
     )
 
 
@@ -718,6 +727,68 @@ def test_a_group_chat_is_never_answered_even_when_an_operator_speaks(
     assert outcome.status == ch.ChatStatus.DROPPED
     assert transport.sent == []
     assert sink.events[0].payload["reason"] == "not a private conversation"
+
+
+def test_an_operator_mention_in_an_allowlisted_discord_channel_is_answered(
+    make_bridge: BridgeMaker, tmp_path: Path
+):
+    class DiscordReplies(FakeTransport):
+        def __init__(self) -> None:
+            super().__init__(
+                [
+                    [
+                        message(
+                            sender=f"discord:{OPERATOR}",
+                            private=False,
+                            allowed_public=True,
+                            reply_to="101",
+                        )
+                    ]
+                ]
+            )
+            self.references: list[str | None] = []
+
+        def send_reply(
+            self, token: str, conversation: str, text: str, reply_to: str | None
+        ) -> bool:
+            self.references.append(reply_to)
+            return self.send(token, conversation, text)
+
+    transport = DiscordReplies()
+    transport.name = "discord"
+    declared = chat_manifest(tmp_path / "discord-memory")
+    declared["routes"][-1].update(address="discord:testy", listens_in=["household"])
+    bridge = make_bridge(
+        manifest=declared,
+        transport=transport,
+        tokens={"STEWARD_CHAT_TOKEN_DISCORD_TESTY": FAKE_DISCORD_TOKEN},
+    )
+
+    [outcome] = bridge.poll_once()
+
+    assert outcome.status == ch.ChatStatus.ANSWERED
+    assert transport.references == ["101"]
+
+
+def test_a_non_operator_mention_in_an_allowlisted_discord_channel_is_observable(
+    make_bridge: BridgeMaker, sink: ev.NullEmitter, tmp_path: Path
+):
+    transport = FakeTransport(
+        [[message(sender="discord:9999", private=False, allowed_public=True)]]
+    )
+    transport.name = "discord"
+    declared = chat_manifest(tmp_path / "discord-stranger-memory")
+    declared["routes"][-1].update(address="discord:testy", listens_in=["household"])
+    bridge = make_bridge(
+        manifest=declared,
+        transport=transport,
+        tokens={"STEWARD_CHAT_TOKEN_DISCORD_TESTY": FAKE_DISCORD_TOKEN},
+    )
+
+    [outcome] = bridge.poll_once()
+
+    assert outcome.reason == "not an operator"
+    assert sink.events[0].payload["from"] == "discord:9999"
 
 
 def test_another_bot_gets_silence_even_when_its_id_is_an_operator(make_bridge: BridgeMaker):
@@ -1195,13 +1266,19 @@ def discord_api() -> Iterator[DiscordApi]:
 
 
 def discord_message(
-    snowflake: str = "101", *, sender: str = "31337", bot: bool = False, content: str = "hello"
+    snowflake: str = "101",
+    *,
+    sender: str = "31337",
+    bot: bool = False,
+    content: str = "hello",
+    mentions: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     return {
         "id": snowflake,
         "channel_id": "900",
         "author": {"id": sender, "bot": bot},
         "content": content,
+        "mentions": [{"id": user_id} for user_id in mentions],
         "timestamp": "2026-09-01T12:00:00Z",
     }
 
@@ -1226,6 +1303,34 @@ def test_discord_opens_operator_dms_and_starts_after_the_latest_message(
         "hello",
     )
     assert all(call[3] == f"Bot {FAKE_DISCORD_TOKEN}" for call in discord_api.calls)
+
+
+def test_discord_listened_channel_starts_at_latest_and_only_yields_bot_mentions(
+    discord_api: DiscordApi,
+):
+    discord_api.queue("GET", "/users/@me", (200, {"id": "42", "username": "Pip"}))
+    discord_api.queue(
+        "GET", "/guilds/home/channels", (200, [{"id": "700", "name": "household", "type": 0}])
+    )
+    discord_api.queue("GET", "/channels/700/messages?limit=1", (200, [discord_message("100")]))
+    discord_api.queue(
+        "GET",
+        "/channels/700/messages?after=100&limit=50",
+        (
+            200,
+            [
+                discord_message("101", content="ordinary channel talk"),
+                discord_message("102", content="<@42> hello", mentions=("42",)),
+            ],
+        ),
+    )
+    transport = ch.DiscordTransport(base_url=discord_api.url, guild="home")
+
+    assert transport.listen(FAKE_DISCORD_TOKEN, ["household"])
+    assert transport.poll(FAKE_DISCORD_TOKEN, 0) == []
+    [received] = transport.poll(FAKE_DISCORD_TOKEN, 0) or []
+
+    assert (received.update_id, received.conversation, received.private) == (102, "700", False)
 
 
 def test_discord_discovers_the_bot_handle(discord_api: DiscordApi):
@@ -1365,6 +1470,19 @@ def test_discord_chunks_replies_below_its_limit(discord_api: DiscordApi):
 
     payloads = [call[2] for call in discord_api.calls]
     assert [len(payload["content"]) for payload in payloads if payload] == [1900, 1600]
+
+
+def test_discord_channel_reply_references_the_triggering_message(discord_api: DiscordApi):
+    path = "/channels/700/messages"
+    discord_api.queue("POST", path, (200, {"id": "103"}))
+    transport = ch.DiscordTransport(base_url=discord_api.url)
+
+    assert transport.send_reply(FAKE_DISCORD_TOKEN, "700", "hello", "102")
+
+    assert discord_api.calls[-1][2] == {
+        "content": "hello",
+        "message_reference": {"message_id": "102", "channel_id": "700"},
+    }
 
 
 def test_discord_delivery_resolves_an_operator_to_their_dm_channel(discord_api: DiscordApi):
@@ -1757,6 +1875,32 @@ def test_chat_list_reports_unknown_configured_discord_rooms(
 
         def channels(self, token: str, guild: str) -> dict[str, str]:
             assert (token, guild) == (FAKE_BOT_TOKEN, "home")
+            return {"household": "42"}
+
+    [report] = ch.describe_chat(
+        [resident],
+        {
+            "STEWARD_CHAT_TOKEN_DISCORD_TESTY": FAKE_BOT_TOKEN,
+            "STEWARD_CHAT_DISCORD_GUILD": "home",
+        },
+        transports={"discord": DiscordRooms()},
+    )
+
+    assert report.note == "unknown Discord channel name(s): missing"
+
+
+def test_chat_list_reports_unknown_configured_discord_listen_channels(
+    write_resident: ResidentWriter, tmp_path: Path
+):
+    declared = chat_manifest(tmp_path / "memory")
+    declared["routes"][-1].update(address="discord:testy", listens_in=["missing"])
+    resident = load_manifest(write_resident(declared))
+
+    class DiscordRooms(FakeTransport):
+        name = "discord"
+
+        def channels(self, token: str, guild: str) -> dict[str, str]:
+            del token, guild
             return {"household": "42"}
 
     [report] = ch.describe_chat(

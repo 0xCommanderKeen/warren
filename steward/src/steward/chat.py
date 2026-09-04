@@ -134,6 +134,7 @@ __all__ = [
     "ChatRoute",
     "ChatStatus",
     "ChatTransport",
+    "ConversationAccess",
     "DiscordTransport",
     "Drop",
     "KnockLimiter",
@@ -536,7 +537,11 @@ def describe_chat(
             note = f"no token: set {address.token_env} to the bot token"
         elif address.transport == DISCORD:
             bot, note = _discord_diagnostics(
-                transport, tokens[address.token_env], route.posts_to, source, note
+                transport,
+                tokens[address.token_env],
+                [*route.posts_to, *route.listens_in],
+                source,
+                note,
             )
         reports.append(
             ChatReport(
@@ -573,7 +578,7 @@ def _transport_identity(transport: ChatTransport, token: str) -> str | None:
 def _discord_diagnostics(
     transport: ChatTransport,
     token: str,
-    posts_to: Sequence[str],
+    channel_names: Sequence[str],
     env: Mapping[str, str],
     note: str | None,
 ) -> tuple[str | None, str | None]:
@@ -581,7 +586,7 @@ def _discord_diagnostics(
     bot = _transport_identity(transport, token)
     if bot is None:
         return None, "the configured Discord token could not identify its bot"
-    if not posts_to:
+    if not channel_names:
         return bot, note
     guild = (env.get("STEWARD_CHAT_DISCORD_GUILD") or "").strip()
     if not guild:
@@ -589,7 +594,7 @@ def _discord_diagnostics(
     channels = _transport_channels(transport, token, guild)
     if channels is None:
         return bot, "the configured Discord guild's channels could not be resolved"
-    unknown = [name for name in posts_to if name not in channels]
+    unknown = [name for name in channel_names if name not in channels]
     if unknown:
         return bot, "unknown Discord channel name(s): " + ", ".join(unknown)
     return bot, note
@@ -823,6 +828,14 @@ def conversation_summaries(manifest: ResidentManifest) -> list[ConversationSumma
 # --------------------------------------------------------------------------------------
 
 
+class ConversationAccess(StrEnum):
+    """Why a conversation is, or is not, allowed to cross the bridge."""
+
+    PRIVATE = "private"
+    PUBLIC = "public"
+    ALLOWLISTED_PUBLIC = "allowlisted_public"
+
+
 @dataclass(frozen=True, slots=True)
 class Message:
     """One inbound message, in the only shape this module cares about."""
@@ -836,10 +849,17 @@ class Message:
     sender: str
     text: str
     at: datetime
-    #: Whether this is a one-to-one conversation. A group is never answered, whoever spoke.
-    private: bool = True
+    #: Whether this is private, public, or public with manifest consent.
+    access: ConversationAccess = ConversationAccess.PRIVATE
     #: Whether the transport says the sender is another bot. Bots never start residents.
     bot: bool = False
+    #: Transport message id to attach a reply to, when the transport supports references.
+    reply_to: str | None = None
+
+    @property
+    def private(self) -> bool:
+        """Whether this is a one-to-one conversation."""
+        return self.access == ConversationAccess.PRIVATE
 
     def age_s(self, now: datetime) -> float:
         """How long ago this was sent, in seconds."""
@@ -1010,7 +1030,11 @@ def _message_from(update: object) -> Message | None:
         sender=str(sender_id),
         text=text,
         at=at,
-        private=chat.get("type") == "private",
+        access=(
+            ConversationAccess.PRIVATE
+            if chat.get("type") == "private"
+            else ConversationAccess.PUBLIC
+        ),
     )
 
 
@@ -1019,16 +1043,19 @@ class _DiscordState:
     """Per-bot DM discovery and cursors, keyed without retaining its credential."""
 
     channels: dict[str, str] = field(default_factory=dict)
+    listened_channels: set[str] = field(default_factory=set)
     cursors: dict[str, int] = field(default_factory=dict)
+    bot_id: str = ""
     started: bool = False
 
 
 @dataclass
 class DiscordTransport:
-    """Discord bot DMs over the REST API, polled without a Gateway connection."""
+    """Discord bot DMs and allowlisted channel mentions, polled over REST."""
 
     base_url: str = DEFAULT_DISCORD_API_URL
     operators: frozenset[str] = frozenset()
+    guild: str = ""
     timeout_s: float = SEND_TIMEOUT_S
     sleep: Callable[[float], None] = time.sleep
     _states: dict[str, _DiscordState] = field(default_factory=dict, init=False, repr=False)
@@ -1047,7 +1074,27 @@ class DiscordTransport:
                 (source.get(DISCORD_API_URL_ENV) or "").strip() or DEFAULT_DISCORD_API_URL
             ).rstrip("/"),
             operators=operators_from_env(source, transport=DISCORD),
+            guild=(source.get("STEWARD_CHAT_DISCORD_GUILD") or "").strip(),
         )
+
+    def listen(self, token: str, names: Sequence[str]) -> bool:
+        """Resolve configured guild channel names once and add them to this bot's poll set."""
+        if not names:
+            return True
+        if not self.guild:
+            return False
+        identity = self._request(token, "GET", "/users/@me")
+        bot_id = identity.get("id") if isinstance(identity, Mapping) else None
+        channels = self.channels(token, self.guild)
+        if not isinstance(bot_id, str) or not bot_id or channels is None:
+            return False
+        resolved = [channels.get(name) for name in names]
+        if any(channel is None for channel in resolved):
+            return False
+        state = self._state(token)
+        state.bot_id = bot_id
+        state.listened_channels.update(channel for channel in resolved if channel is not None)
+        return True
 
     def identity(self, token: str) -> str | None:
         """Authenticate the token and return its visible bot username."""
@@ -1133,19 +1180,34 @@ class DiscordTransport:
                 return None
             return []
         found: list[Message] = []
-        for channel in state.channels.values():
+        dm_channels = set(state.channels.values())
+        for channel in (*state.channels.values(), *sorted(state.listened_channels)):
             messages = self._messages_after(token, channel, state.cursors.get(channel, 0))
             if messages is None:
                 return None
             for raw in messages:
-                message = self._message(raw, channel)
+                raw_id = (
+                    int(raw["id"])
+                    if isinstance(raw, Mapping) and str(raw.get("id", "")).isdigit()
+                    else 0
+                )
+                state.cursors[channel] = max(state.cursors.get(channel, 0), raw_id)
+                message = self._message(
+                    raw,
+                    channel,
+                    private=channel in dm_channels,
+                    bot_id=state.bot_id,
+                )
                 if message is not None:
                     found.append(message)
-                    state.cursors[channel] = max(state.cursors.get(channel, 0), message.update_id)
         return found
 
     def send(self, token: str, conversation: str, text: str) -> bool:
         """Send a bounded sequence of Discord-sized message chunks."""
+        return self.send_reply(token, conversation, text, None)
+
+    def send_reply(self, token: str, conversation: str, text: str, reply_to: str | None) -> bool:
+        """Send Discord-sized chunks, optionally attached to one triggering message."""
         if not text.strip():
             return False
         target = conversation
@@ -1159,11 +1221,16 @@ class DiscordTransport:
             text[start : start + DISCORD_REPLY_CHARS]
             for start in range(0, len(text), DISCORD_REPLY_CHARS)
         ]
-        return all(
-            self._request(token, "POST", f"/channels/{target}/messages", {"content": chunk})
-            is not None
-            for chunk in chunks
-        )
+        for chunk in chunks:
+            payload: dict[str, object] = {"content": chunk}
+            if reply_to:
+                payload["message_reference"] = {
+                    "message_id": reply_to,
+                    "channel_id": target,
+                }
+            if self._request(token, "POST", f"/channels/{target}/messages", payload) is None:
+                return False
+        return True
 
     def _open_channels(self, token: str) -> bool:
         state = self._state(token)
@@ -1173,15 +1240,24 @@ class DiscordTransport:
                 return False
             channel = value["id"]
             state.channels[operator] = channel
-            latest = self._request(token, "GET", f"/channels/{channel}/messages?limit=1")
-            if not isinstance(latest, list):
+            if not self._seed_channel_cursor(token, channel):
                 return False
-            ids = [
-                int(item["id"])
-                for item in latest
-                if isinstance(item, Mapping) and str(item.get("id", "")).isdigit()
-            ]
-            state.cursors[channel] = max(ids, default=0)
+        for channel in sorted(state.listened_channels):
+            if not self._seed_channel_cursor(token, channel):
+                return False
+        return True
+
+    def _seed_channel_cursor(self, token: str, channel: str) -> bool:
+        """Start one channel after its newest message, never in its history."""
+        latest = self._request(token, "GET", f"/channels/{channel}/messages?limit=1")
+        if not isinstance(latest, list):
+            return False
+        ids = [
+            int(item["id"])
+            for item in latest
+            if isinstance(item, Mapping) and str(item.get("id", "")).isdigit()
+        ]
+        self._state(token).cursors[channel] = max(ids, default=0)
         return True
 
     def _ensure_started(self, token: str) -> bool:
@@ -1230,7 +1306,9 @@ class DiscordTransport:
         return found
 
     @staticmethod
-    def _message(raw: object, channel: str) -> Message | None:
+    def _message(
+        raw: object, channel: str, *, private: bool = True, bot_id: str = ""
+    ) -> Message | None:
         if not isinstance(raw, Mapping):
             return None
         author = raw.get("author")
@@ -1246,6 +1324,13 @@ class DiscordTransport:
         sender = str(author.get("id") or "")
         if not sender:
             return None
+        if not private:
+            mentions = raw.get("mentions")
+            if not isinstance(mentions, list) or not any(
+                isinstance(mention, Mapping) and str(mention.get("id") or "") == bot_id
+                for mention in mentions
+            ):
+                return None
         timestamp = raw.get("timestamp")
         try:
             at = datetime.fromisoformat(str(timestamp))
@@ -1257,8 +1342,11 @@ class DiscordTransport:
             sender=f"{DISCORD}:{sender}",
             text=content,
             at=at,
-            private=True,
+            access=(
+                ConversationAccess.PRIVATE if private else ConversationAccess.ALLOWLISTED_PUBLIC
+            ),
             bot=bool(author.get("bot")),
+            reply_to=snowflake,
         )
 
     def _request(
@@ -1550,6 +1638,16 @@ class ChatBridge:
             self.transports = {self.transport.name: self.transport}
         if not self.operators_by_transport:
             self.operators_by_transport = {self.transport.name: self.operators}
+        for route in self.routes:
+            token = self.tokens.get(route.address.token_env)
+            listen = getattr(self.transports.get(route.address.transport), "listen", None)
+            if (
+                token
+                and route.route.listens_in
+                and callable(listen)
+                and not listen(token, route.route.listens_in)
+            ):
+                log.warning("%s: Discord listen channels could not be resolved", route.key)
         if self.claims is None:
             self.claims = ResidentClaims(self.store)
         self.knocks = KnockLimiter(self.catchup_s)
@@ -1818,7 +1916,11 @@ class ChatBridge:
         )
         if message.sender not in allowed:
             return self._drop(route, message, "not an operator", now)
-        if not message.private:
+        if message.access != ConversationAccess.PRIVATE and not (
+            route.address.transport == DISCORD
+            and route.route.listens_in
+            and message.access == ConversationAccess.ALLOWLISTED_PUBLIC
+        ):
             return self._drop(route, message, "not a private conversation", now)
         if message.age_s(now) > self.catchup_s:
             # The scheduler's judgement about a missed occurrence, applied to a missed
@@ -1873,7 +1975,7 @@ class ChatBridge:
             conversation=message.conversation,
             status=status,
             reason=reason,
-            reply=self._reply(route, message.conversation, reply),
+            reply=self._reply(route, message, reply),
         )
 
     def _drop(self, route: ChatRoute, message: Message, reason: str, now: datetime) -> ChatOutcome:
@@ -2056,7 +2158,7 @@ class ChatBridge:
                     run_id, terminal, owner_token=owner_token, now=session.completed_at or now
                 )
                 self.run_transitions.publish_pending(self.emitter, now=session.completed_at or now)
-        reply = self._reply(route, message.conversation, self._answer_text(route, result))
+        reply = self._reply(route, message, self._answer_text(route, result))
         post_outcomes = "\n".join(
             line for outcome in session.posts if (line := _post_outcome_line(outcome))
         )
@@ -2096,7 +2198,7 @@ class ChatBridge:
             return f"{route.name} could not answer: {result.summary()}"
         return (result.output or "").strip() or f"{route.name} finished without saying anything."
 
-    def _reply(self, route: ChatRoute, conversation: str, text: str) -> str:
+    def _reply(self, route: ChatRoute, message: Message, text: str) -> str:
         """Send one reply and return what was actually sent. Never raises.
 
         **The one egress**, and the one place redaction happens — redact, *then* bound
@@ -2118,7 +2220,13 @@ class ChatBridge:
         if token is None:  # pragma: no cover — nothing reaches here without a token
             return sent
         try:
-            delivered = self.transports[route.address.transport].send(token, conversation, sent)
+            transport = self.transports[route.address.transport]
+            referenced = getattr(transport, "send_reply", None)
+            delivered = (
+                referenced(token, message.conversation, sent, message.reply_to)
+                if message.reply_to and callable(referenced)
+                else transport.send(token, message.conversation, sent)
+            )
         except Exception as exc:  # noqa: BLE001 — a transport that raises is still just a failure
             log.warning("%s: chat transport raised while replying: %s", route.key, exc)
             return sent
