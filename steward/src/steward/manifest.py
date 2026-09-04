@@ -492,6 +492,10 @@ SECRET_VALUE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # its own bot's token must not be able to echo it back into the chat, which is the one
     # place a reply is guaranteed to be read by whoever is watching that conversation.
     (re.compile(r"\b\d{6,12}:[A-Za-z0-9_-]{30,}"), "an inline Telegram bot token"),
+    (
+        re.compile(r"\b[MN][A-Za-z\d]{23,}\.[\w-]{6}\.[\w-]{27,}"),
+        "an inline Discord bot token",
+    ),
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "an inline AWS access key id"),
     (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "an inline Google API key"),
     (

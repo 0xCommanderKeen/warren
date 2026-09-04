@@ -50,6 +50,7 @@ from steward.store import Store
 
 #: A bot token shaped exactly like BotFather's, and belonging to nobody.
 FAKE_BOT_TOKEN = "123456789:AAHfake-token-for-tests-only-nothing-real"
+FAKE_DISCORD_TOKEN = "M" + "a" * 23 + ".ABC123." + "b" * 27
 
 #: The one Telegram user id this suite's fleet answers.
 OPERATOR = "4242"
@@ -108,6 +109,15 @@ def test_a_bot_token_pasted_into_a_manifest_is_refused():
 
 def test_a_bot_token_echoed_into_text_is_redacted():
     assert FAKE_BOT_TOKEN not in redact_secrets(f"my token is {FAKE_BOT_TOKEN} ok")
+
+
+def test_a_discord_bot_token_is_refused_and_redacted():
+    declared = {"routes": [{"id": "chat", "kind": "chat", "address": FAKE_DISCORD_TOKEN}]}
+
+    [problem] = scan_for_credentials(declared, Path("residents/pip/manifest.yaml"))
+
+    assert problem.problem == "value looks like an inline Discord bot token"
+    assert FAKE_DISCORD_TOKEN not in redact_secrets(f"token: {FAKE_DISCORD_TOKEN}")
 
 
 # --------------------------------------------------------------------------------------
@@ -316,6 +326,11 @@ class FakeTransport:
         self.sent.append((token, conversation, text))
         return True
 
+    def identity(self, token: str) -> str | None:
+        """Return a harmless fake identity for protocol compatibility."""
+        del token
+        return "@fake"
+
 
 def message(  # noqa: PLR0913 — one keyword per fact a test varies about a message
     text: str = "are you alive?",
@@ -325,6 +340,7 @@ def message(  # noqa: PLR0913 — one keyword per fact a test varies about a mes
     conversation: str = CONVERSATION,
     at: datetime = NOW,
     private: bool = True,
+    bot: bool = False,
 ) -> ch.Message:
     """Build one inbound message, already parsed."""
     return ch.Message(
@@ -334,6 +350,7 @@ def message(  # noqa: PLR0913 — one keyword per fact a test varies about a mes
         text=text,
         at=at,
         private=private,
+        bot=bot,
     )
 
 
@@ -700,6 +717,17 @@ def test_a_group_chat_is_never_answered_even_when_an_operator_speaks(
     assert outcome.status == ch.ChatStatus.DROPPED
     assert transport.sent == []
     assert sink.events[0].payload["reason"] == "not a private conversation"
+
+
+def test_another_bot_gets_silence_even_when_its_id_is_an_operator(make_bridge: BridgeMaker):
+    transport = FakeTransport([[message(bot=True)]])
+    bridge = make_bridge(transport=transport)
+
+    [outcome] = bridge.poll_once()
+
+    assert outcome.status == ch.ChatStatus.DROPPED
+    assert outcome.reason == "a bot"
+    assert transport.sent == []
 
 
 # --------------------------------------------------------------------------------------
@@ -1105,6 +1133,280 @@ def bot_api() -> Iterator[BotApi]:
         thread.join(timeout=5)
 
 
+@dataclass
+class DiscordApi:
+    """A deterministic Discord REST API that only listens on loopback."""
+
+    url: str = ""
+    calls: list[tuple[str, str, dict[str, Any] | None, str]] = field(default_factory=list)
+    replies: dict[tuple[str, str], list[tuple[int, Any]]] = field(default_factory=dict)
+
+    def queue(self, method: str, path: str, *answers: tuple[int, Any]) -> None:
+        """Queue ordered HTTP responses for one method and exact request path."""
+        self.replies[(method, path)] = list(answers)
+
+
+@pytest.fixture
+def discord_api() -> Iterator[DiscordApi]:
+    state = DiscordApi()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self._answer("GET")
+
+        def do_POST(self) -> None:
+            self._answer("POST")
+
+        def _answer(self, method: str) -> None:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length)) if length else None
+            state.calls.append((method, self.path, payload, self.headers.get("Authorization", "")))
+            answers = state.replies.get((method, self.path), [(200, {})])
+            status, value = answers.pop(0)
+            body = json.dumps(value).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    state.url = f"http://127.0.0.1:{server.server_port}"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield state
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def discord_message(
+    snowflake: str = "101", *, sender: str = "31337", bot: bool = False, content: str = "hello"
+) -> dict[str, Any]:
+    return {
+        "id": snowflake,
+        "channel_id": "900",
+        "author": {"id": sender, "bot": bot},
+        "content": content,
+        "timestamp": "2026-09-01T12:00:00Z",
+    }
+
+
+def test_discord_opens_operator_dms_and_starts_after_the_latest_message(
+    discord_api: DiscordApi,
+):
+    discord_api.queue("POST", "/users/@me/channels", (200, {"id": "900"}))
+    discord_api.queue("GET", "/channels/900/messages?limit=1", (200, [discord_message("100")]))
+    discord_api.queue(
+        "GET", "/channels/900/messages?after=100&limit=50", (200, [discord_message()])
+    )
+    transport = ch.DiscordTransport(base_url=discord_api.url, operators=frozenset({"31337"}))
+
+    assert transport.poll(FAKE_DISCORD_TOKEN, 0) == []
+    [received] = transport.poll(FAKE_DISCORD_TOKEN, 0) or []
+
+    assert (received.update_id, received.conversation, received.sender, received.text) == (
+        101,
+        "900",
+        "discord:31337",
+        "hello",
+    )
+    assert all(call[3] == f"Bot {FAKE_DISCORD_TOKEN}" for call in discord_api.calls)
+
+
+def test_discord_discovers_the_bot_handle(discord_api: DiscordApi):
+    discord_api.queue("GET", "/users/@me", (200, {"id": "42", "username": "Pip"}))
+
+    transport = ch.DiscordTransport(base_url=discord_api.url)
+
+    assert transport.identity(FAKE_DISCORD_TOKEN) == "@Pip"
+
+
+def test_discord_chunks_replies_below_its_limit(discord_api: DiscordApi):
+    path = "/channels/900/messages"
+    discord_api.queue("POST", path, (200, {"id": "1"}), (200, {"id": "2"}))
+    transport = ch.DiscordTransport(base_url=discord_api.url)
+
+    assert transport.send(FAKE_DISCORD_TOKEN, "900", "x" * 3500)
+
+    payloads = [call[2] for call in discord_api.calls]
+    assert [len(payload["content"]) for payload in payloads if payload] == [1900, 1600]
+
+
+def test_discord_delivery_resolves_an_operator_to_their_dm_channel(discord_api: DiscordApi):
+    discord_api.queue("POST", "/users/@me/channels", (200, {"id": "900"}))
+    discord_api.queue("GET", "/channels/900/messages?limit=1", (200, []))
+    discord_api.queue("POST", "/channels/900/messages", (200, {"id": "1"}))
+    transport = ch.DiscordTransport(base_url=discord_api.url, operators=frozenset({"31337"}))
+
+    assert transport.send(FAKE_DISCORD_TOKEN, "31337", "scheduled hello")
+
+    assert discord_api.calls[-1][1] == "/channels/900/messages"
+
+
+def test_discord_honours_one_rate_limit_without_spinning(discord_api: DiscordApi):
+    slept: list[float] = []
+    path = "/channels/900/messages"
+    discord_api.queue("POST", path, (429, {"retry_after": 0.25}), (200, {"id": "1"}))
+    transport = ch.DiscordTransport(base_url=discord_api.url, sleep=slept.append)
+
+    assert transport.send(FAKE_DISCORD_TOKEN, "900", "hello")
+    assert slept == [0.25]
+    assert len(discord_api.calls) == 2
+
+
+@pytest.mark.parametrize("retry_after", [31, float("inf"), "not-a-number"])
+def test_discord_refuses_an_unsafe_rate_limit_delay(discord_api: DiscordApi, retry_after: object):
+    slept: list[float] = []
+    path = "/channels/900/messages"
+    discord_api.queue("POST", path, (429, {"retry_after": retry_after}))
+    transport = ch.DiscordTransport(base_url=discord_api.url, sleep=slept.append)
+
+    assert not transport.send(FAKE_DISCORD_TOKEN, "900", "hello")
+    assert slept == []
+    assert len(discord_api.calls) == 1
+
+
+def test_discord_drains_more_than_one_page_without_skipping_unseen_messages(
+    discord_api: DiscordApi,
+):
+    newest = [discord_message(str(number)) for number in range(150, 100, -1)]
+    discord_api.queue("POST", "/users/@me/channels", (200, {"id": "900"}))
+    discord_api.queue("GET", "/channels/900/messages?limit=1", (200, [discord_message("99")]))
+    discord_api.queue("GET", "/channels/900/messages?after=99&limit=50", (200, newest))
+    discord_api.queue(
+        "GET",
+        "/channels/900/messages?before=101&limit=50",
+        (200, [discord_message("100")]),
+    )
+    transport = ch.DiscordTransport(base_url=discord_api.url, operators=frozenset({"31337"}))
+
+    assert transport.poll(FAKE_DISCORD_TOKEN, 0) == []
+    received = transport.poll(FAKE_DISCORD_TOKEN, 0) or []
+
+    assert [
+        message.update_id for message in sorted(received, key=lambda item: item.update_id)
+    ] == list(range(100, 151))
+
+
+def test_chat_list_discovers_a_discord_bot_handle(
+    discord_api: DiscordApi,
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    monkeypatch,
+):
+    declared = chat_manifest(tmp_path / "memory")
+    declared["routes"][-1]["address"] = "discord:testy"
+    tree = write_resident(declared).parent.parent
+    discord_api.queue("GET", "/users/@me", (200, {"id": "42", "username": "Pip"}))
+    monkeypatch.setenv("STEWARD_CHAT_TOKEN_DISCORD_TESTY", FAKE_DISCORD_TOKEN)
+    monkeypatch.setenv(ch.DISCORD_API_URL_ENV, discord_api.url)
+
+    result = runner.invoke(main, ["chat", "list", "--residents", str(tree)])
+
+    assert result.exit_code == 0
+    assert "test-agent/chat: discord:testy — reachable, bot @Pip" in result.output
+
+
+def test_one_bridge_polls_telegram_and_discord_routes_with_their_own_transports(
+    write_resident: ResidentWriter, store: Store, tmp_path: Path
+):
+    declared = chat_manifest(tmp_path / "memory")
+    declared["routes"].append(
+        {"id": "discord", "kind": "chat", "address": "discord:testy", "status": "active"}
+    )
+    resident = load_manifest(write_resident(declared))
+    telegram = FakeTransport()
+    discord = FakeTransport()
+    discord.name = "discord"
+    bridge = ch.ChatBridge(
+        routes=ch.chat_routes([resident]),
+        store=store,
+        tokens={
+            "STEWARD_CHAT_TOKEN_TESTY": FAKE_BOT_TOKEN,
+            "STEWARD_CHAT_TOKEN_DISCORD_TESTY": FAKE_DISCORD_TOKEN,
+        },
+        operators_by_transport={
+            "telegram": frozenset({OPERATOR}),
+            "discord": frozenset({"31337"}),
+        },
+        transports={"telegram": telegram, "discord": discord},
+    )
+
+    bridge.poll_once()
+
+    assert telegram.polls == [(FAKE_BOT_TOKEN, 0)]
+    assert discord.polls == [(FAKE_DISCORD_TOKEN, 0)]
+
+
+def _discord_bridge(  # noqa: PLR0913, PLR0917 — fixture dependencies plus one observed message
+    discord_api: DiscordApi,
+    write_resident: ResidentWriter,
+    store: Store,
+    sink: ev.NullEmitter,
+    tmp_path: Path,
+    incoming: dict[str, Any],
+) -> ch.ChatBridge:
+    declared = chat_manifest(tmp_path / "memory")
+    declared["routes"][-1]["address"] = "discord:testy"
+    resident = load_manifest(write_resident(declared))
+    discord_api.queue("POST", "/users/@me/channels", (200, {"id": "900"}))
+    discord_api.queue("GET", "/channels/900/messages?limit=1", (200, [discord_message("99")]))
+    discord_api.queue("GET", "/channels/900/messages?after=99&limit=50", (200, [incoming]))
+    transport = ch.DiscordTransport(base_url=discord_api.url, operators=frozenset({"31337"}))
+    return ch.ChatBridge(
+        routes=ch.chat_routes([resident]),
+        store=store,
+        tokens={"STEWARD_CHAT_TOKEN_DISCORD_TESTY": FAKE_DISCORD_TOKEN},
+        operators_by_transport={"discord": frozenset({"31337"})},
+        transports={"discord": transport},
+        emitter=sink,
+        clock=lambda: NOW,
+    )
+
+
+def test_an_observed_discord_message_from_another_bot_is_dropped(
+    discord_api: DiscordApi,
+    write_resident: ResidentWriter,
+    store: Store,
+    sink: ev.NullEmitter,
+    tmp_path: Path,
+):
+    bridge = _discord_bridge(
+        discord_api, write_resident, store, sink, tmp_path, discord_message(bot=True)
+    )
+
+    assert bridge.poll_once() == []
+    [outcome] = bridge.poll_once()
+
+    assert outcome.reason == "a bot"
+    assert sink.events[0].payload["reason"] == "a bot"
+
+
+def test_an_observed_discord_message_from_an_untrusted_author_is_dropped(
+    discord_api: DiscordApi,
+    write_resident: ResidentWriter,
+    store: Store,
+    sink: ev.NullEmitter,
+    tmp_path: Path,
+):
+    bridge = _discord_bridge(
+        discord_api, write_resident, store, sink, tmp_path, discord_message(sender="9999")
+    )
+
+    assert bridge.poll_once() == []
+    [outcome] = bridge.poll_once()
+
+    assert outcome.reason == "not an operator"
+    assert sink.events[0].payload["from"] == "discord:9999"
+
+
 def telegram_update(  # noqa: PLR0913 — one keyword per field of a real update
     *,
     update_id: int = 1,
@@ -1303,9 +1605,7 @@ def test_an_address_steward_cannot_read_is_reported_rather_than_polled(
     assert ch.chat_routes([resident]) == []
 
 
-def test_a_transport_this_build_cannot_carry_is_named(
-    write_resident: ResidentWriter, tmp_path: Path
-):
+def test_a_discord_route_names_its_missing_token(write_resident: ResidentWriter, tmp_path: Path):
     declared = chat_manifest(tmp_path / "memory")
     declared["routes"][-1]["address"] = "discord:testy"
     resident = load_manifest(write_resident(declared))
@@ -1313,7 +1613,7 @@ def test_a_transport_this_build_cannot_carry_is_named(
     [report] = ch.describe_chat([resident], {})
 
     assert not report.reachable
-    assert report.note == "transport 'discord' is not one steward can carry chat over"
+    assert report.note == "no token: set STEWARD_CHAT_TOKEN_DISCORD_TESTY to the bot token"
 
 
 def test_a_resident_with_nowhere_to_keep_a_conversation_says_so(tmp_path: Path):
@@ -1640,6 +1940,30 @@ def test_an_addressed_delivery_selects_its_route_transport_and_operators(
     assert outcome == Delivery(status=DELIVERED)
     assert telegram.sent == []
     assert discord.sent == [(FAKE_BOT_TOKEN, "31337", "hello")]
+
+
+def test_production_delivery_builds_discord_and_posts_to_the_operator_dm(
+    discord_api: DiscordApi, write_resident: ResidentWriter, tmp_path: Path
+):
+    data = chat_manifest(tmp_path / "memory")
+    data["routes"][-1]["address"] = "discord:testy"
+    resident = load_manifest(write_resident(data))
+    routine = DIGEST.model_copy(update={"deliver": "discord:testy"})
+    discord_api.queue("POST", "/users/@me/channels", (200, {"id": "900"}))
+    discord_api.queue("GET", "/channels/900/messages?limit=1", (200, []))
+    discord_api.queue("POST", "/channels/900/messages", (200, {"id": "1"}))
+    delivery = ch.RoutineDelivery.from_env(
+        {
+            "STEWARD_CHAT_TOKEN_DISCORD_TESTY": FAKE_DISCORD_TOKEN,
+            ch.OPERATORS_ENV: "discord:31337",
+            ch.DISCORD_API_URL_ENV: discord_api.url,
+        }
+    )
+
+    outcome = delivery.deliver(resident, routine, "hello")
+
+    assert outcome == Delivery(status=DELIVERED)
+    assert discord_api.calls[-1][1] == "/channels/900/messages"
 
 
 def test_the_original_routine_delivery_constructor_remains_usable(phone_resident: Resident):

@@ -214,7 +214,7 @@ $ steward notify test hob      # one harmless tap, and whether it landed
 ```
 
 **Chat** (#108). `routes: {kind: chat}` used to be a description; now it is a doorway.
-`steward chat run` long-polls one Telegram bot per resident, and every message from a
+`steward chat run` polls one Telegram or Discord bot per resident, and every message from a
 named operator fires **one ordinary session** — same admission, same budget, same runner
 seam, same `routine_started`/`routine_finished` bracket, under the trigger `chat` — whose
 final message is redacted, bounded, and sent back into the conversation. Text in, text out.
@@ -237,8 +237,8 @@ It is a separate process sharing the scheduler's state directory — which is ex
 the cross-process session claim (warren#111) is for — and long polling means every
 connection is outbound, so nothing on the internet gets a way into the burrow. Notifications
 (warren#114) stay the other channel: one-way, nothing listens, no session fires. This bridge
-only ever speaks when spoken to. The setup runbook — BotFather, the variables, the compose
-service — is [docs/chat.md](docs/chat.md).
+only ever speaks when spoken to. The setup runbook — BotFather or Discord's Developer
+Portal, the variables, and the compose service — is [docs/chat.md](docs/chat.md).
 
 ```console
 $ steward chat list                   # who is reachable, and which variable each bot reads
@@ -763,6 +763,7 @@ the scheduler and the API name the ones they need on startup.
 | `STEWARD_CHAT_OPERATORS` | chat bridge | Comma-separated `<transport>:<user-id>` identities steward answers; bare ids remain Telegram-compatible. Empty means nobody, and `steward chat run` refuses to start rather than run as an open door. A message from anyone else is dropped without a reply. |
 | `STEWARD_CHAT_TOKEN_<REF>` / `STEWARD_CHAT_TOKEN_<TRANSPORT>_<REF>` | chat bridge | Telegram keeps the v0 name (`telegram:pip` reads `STEWARD_CHAT_TOKEN_PIP`); other transports include their name (`discord:pip` reads `STEWARD_CHAT_TOKEN_DISCORD_PIP`), with non-alphanumerics folded to `_`. One bot per route, and never in a manifest: a token written into one is refused by validation. |
 | `STEWARD_CHAT_API_URL` | chat bridge | Where the bot API lives. Defaults to `https://api.telegram.org`; the test suite points it at loopback so nothing in this repo can reach the real service. |
+| `STEWARD_CHAT_DISCORD_API_URL` | chat bridge | Discord REST base URL. Defaults to `https://discord.com/api/v10`; tests point it at loopback. |
 | `STEWARD_CHAT_POLL_TIMEOUT_S` | chat bridge | How long one `getUpdates` may wait for a message (default 25s). The socket timeout is this plus ten seconds, because the server holds the connection for the whole poll by design. |
 | `CHRONICLE_URL` | emitter, nursery | The village's ingest URL. Provisioning a resident without it is refused: a container with nowhere to emit would never appear in the village. The pre-rename `BURROW_URL` is no longer read (warren#361): an environment that still spells it the old way is refused rather than half-configured. |
 | `CHRONICLE_TOKEN` | emitter, nursery | The village's shared ingest secret, written into the resident's host `.env` at provision time and never into this repo. `BURROW_TOKEN` is no longer read (warren#361). |

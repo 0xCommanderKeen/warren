@@ -58,12 +58,15 @@ exactly as the scheduler and the board reach it.
 
 import contextlib
 import fcntl
+import hashlib
 import json
 import logging
+import math
 import os
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -112,6 +115,8 @@ __all__ = [
     "CHAT_DIR",
     "DEFAULT_API_URL",
     "DEFAULT_CATCHUP_S",
+    "DEFAULT_DISCORD_API_URL",
+    "DISCORD_API_URL_ENV",
     "KNOCK_DOORS_TRACKED",
     "OPERATORS_ENV",
     "POLL_TIMEOUT_ENV",
@@ -128,6 +133,7 @@ __all__ = [
     "ChatRoute",
     "ChatStatus",
     "ChatTransport",
+    "DiscordTransport",
     "Drop",
     "KnockLimiter",
     "Message",
@@ -158,12 +164,15 @@ def _utcnow() -> datetime:
 #: second is a class rather than a rewrite — but v0 ships one, because a chat kind nobody
 #: has a bot for is a vocabulary rather than a feature.
 TELEGRAM = "telegram"
+DISCORD = "discord"
 
 #: Where Telegram's bot API lives. Overridable for exactly one reason: the test suite points
 #: it at a local server, so nothing in this repo can reach the real API. Mirrors
 #: :data:`steward.notify.NTFY_URL_ENV`, and for the same reason.
 DEFAULT_API_URL = "https://api.telegram.org"
 API_URL_ENV = "STEWARD_CHAT_API_URL"
+DISCORD_API_URL_ENV = "STEWARD_CHAT_DISCORD_API_URL"
+DEFAULT_DISCORD_API_URL = "https://discord.com/api/v10"
 
 #: What every per-bot token variable starts with. Telegram appends the reference for v0
 #: compatibility; other transports append transport then reference so credentials cannot
@@ -192,6 +201,10 @@ HTTP_TIMEOUT_MARGIN_S = 10.0
 #: in a daemon whose entire job is this message, after a session that already took minutes.
 #: Bounded all the same — a hung socket must not stop the daemon answering the next message.
 SEND_TIMEOUT_S = 10.0
+DISCORD_REPLY_CHARS = 1900
+DISCORD_PAGE_SIZE = 50
+HTTP_TOO_MANY_REQUESTS = 429
+MAX_RATE_LIMIT_SLEEP_S = 30.0
 
 #: How long a bridge waits after a pass in which some bot could not be reached, so an API
 #: that is down costs one request every few seconds rather than a spin.
@@ -452,6 +465,7 @@ class ChatReport:
     token_set: bool
     reachable: bool
     note: str | None
+    bot: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Render as the JSON object ``steward chat list --format json`` prints."""
@@ -464,11 +478,15 @@ class ChatReport:
             "token_set": self.token_set,
             "reachable": self.reachable,
             "note": self.note,
+            "bot": self.bot,
         }
 
 
 def describe_chat(
-    residents: Sequence[Resident], env: Mapping[str, str] | None = None
+    residents: Sequence[Resident],
+    env: Mapping[str, str] | None = None,
+    *,
+    transports: Mapping[str, ChatTransport] | None = None,
 ) -> list[ChatReport]:
     """Report every declared chat route and what still stands between it and a message.
 
@@ -478,6 +496,11 @@ def describe_chat(
     nothing for it would make this command useless at the one moment it is needed.
     """
     tokens = tokens_from_env(env)
+    source = os.environ if env is None else env
+    available = transports or {
+        TELEGRAM: TelegramTransport.from_env(source),
+        DISCORD: DiscordTransport.from_env(source),
+    }
     reports: list[ChatReport] = []
     for resident, route in _declared_chat_routes(residents):
         address = Address.parse(route.address)
@@ -500,12 +523,18 @@ def describe_chat(
             continue
         token_set = address.token_env in tokens
         note = route.note
-        if address.transport != TELEGRAM:
+        transport = available.get(address.transport)
+        bot = None
+        if transport is None:
             note = f"transport {address.transport!r} is not one steward can carry chat over"
         elif not route.accepts_chat:
             note = note or f"declared and silent: status is {route.status!r}"
         elif not token_set:
-            note = f"no token: set {address.token_env} to the token BotFather issued"
+            note = f"no token: set {address.token_env} to the bot token"
+        elif address.transport == DISCORD:
+            bot = _transport_identity(transport, tokens[address.token_env])
+            if bot is None:
+                note = "the configured Discord token could not identify its bot"
         reports.append(
             ChatReport(
                 resident=resident.id,
@@ -514,11 +543,28 @@ def describe_chat(
                 status=route.status,
                 token_env=address.token_env,
                 token_set=token_set,
-                reachable=route.accepts_chat and token_set and address.transport == TELEGRAM,
+                reachable=route.accepts_chat
+                and token_set
+                and transport is not None
+                and (address.transport != DISCORD or bot is not None),
                 note=note,
+                bot=bot,
             )
         )
     return reports
+
+
+def _transport_identity(transport: ChatTransport, token: str) -> str | None:
+    """Use an adapter's optional diagnostic capability without widening the wire seam."""
+    identity = getattr(transport, "identity", None)
+    if not callable(identity):
+        return None
+    try:
+        value = identity(token)
+    except Exception as exc:  # noqa: BLE001 — a diagnostic must not take down the CLI
+        log.warning("%s identity check failed: %s", transport.name, exc)
+        return None
+    return value if isinstance(value, str) and value else None
 
 
 # --------------------------------------------------------------------------------------
@@ -706,6 +752,8 @@ class Message:
     at: datetime
     #: Whether this is a one-to-one conversation. A group is never answered, whoever spoke.
     private: bool = True
+    #: Whether the transport says the sender is another bot. Bots never start residents.
+    bot: bool = False
 
     def age_s(self, now: datetime) -> float:
         """How long ago this was sent, in seconds."""
@@ -713,7 +761,7 @@ class Message:
 
 
 class ChatTransport(Protocol):
-    """Anything that can carry a conversation. Telegram is the only shipped one today.
+    """Anything that can carry a conversation. Telegram and Discord REST ship today.
 
     Two methods and no state the bridge can see, so the whole of "how a message travels" is
     behind one seam: a test injects a fake, and a second transport is a class rather than a
@@ -878,6 +926,225 @@ def _message_from(update: object) -> Message | None:
         at=at,
         private=chat.get("type") == "private",
     )
+
+
+@dataclass
+class _DiscordState:
+    """Per-bot DM discovery and cursors, keyed without retaining its credential."""
+
+    channels: dict[str, str] = field(default_factory=dict)
+    cursors: dict[str, int] = field(default_factory=dict)
+    started: bool = False
+
+
+@dataclass
+class DiscordTransport:
+    """Discord bot DMs over the REST API, polled without a Gateway connection."""
+
+    base_url: str = DEFAULT_DISCORD_API_URL
+    operators: frozenset[str] = frozenset()
+    timeout_s: float = SEND_TIMEOUT_S
+    sleep: Callable[[float], None] = time.sleep
+    _states: dict[str, _DiscordState] = field(default_factory=dict, init=False, repr=False)
+
+    @property
+    def name(self) -> str:
+        """The address transport that selects Discord REST."""
+        return DISCORD
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> DiscordTransport:
+        """Build the Discord adapter from process configuration."""
+        source = os.environ if env is None else env
+        return cls(
+            base_url=(
+                (source.get(DISCORD_API_URL_ENV) or "").strip() or DEFAULT_DISCORD_API_URL
+            ).rstrip("/"),
+            operators=operators_from_env(source, transport=DISCORD),
+        )
+
+    def identity(self, token: str) -> str | None:
+        """Authenticate the token and return its visible bot username."""
+        value = self._request(token, "GET", "/users/@me")
+        if not isinstance(value, Mapping):
+            return None
+        username = value.get("username")
+        return f"@{username}" if isinstance(username, str) and username else None
+
+    def poll(self, token: str, offset: int) -> list[Message] | None:
+        """Open operator DMs once, then fetch each channel after its cursor."""
+        del offset  # Discord cursors are per DM channel, not per bot.
+        state = self._state(token)
+        if not state.started:
+            if not self._ensure_started(token):
+                return None
+            return []
+        found: list[Message] = []
+        for channel in state.channels.values():
+            messages = self._messages_after(token, channel, state.cursors.get(channel, 0))
+            if messages is None:
+                return None
+            for raw in messages:
+                message = self._message(raw, channel)
+                if message is not None:
+                    found.append(message)
+                    state.cursors[channel] = max(state.cursors.get(channel, 0), message.update_id)
+        return found
+
+    def send(self, token: str, conversation: str, text: str) -> bool:
+        """Send a bounded sequence of Discord-sized message chunks."""
+        if not text.strip():
+            return False
+        target = conversation
+        if conversation in self.operators:
+            if not self._ensure_started(token):
+                return False
+            target = self._state(token).channels.get(conversation, "")
+            if not target:
+                return False
+        chunks = [
+            text[start : start + DISCORD_REPLY_CHARS]
+            for start in range(0, len(text), DISCORD_REPLY_CHARS)
+        ]
+        return all(
+            self._request(token, "POST", f"/channels/{target}/messages", {"content": chunk})
+            is not None
+            for chunk in chunks
+        )
+
+    def _open_channels(self, token: str) -> bool:
+        state = self._state(token)
+        for operator in sorted(self.operators):
+            value = self._request(token, "POST", "/users/@me/channels", {"recipient_id": operator})
+            if not isinstance(value, Mapping) or not isinstance(value.get("id"), str):
+                return False
+            channel = value["id"]
+            state.channels[operator] = channel
+            latest = self._request(token, "GET", f"/channels/{channel}/messages?limit=1")
+            if not isinstance(latest, list):
+                return False
+            ids = [
+                int(item["id"])
+                for item in latest
+                if isinstance(item, Mapping) and str(item.get("id", "")).isdigit()
+            ]
+            state.cursors[channel] = max(ids, default=0)
+        return True
+
+    def _ensure_started(self, token: str) -> bool:
+        state = self._state(token)
+        if state.started:
+            return True
+        if not self._open_channels(token):
+            return False
+        state.started = True
+        return True
+
+    def _state(self, token: str) -> _DiscordState:
+        key = hashlib.sha256(token.encode()).hexdigest()
+        return self._states.setdefault(key, _DiscordState())
+
+    def _messages_after(self, token: str, channel: str, cursor: int) -> list[object] | None:
+        """Drain every unseen page without advancing past messages Discord omitted."""
+        query = urllib.parse.urlencode({"after": str(cursor), "limit": str(DISCORD_PAGE_SIZE)})
+        value = self._request(token, "GET", f"/channels/{channel}/messages?{query}")
+        if not isinstance(value, list):
+            return None
+        found: list[object] = list(value)
+        page = value
+        while len(page) == DISCORD_PAGE_SIZE:
+            ids = [
+                int(item["id"])
+                for item in page
+                if isinstance(item, Mapping) and str(item.get("id", "")).isdigit()
+            ]
+            if not ids or min(ids) <= cursor:
+                break
+            query = urllib.parse.urlencode(
+                {"before": str(min(ids)), "limit": str(DISCORD_PAGE_SIZE)}
+            )
+            older = self._request(token, "GET", f"/channels/{channel}/messages?{query}")
+            if not isinstance(older, list):
+                return None
+            page = [
+                item
+                for item in older
+                if isinstance(item, Mapping)
+                and str(item.get("id", "")).isdigit()
+                and int(item["id"]) > cursor
+            ]
+            found.extend(page)
+        return found
+
+    @staticmethod
+    def _message(raw: object, channel: str) -> Message | None:
+        if not isinstance(raw, Mapping):
+            return None
+        author = raw.get("author")
+        content = raw.get("content")
+        snowflake = str(raw.get("id") or "")
+        if (
+            not isinstance(author, Mapping)
+            or not isinstance(content, str)
+            or not content.strip()
+            or not snowflake.isdigit()
+        ):
+            return None
+        sender = str(author.get("id") or "")
+        if not sender:
+            return None
+        timestamp = raw.get("timestamp")
+        try:
+            at = datetime.fromisoformat(str(timestamp))
+        except ValueError:
+            at = datetime.now(UTC)
+        return Message(
+            update_id=int(snowflake),
+            conversation=channel,
+            sender=f"{DISCORD}:{sender}",
+            text=content,
+            at=at,
+            private=True,
+            bot=bool(author.get("bot")),
+        )
+
+    def _request(
+        self, token: str, method: str, path: str, payload: Mapping[str, Any] | None = None
+    ) -> object | None:
+        url = f"{self.base_url}{path}"
+        if not url.startswith(("http://", "https://")):
+            return None
+        data = None if payload is None else json.dumps(dict(payload)).encode()
+        request = urllib.request.Request(  # noqa: S310 — scheme checked just above
+            url,
+            data=data,
+            headers={"Authorization": f"Bot {token}", "Content-Type": "application/json"},
+            method=method,
+        )
+        for attempt in range(2):
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout_s) as response:  # noqa: S310
+                    return json.loads(response.read().decode())
+            except urllib.error.HTTPError as exc:
+                if exc.code == HTTP_TOO_MANY_REQUESTS and attempt == 0:
+                    try:
+                        body = json.loads(exc.read().decode())
+                        delay = float(body.get("retry_after", 0))
+                    except ValueError, TypeError, AttributeError:
+                        return None
+                    if not math.isfinite(delay) or not 0 <= delay <= MAX_RATE_LIMIT_SLEEP_S:
+                        log.warning("discord rate limit delay is unsafe; deferring this route")
+                        return None
+                    self.sleep(delay)
+                    continue
+                log.warning(
+                    "discord %s %s failed — HTTP %s", method, path.split("?", 1)[0], exc.code
+                )
+                return None
+            except (OSError, urllib.error.URLError, ValueError) as exc:
+                log.warning("discord %s failed — %s: %s", method, type(exc).__name__, exc)
+                return None
+        return None
 
 
 # --------------------------------------------------------------------------------------
@@ -1093,6 +1360,8 @@ class ChatBridge:
     tokens: Mapping[str, str] = field(default_factory=dict, repr=False)
     operators: frozenset[str] = frozenset()
     transport: ChatTransport = field(default_factory=TelegramTransport.from_env)
+    operators_by_transport: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    transports: Mapping[str, ChatTransport] = field(default_factory=dict)
     emitter: ev.Emitter = field(default_factory=ev.NullEmitter)
     workdir: Path = field(default_factory=Path.cwd)
     library: SkillLibrary = field(default_factory=SkillLibrary)
@@ -1115,9 +1384,14 @@ class ChatBridge:
     #: What stops a stranger deciding how much of the village an operator can see.
     knocks: KnockLimiter = field(init=False, repr=False)
     _offsets: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    _identities: dict[str, str | None] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Build the shared lifecycle from the bridge's existing dependencies."""
+        if not self.transports:
+            self.transports = {self.transport.name: self.transport}
+        if not self.operators_by_transport:
+            self.operators_by_transport = {self.transport.name: self.operators}
         if self.claims is None:
             self.claims = ResidentClaims(self.store)
         self.knocks = KnockLimiter(self.catchup_s)
@@ -1148,6 +1422,7 @@ class ChatBridge:
         hooks: WakeHooks | None = None,
         claims: ResidentClaims | None = None,
         transport: ChatTransport | None = None,
+        transports: Mapping[str, ChatTransport] | None = None,
         state_path: Path | None = None,
         catchup_s: float = DEFAULT_CATCHUP_S,
     ) -> ChatBridge:
@@ -1164,12 +1439,26 @@ class ChatBridge:
                 + "\n".join(d.render() for d in result.errors)
             )
         source = os.environ if env is None else env
+        if transport is not None and transports is not None:
+            raise TypeError("pass transport or transports, not both")
+        available = transports or (
+            {transport.name: transport}
+            if transport is not None
+            else {
+                TELEGRAM: TelegramTransport.from_env(source),
+                DISCORD: DiscordTransport.from_env(source),
+            }
+        )
         return cls(
             routes=chat_routes(list(result.residents)),
             store=store,
             tokens=tokens_from_env(source),
             operators=operators_from_env(source),
-            transport=transport or TelegramTransport.from_env(source),
+            transport=available.get(TELEGRAM, next(iter(available.values()))),
+            operators_by_transport={
+                name: operators_from_env(source, transport=name) for name in available
+            },
+            transports=available,
             emitter=emitter or ev.EventEmitter.from_env(),
             workdir=workdir if workdir is not None else Path.cwd(),
             library=library if library is not None else library_for(residents_dir, skills_dir),
@@ -1191,7 +1480,7 @@ class ChatBridge:
         return [
             route
             for route in self.routes
-            if self.token_for(route) and route.address.transport == self.transport.name
+            if self.token_for(route) and route.address.transport in self.transports
         ]
 
     def preflight(self) -> list[str]:
@@ -1203,24 +1492,36 @@ class ChatBridge:
         a message that silently goes unanswered at midnight.
         """
         problems: list[str] = []
-        if not self.operators:
-            problems.append(
-                f"{OPERATORS_ENV} is empty, so steward would answer nobody; set it to the "
-                "comma-separated Telegram user ids that may talk to this fleet"
-            )
-        carried = [route for route in self.routes if route.address.transport == self.transport.name]
+        carried = [route for route in self.routes if route.address.transport in self.transports]
         if self.routes and not carried:
             names = sorted({route.address.transport for route in self.routes})
             problems.append(
-                f"this bridge carries {self.transport.name!r}, but no active route uses it; "
+                f"this bridge carries {', '.join(sorted(self.transports))!r}, but no active "
+                "route uses it; "
                 f"declared transports: {', '.join(names)}"
             )
+        problems.extend(
+            (f"{OPERATORS_ENV} has no {name!r} operators, so steward would answer nobody")
+            for name in sorted({route.address.transport for route in carried})
+            if not self._operators_for(name)
+        )
         for route in carried:
-            if not self.token_for(route):
+            token = self.token_for(route)
+            if not token:
                 problems.append(
                     f"{route.key}: no token — set {route.address.token_env} to the token "
-                    f"BotFather issued for {route.address}"
+                    f"issued for {route.address}"
                 )
+            elif route.address.transport == DISCORD:
+                if route.key not in self._identities:
+                    self._identities[route.key] = _transport_identity(
+                        self.transports[DISCORD], token
+                    )
+                identity = self._identities[route.key]
+                if identity is None:
+                    problems.append(
+                        f"{route.key}: {route.address.token_env} could not identify a Discord bot"
+                    )
             complaint = chat_complaint(route.resident.manifest)
             if complaint is not None:
                 problems.append(f"{route.key}: {complaint}")
@@ -1275,7 +1576,9 @@ class ChatBridge:
         if token is None:  # pragma: no cover — deliverable() already filtered these out
             return []
         try:
-            messages = self.transport.poll(token, self._offsets.get(route.key, 0))
+            messages = self.transports[route.address.transport].poll(
+                token, self._offsets.get(route.key, 0)
+            )
         except Exception as exc:  # noqa: BLE001 — the protocol says it does not; belt and braces
             # :class:`ChatTransport` promises never to raise, and the shipped one keeps that
             # promise. This is here because ``poll_once`` promises the same thing to a daemon
@@ -1341,7 +1644,15 @@ class ChatBridge:
         who sent it is the operator and silence would leave them watching a bot that looks
         broken.
         """
-        if message.sender not in self.operators:
+        if message.bot:
+            return self._drop(route, message, "a bot", now)
+        operators = self._operators_for(route.address.transport)
+        allowed = (
+            {f"{DISCORD}:{operator}" for operator in operators}
+            if route.address.transport == DISCORD
+            else operators
+        )
+        if message.sender not in allowed:
             return self._drop(route, message, "not an operator", now)
         if not message.private:
             return self._drop(route, message, "not a private conversation", now)
@@ -1639,13 +1950,20 @@ class ChatBridge:
         if token is None:  # pragma: no cover — nothing reaches here without a token
             return sent
         try:
-            delivered = self.transport.send(token, conversation, sent)
+            delivered = self.transports[route.address.transport].send(token, conversation, sent)
         except Exception as exc:  # noqa: BLE001 — a transport that raises is still just a failure
             log.warning("%s: chat transport raised while replying: %s", route.key, exc)
             return sent
         if not delivered:
             log.warning("%s: the reply did not reach the conversation", route.key)
         return sent
+
+    def _operators_for(self, transport: str) -> frozenset[str]:
+        """Return the allowlist belonging to one route's transport."""
+        scoped = self.operators_by_transport.get(transport)
+        if scoped is not None:
+            return scoped
+        return self.operators if transport == self.transport.name else frozenset()
 
     def _open_run(  # noqa: PLR0913, PLR0917 — one argument per persisted run fact
         self,
@@ -1793,8 +2111,8 @@ class RoutineDelivery:
 
     ``deliver: chat`` names the route *kind* and resolves only when there is exactly one
     active chat route. ``deliver: discord:hob`` names one route address. In either form the
-    address chooses a :class:`ChatTransport`; adding Discord itself remains a separate
-    adapter rather than a branch in delivery.
+    address chooses a :class:`ChatTransport`; Discord remains an adapter rather than a
+    branch in delivery.
     """
 
     tokens: Mapping[str, str] = field(default_factory=dict, repr=False)
@@ -1825,7 +2143,10 @@ class RoutineDelivery:
         elif transport is not None:
             available = {transport.name: transport}
         else:
-            available = {TELEGRAM: TelegramTransport.from_env(source)}
+            available = {
+                TELEGRAM: TelegramTransport.from_env(source),
+                DISCORD: DiscordTransport.from_env(source),
+            }
         return cls(
             tokens=tokens_from_env(source),
             operators=operators_from_env(source),

@@ -314,7 +314,55 @@ delivery to land. Field rules are in
 | `STEWARD_CHAT_OPERATORS` | Comma-separated `<transport>:<user-id>` identities steward answers. Bare ids remain Telegram-compatible. Empty means nobody, and the daemon refuses to start rather than run as an open door. |
 | `STEWARD_CHAT_TOKEN_<REF>` / `STEWARD_CHAT_TOKEN_<TRANSPORT>_<REF>` | Telegram keeps the v0 token name; other transports include their name, so equal references cannot share credentials. Upper-cased with non-alphanumerics folded to `_`. One per route. |
 | `STEWARD_CHAT_API_URL` | Where the bot API lives. Defaults to `https://api.telegram.org`; the test suite points it at loopback so nothing in this repo can reach the real thing. |
+| `STEWARD_CHAT_DISCORD_API_URL` | Discord REST base URL. Defaults to `https://discord.com/api/v10`; tests override it with loopback. |
 | `STEWARD_CHAT_POLL_TIMEOUT_S` | How long one `getUpdates` waits for a message (default 25s). The socket timeout is this plus ten seconds. |
+
+## Discord DMs
+
+A `discord:<ref>` route is a second implementation of the same `ChatTransport` boundary.
+It polls only the configured operators' DM channels and sends replies with
+`POST /channels/{channel-id}/messages`; it does not connect to the Gateway and the bot
+therefore appears offline. Guild messages and mentions are deliberately left to the future
+Gateway worker below.
+
+Create one application per resident in the Discord Developer Portal, add its bot, and copy
+the bot token into `STEWARD_CHAT_TOKEN_DISCORD_<REF>`. Do not paste the token into a
+manifest. Add `discord:<your-user-id>` to `STEWARD_CHAT_OPERATORS`, then declare an active
+route such as `address: discord:pip`. Invite the bot with Discord's OAuth2 URL Generator:
+select the `bot` scope; this DM-only transport requests no guild permissions. The operator
+and bot must share a server before Discord allows the operator to open the DM.
+The resulting zero-permission invite has this form (replace the placeholder with the
+application's ID):
+
+```text
+https://discord.com/oauth2/authorize?client_id=<APPLICATION_ID>&scope=bot&permissions=0
+```
+
+No privileged intents are required. Discord documents that the Message Content restriction
+applies to REST too, but explicitly exempts DMs sent to the application. Because this v0
+polls REST rather than Gateway events, it also sends no `IDENTIFY` intents. A later Gateway
+DM consumer needs the ordinary `DIRECT_MESSAGES` intent, not privileged Message Content,
+for the same messages. See Discord's
+[Message Content guidance](https://docs.discord.com/developers/gateway/you-might-not-need-a-privileged-intent#message-content-intent)
+and [Get Channel Messages](https://docs.discord.com/developers/resources/message#get-channel-messages).
+
+At startup steward opens one DM channel per configured Discord operator and seeds its cursor
+from that channel's newest message, so deployment never answers old conversation history.
+Each pass fetches at most 50 newer messages. Replies are split at 1,900 characters, and a
+Discord `429` sleeps for the supplied `retry_after` before one bounded retry. Messages from
+unlisted users, non-private conversations, and other bots receive silence and produce the
+same bounded `chat_message_dropped` evidence as Telegram.
+
+There is one REST-specific limit: Discord exposes no endpoint that lists every inbound DM
+channel. Steward opens only the configured operators' channels, so a new unknown account's
+DM is silent but cannot produce a drop event because the REST poller never observes it. The
+bridge still records `not an operator` for any untrusted message a transport does hand it;
+discovering arbitrary unknown-account DMs belongs to Gateway ingestion.
+
+`steward chat list` authenticates each configured Discord token with `GET /users/@me` and
+prints the discovered handle, for example `pip/discord: discord:pip — reachable, bot @Pip`.
+That makes a token copied from the wrong resident's application visible before the daemon
+starts answering.
 
 ## Future Discord gateway (design only)
 
@@ -448,9 +496,6 @@ at once before it is allowed to ship.
   spoken to; a delivered routine is the scheduler speaking, through the bridge's egress.
 - **Approval buttons.** An approval is an authorisation, and "who pressed it" is a security
   question a v0 chat channel has no honest answer to.
-- **Discord chat, or any second chat transport.** The notification webhook above is one-way;
-  it is not a Discord conversation. The seam is a `ChatTransport` protocol with two methods,
-  so a second chat transport is a class rather than a rewrite. There is no second one.
 - **Editing, reactions, photos, voice notes.** `allowed_updates: ["message"]`, text only;
   anything else is ignored rather than half-answered.
 - **A conversation the resident starts.** A delivered routine is a message the *manifest*
