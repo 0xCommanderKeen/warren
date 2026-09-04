@@ -277,12 +277,12 @@ def test_claiming_takes_the_oldest_open_task_the_skills_cover(store: Store) -> N
     old = store.post_job(title="Older", required_skills=["research"])
     store.post_job(title="Newer")
     claimed = store.claim_next_job(
-        claimant="claude-code:life-agent", skills=["research"], lease_expires_at=LATER
+        claimant="claude-code:hob", skills=["research"], lease_expires_at=LATER
     )
     assert claimed is not None
     assert claimed.task_id == old.task_id
     assert claimed.status == "claimed"
-    assert claimed.claimant == "claude-code:life-agent"
+    assert claimed.claimant == "claude-code:hob"
     assert claimed.lease_expires_at == LATER
 
 
@@ -652,7 +652,7 @@ def test_scheduler_exports_the_shared_trigger_vocabulary() -> None:
 
 def test_an_approval_request_starts_pending(store: Store) -> None:
     record = store.create_approval_request(
-        agent_id="claude-code:life-agent",
+        agent_id="claude-code:hob",
         project="household",
         action="send_email",
         message="Hob wants to send an email to the plumber",
@@ -665,7 +665,7 @@ def test_an_approval_request_starts_pending(store: Store) -> None:
 
 def test_the_first_decision_wins_and_later_ones_read_it_back(store: Store) -> None:
     record = store.create_approval_request(
-        agent_id="claude-code:life-agent",
+        agent_id="claude-code:hob",
         project="household",
         action="send_email",
         message="Hob wants to send an email",
@@ -756,28 +756,28 @@ def test_a_request_with_no_deadline_never_expires(store: Store) -> None:
 
 def test_a_decision_is_delivered_to_its_resident_exactly_once(store: Store) -> None:
     record = store.create_approval_request(
-        agent_id="a:b", project="p", action="send_email", message="…", resident="life-agent"
+        agent_id="a:b", project="p", action="send_email", message="…", resident="hob"
     )
-    assert store.undelivered_decisions("life-agent") == [], "pending decides nothing yet"
+    assert store.undelivered_decisions("hob") == [], "pending decides nothing yet"
     store.decide(record.request_id, "approve")
 
-    waiting = store.undelivered_decisions("life-agent")
+    waiting = store.undelivered_decisions("hob")
     assert [r.request_id for r in waiting] == [record.request_id]
     assert store.mark_delivered([record.request_id]) == 1
-    assert store.undelivered_decisions("life-agent") == []
+    assert store.undelivered_decisions("hob") == []
     assert store.mark_delivered([record.request_id]) == 0, "delivering twice marks nothing"
     assert _approval(store, record.request_id).delivered_at
 
 
 def test_claiming_decisions_marks_them_delivered_in_one_pass(store: Store) -> None:
     record = store.create_approval_request(
-        agent_id="a:b", project="p", action="send_email", message="…", resident="life-agent"
+        agent_id="a:b", project="p", action="send_email", message="…", resident="hob"
     )
     store.decide(record.request_id, "approve")
-    claimed = store.claim_undelivered_decisions("life-agent")
+    claimed = store.claim_undelivered_decisions("hob")
     assert [r.request_id for r in claimed] == [record.request_id]
     # The read and the mark were one pass: a second wake-up finds nothing.
-    assert store.claim_undelivered_decisions("life-agent") == []
+    assert store.claim_undelivered_decisions("hob") == []
     assert _approval(store, record.request_id).delivered_at
 
 
@@ -785,7 +785,7 @@ def test_two_concurrent_wake_ups_claim_a_decision_exactly_once(tmp_path: Path) -
     """The read-then-mark is atomic, so a decision reaches exactly one of two racing sessions."""
     with Store(tmp_path / "steward.db") as store:
         record = store.create_approval_request(
-            agent_id="a:b", project="p", action="send_email", message="…", resident="life-agent"
+            agent_id="a:b", project="p", action="send_email", message="…", resident="hob"
         )
         store.decide(record.request_id, "approve")
 
@@ -795,7 +795,7 @@ def test_two_concurrent_wake_ups_claim_a_decision_exactly_once(tmp_path: Path) -
 
         def grab() -> None:
             barrier.wait()
-            claimed = store.claim_undelivered_decisions("life-agent")
+            claimed = store.claim_undelivered_decisions("hob")
             with lock:
                 results.append(claimed)
 
@@ -810,7 +810,7 @@ def test_two_concurrent_wake_ups_claim_a_decision_exactly_once(tmp_path: Path) -
 
 def test_one_resident_never_reads_another_residents_decisions(store: Store) -> None:
     mine = store.create_approval_request(
-        agent_id="a:b", project="p", action="spend", message="…", resident="life-agent"
+        agent_id="a:b", project="p", action="spend", message="…", resident="hob"
     )
     store.decide(mine.request_id, "deny")
     assert store.undelivered_decisions("other-resident") == []
@@ -818,18 +818,18 @@ def test_one_resident_never_reads_another_residents_decisions(store: Store) -> N
 
 def test_the_audit_view_holds_the_request_and_its_decision(store: Store) -> None:
     record = store.create_approval_request(
-        agent_id="a:b", project="p", action="send_email", message="…", resident="life-agent"
+        agent_id="a:b", project="p", action="send_email", message="…", resident="hob"
     )
     store.decide(record.request_id, "edit", decided_by="api", edit={"subject": "shorter"})
     audited = store.approvals()
     assert len(audited) == 1
     assert audited[0].to_dict()["decision"] == "edit"
-    assert audited[0].to_dict()["resident"] == "life-agent"
+    assert audited[0].to_dict()["resident"] == "hob"
     assert store.approvals("pending") == []
     assert [r.request_id for r in store.approvals("resolved")] == [record.request_id]
 
 
-def _ask(store: Store, action: str = "send_email", resident: str = "life-agent") -> ApprovalRecord:
+def _ask(store: Store, action: str = "send_email", resident: str = "hob") -> ApprovalRecord:
     return store.create_approval_request(
         agent_id="a:b", project="p", action=action, message="…", resident=resident
     )
@@ -843,11 +843,11 @@ def test_recent_denials_counts_every_way_a_resident_was_told_no(store: Store) ->
         project="p",
         action="send_email",
         message="…",
-        resident="life-agent",
+        resident="hob",
         expires_at=EARLY,
     )
     store.expire_approvals(LATER)
-    assert store.recent_denials("life-agent", "send_email", EARLY) == 2
+    assert store.recent_denials("hob", "send_email", EARLY) == 2
 
 
 def test_recent_denials_ignores_everything_that_is_not_this_residents_no(store: Store) -> None:
@@ -855,13 +855,13 @@ def test_recent_denials_ignores_everything_that_is_not_this_residents_no(store: 
     store.decide(_ask(store, action="spend").request_id, "deny", decided_by="api", now=LATER)
     store.decide(_ask(store, resident="other-resident").request_id, "deny", now=LATER)
     _ask(store)  # Still pending: nobody has answered it either way.
-    assert store.recent_denials("life-agent", "send_email", EARLY) == 0
+    assert store.recent_denials("hob", "send_email", EARLY) == 0
 
 
 def test_recent_denials_starts_counting_at_since(store: Store) -> None:
     store.decide(_ask(store).request_id, "deny", decided_by="api", now=EARLY)
-    assert store.recent_denials("life-agent", "send_email", EARLY) == 1
-    assert store.recent_denials("life-agent", "send_email", LATER) == 0
+    assert store.recent_denials("hob", "send_email", EARLY) == 1
+    assert store.recent_denials("hob", "send_email", LATER) == 0
 
 
 def test_an_auto_denied_request_is_filed_resolved_and_not_counted_as_a_no(store: Store) -> None:
@@ -871,16 +871,16 @@ def test_an_auto_denied_request_is_filed_resolved_and_not_counted_as_a_no(store:
         project="p",
         action="send_email",
         message="…",
-        resident="life-agent",
+        resident="hob",
         denied_by="repeat",
     )
     assert not record.pending
     assert record.decision == "deny"
     assert record.decided_at == record.created_at
     assert store.pending_approvals() == []
-    assert store.recent_denials("life-agent", "send_email", EARLY) == 0
+    assert store.recent_denials("hob", "send_email", EARLY) == 0
     # It is a decision like any other, so the resident is told about it on its next run.
-    assert [r.request_id for r in store.undelivered_decisions("life-agent")] == [record.request_id]
+    assert [r.request_id for r in store.undelivered_decisions("hob")] == [record.request_id]
 
 
 def test_the_denials_lookup_has_an_index_to_read(store: Store) -> None:
@@ -898,14 +898,14 @@ def test_a_decision_and_its_delivery_survive_a_restart(tmp_path: Path) -> None:
     path = tmp_path / "steward.db"
     with Store(path) as first:
         request_id = first.create_approval_request(
-            agent_id="a:b", project="p", action="spend", message="…", resident="life-agent"
+            agent_id="a:b", project="p", action="spend", message="…", resident="hob"
         ).request_id
         first.decide(request_id, "deny")
     with Store(path) as second:
-        assert [r.request_id for r in second.undelivered_decisions("life-agent")] == [request_id]
+        assert [r.request_id for r in second.undelivered_decisions("hob")] == [request_id]
         second.mark_delivered([request_id])
     with Store(path) as third:
-        assert third.undelivered_decisions("life-agent") == []
+        assert third.undelivered_decisions("hob") == []
 
 
 def test_now_defaults_to_the_wall_clock(store: Store) -> None:

@@ -358,7 +358,7 @@ def test_hex_digest_where_a_reference_is_expected_is_rejected(
 
 def test_ordinary_paths_and_urls_survive_the_blob_check() -> None:
     for reference in (
-        "/data/residents/life-agent/memory",
+        "/data/residents/hob/memory",
         "~/.steward/memory/project-agent",
         "https://github.com/0xCommanderKeen/burrow/issues",
         "op://Private/Gmail",
@@ -1643,16 +1643,16 @@ def test_a_permitted_sender_may_send_to_anybody_unless_it_names_a_list(
     write_resident: ResidentWriter,
 ) -> None:
     open_sender = m.load_manifest(write_resident(delegating({"send": True})))
-    assert open_sender.manifest.delegation.may_send_to("life-agent") is True
+    assert open_sender.manifest.delegation.may_send_to("hob") is True
 
-    narrow = m.load_manifest(write_resident(delegating({"send": True, "to": ["life-agent"]})))
-    assert narrow.manifest.delegation.may_send_to("life-agent") is True
+    narrow = m.load_manifest(write_resident(delegating({"send": True, "to": ["hob"]})))
+    assert narrow.manifest.delegation.may_send_to("hob") is True
     assert narrow.manifest.delegation.may_send_to("other-agent") is False
 
 
 def test_an_allowlist_with_the_switch_off_is_refused(write_resident: ResidentWriter) -> None:
     """It reads like a grant and grants nothing, which is the worst kind of declaration."""
-    result = m.validate_manifest(write_resident(delegating({"send": False, "to": ["life-agent"]})))
+    result = m.validate_manifest(write_resident(delegating({"send": False, "to": ["hob"]})))
     assert not result.ok
     assert "may not delegate to anybody" in problem_for(result, "delegation.send")
 

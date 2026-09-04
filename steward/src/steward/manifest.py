@@ -591,7 +591,7 @@ def scan_for_credentials(data: object, source: Path) -> list[Diagnostic]:
                             "value is an opaque blob where a reference is expected; "
                             "this field points at a location, it does not hold a value"
                         ),
-                        example="/data/residents/life-agent/memory  (or https://…, op://…)",
+                        example="/data/residents/hob/memory  (or https://…, op://…)",
                     )
                 )
     return diagnostics
@@ -1321,7 +1321,7 @@ class Deploy(_Model):
     container: str | None = Field(
         default=None,
         pattern=CONTAINER_PATTERN,
-        description="Docker container name, e.g. steward-life-agent. Default: steward-<id>.",
+        description="Docker container name, e.g. steward-hob. Default: steward-<id>.",
     )
     host: str | None = Field(
         default=None,
@@ -1776,8 +1776,8 @@ def active_residents(residents: Iterable[Resident]) -> list[Resident]:
 FIELD_EXAMPLES: Mapping[str, str] = {
     "version": "version: 0",
     "uid": "uid: 7e36d76a-1ad8-4d65-a619-8c6e7fb93ed9",
-    "id": "id: life-agent  (lowercase, dashes)",
-    "agent_id": "agent_id: claude-code:life-agent",
+    "id": "id: hob  (lowercase, dashes)",
+    "agent_id": "agent_id: claude-code:hob",
     "project": "project: burrow",
     "summary": "summary: Keeps the household running.",
     "soul": "soul: {name: Hob, char: Monk, accent: '#a68a4f', role: life bot}",
@@ -1801,11 +1801,9 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "skills": "skills: [read-inbox, read-calendar]",
     "skills.id": "id: read-inbox  (a name in skills/)",
     "skills.source": "source: library",
-    "memory": (
-        "memory: {kind: directory, path: /data/residents/life-agent/memory, journal: journal}"
-    ),
+    "memory": ("memory: {kind: directory, path: /data/residents/hob/memory, journal: journal}"),
     "memory.kind": "kind: directory",
-    "memory.path": "path: /data/residents/life-agent/memory",
+    "memory.path": "path: /data/residents/hob/memory",
     "memory.journal": "journal: journal  (a directory under path; one file per local day)",
     "memory.journal_keep": "journal_keep: 30  (entries kept, newest first)",
     "routes": "routes: [{id: cron, kind: cron, address: steward-scheduler, status: active}]",
@@ -1845,9 +1843,9 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "routines.journal": "journal: close_of_day  (on exactly one routine, or omit it)",
     "routines.deliver": "deliver: chat  (needs an active chat route; omit it to deliver nowhere)",
     "routines.quiet_word": "quiet_word: NOTHING  (one short token; only with deliver)",
-    "delegation": "delegation: {send: true, to: [life-agent]}",
+    "delegation": "delegation: {send: true, to: [receiver-resident]}",
     "delegation.send": "send: true  (omit the block entirely to never delegate)",
-    "delegation.to": "to: [life-agent]  (resident ids; omit it to allow any receiver)",
+    "delegation.to": "to: [receiver-resident]  (resident ids; omit it to allow any receiver)",
     "delegation.note": "note: Project work may be handed to a household agent.",
     "board": "board: {claim: true, max_claims_per_wake: 1, lease_s: 1800, timeout_s: 900}",
     "board.claim": "claim: true  (omit the block entirely to never claim)",
@@ -1858,11 +1856,11 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "budgets.daily_cost_usd": "daily_cost_usd: 5.0  (omit the field for no cap)",
     "budgets.daily_tokens": "daily_tokens: 2000000  (input + output, per local day)",
     "budgets.max_run_seconds": "max_run_seconds: 900  (one run, not a day)",
-    "deploy": "deploy: {host: dxp2800, user: Miha, container: steward-life-agent}",
-    "deploy.container": "container: steward-life-agent  (the docker name, or omit the block)",
+    "deploy": "deploy: {host: dxp2800, user: Miha, container: steward-hob}",
+    "deploy.container": "container: steward-hob  (the docker name, or omit the block)",
     "deploy.host": "host: dxp2800  (a hostname, no spaces: it reaches a remote shell)",
     "deploy.user": "user: Miha  (the ssh user on that host)",
-    "deploy.path": "path: ~/docker/warren/residents/life-agent  (compose directory on the host)",
+    "deploy.path": "path: ~/docker/warren/residents/hob  (compose directory on the host)",
     "deploy.image": "image: steward-resident:latest",
     "deploy.command": "command: [sleep, infinity]",
     "retired": "retired: false  (true retires the resident; the files stay in git)",
@@ -2601,7 +2599,7 @@ def _check_delegation(manifest: ResidentManifest, source: Path) -> list[Diagnost
                     f"false, so this resident may not delegate to anybody; an allowlist "
                     f"that grants nothing reads like a grant"
                 ),
-                example="delegation: {send: true, to: [life-agent]}",
+                example="delegation: {send: true, to: [hob]}",
             )
         )
     if manifest.id in delegation.to:
@@ -2613,7 +2611,7 @@ def _check_delegation(manifest: ResidentManifest, source: Path) -> list[Diagnost
                     f"{manifest.id!r} lists itself as a recipient; a resident handing work "
                     f"to itself is one session pretending to be two, and steward rejects it"
                 ),
-                example="to: [life-agent]  (somebody else)",
+                example="to: [hob]  (somebody else)",
             )
         )
     return diagnostics
@@ -2865,7 +2863,7 @@ def _read_yaml(path: Path) -> tuple[object, list[Diagnostic]]:
                 file=path,
                 field_path="<file>",
                 problem=f"manifest is not valid YAML: {exc}",
-                example="version: 0\nid: life-agent\n…",
+                example="version: 0\nid: hob\n…",
             )
         ]
     if data is None:
@@ -2874,7 +2872,7 @@ def _read_yaml(path: Path) -> tuple[object, list[Diagnostic]]:
                 file=path,
                 field_path="<file>",
                 problem="manifest is empty",
-                example="version: 0\nid: life-agent\n…",
+                example="version: 0\nid: hob\n…",
             )
         ]
     if not isinstance(data, Mapping):
@@ -2883,7 +2881,7 @@ def _read_yaml(path: Path) -> tuple[object, list[Diagnostic]]:
                 file=path,
                 field_path="<root>",
                 problem="manifest must be a mapping of fields at the top level",
-                example="version: 0\nid: life-agent\n…",
+                example="version: 0\nid: hob\n…",
             )
         ]
     return data, []
@@ -3077,7 +3075,7 @@ def validate_tree(
                     file=root,
                     field_path="<path>",
                     problem=NO_MANIFESTS_PROBLEM,
-                    example="residents/life-agent/manifest.yaml",
+                    example="residents/hob/manifest.yaml",
                     severity=Severity.WARNING,
                 ),
             )

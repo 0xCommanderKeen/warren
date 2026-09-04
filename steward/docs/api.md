@@ -294,7 +294,7 @@ queued: an unknown resident or routine is a `404`, not an enqueue.
 
 ```console
 $ curl -sS -X POST -H "Authorization: Bearer $STEWARD_TOKEN" \
-    http://127.0.0.1:8801/residents/life-agent/routines/inbox-read/run
+    http://127.0.0.1:8801/residents/hob/routines/inbox-read/run
 {"request_id": "…", "status": "accepted", "trigger": "manual", …}
 ```
 
@@ -371,7 +371,7 @@ It is also the one write path a session credential reaches, and it behaves diffe
 one: see [Three kinds of caller](#three-kinds-of-caller).
 
 ```json
-{"from": "sender-resident", "to": "life-agent", "route": "handoff",
+{"from": "sender-resident", "to": "hob", "route": "handoff",
  "title": "Check the errand list", "detail": "…", "parent_task_id": "…"}
 ```
 
@@ -611,10 +611,10 @@ never has to infer it from which fields happen to be filled in:
 
 ```json
 {"request_id": "…", "message": "…",
- "resident": "life-agent", "act": "provision", "changed": true, "dry_run": false,
+ "resident": "hob", "act": "provision", "changed": true, "dry_run": false,
  "declare": {"written": false, "commit": null,
              "note": "already declared; provisioned from the manifest itself"},
- "provision": {"target": {"host": "dxp2800", "container": "steward-life-agent", "…": "…"},
+ "provision": {"target": {"host": "dxp2800", "container": "steward-hob", "…": "…"},
                "files": ["docker-compose.yaml", ".env", "manifest.yaml", "soul.md"],
                "compose_changed": true, "env_keys": ["CHRONICLE_TOKEN", "CHRONICLE_URL"],
                "sent": true},
@@ -704,10 +704,10 @@ credential made the request, exactly as every other write here is.
 
 ```json
 {"request_id": "…", "message": "…",
- "resident": "life-agent", "manifest_path": "residents/life-agent/manifest.yaml",
+ "resident": "hob", "manifest_path": "residents/hob/manifest.yaml",
  "marked": true, "stopped": true, "scrubbed": true,
  "commands": ["ssh Miha@dxp2800 docker compose … down --remove-orphans",
-              "ssh Miha@dxp2800 rm -f ~/docker/warren/residents/life-agent/.env …"],
+              "ssh Miha@dxp2800 rm -f ~/docker/warren/residents/hob/.env …"],
  "commit": "9f2c…", "dry_run": false, "note": "retired",
  "revision": "sha256:…",
  "push": {"pushed": true, "remote": "origin", "branch": "burrow/residents",
@@ -842,8 +842,8 @@ invents no village state to serve it.
 
 ```json
 {
-  "resident": "life-agent",
-  "agent_id": "claude-code:life-agent",
+  "resident": "hob",
+  "agent_id": "claude-code:hob",
   "window": {"tz": "Europe/Ljubljana", "day": "2026-08-24",
              "start": "2026-08-23T22:00:00.000Z", "end": "2026-08-24T22:00:00.000Z"},
   "spent": {"runs": 6, "input_tokens": 18000, "output_tokens": 2400, "tokens": 20400,
@@ -854,7 +854,7 @@ invents no village state to serve it.
   ],
   "max_run_seconds": 900,
   "paused": true,
-  "pause": {"resident": "life-agent", "budget": "daily_cost_usd", "spent": 5.2, "cap": 5.0,
+  "pause": {"resident": "hob", "budget": "daily_cost_usd", "spent": 5.2, "cap": 5.0,
             "reason": "daily_cost_usd: 5.20 of 5", "request_id": "…",
             "window_end": "2026-08-24T22:00:00.000Z", "paused_at": "…"},
   "allowance": null,
@@ -878,8 +878,8 @@ clamped to 100). A control panel reads this to show a resident's recent history.
 
 ```console
 $ curl -sS -H "Authorization: Bearer $STEWARD_TOKEN" \
-    http://127.0.0.1:8801/residents/life-agent/journal?limit=3
-{"resident": "life-agent", "entries": [{"date": "2026-08-24", "routine": "close-of-day",
+    http://127.0.0.1:8801/residents/hob/journal?limit=3
+{"resident": "hob", "entries": [{"date": "2026-08-24", "routine": "close-of-day",
                                         "text": "Two drafts still waiting."}]}
 ```
 
@@ -915,7 +915,7 @@ The skills library, and who holds each skill.
   "skills": [
     {"name": "research", "description": "Answer a question from real sources…",
      "default": true, "path": "skills/research/SKILL.md", "body_chars": 2391,
-     "holders": ["life-agent", "sender-resident"]}
+     "holders": ["hob", "sender-resident"]}
   ],
   "errors": []
 }
@@ -941,7 +941,7 @@ from three things steward already knows and nothing it does not.
 ```json
 {
   "routines": [
-    {"key": "life-agent/inbox-read", "resident": "life-agent", "resident_name": "Hob",
+    {"key": "hob/inbox-read", "resident": "hob", "resident_name": "Hob",
      "accent": "#a68a4f", "routine": "inbox-read", "schedule": "15 * * * *",
      "schedule_tz": "Europe/Ljubljana", "enabled": true, "retired": false,
      "requires": ["read-inbox"], "timeout_s": 600, "journal": null,
@@ -1017,8 +1017,8 @@ effect, and this is where the effect eventually shows up.
 $ curl -sS -H "Authorization: Bearer $STEWARD_TOKEN" \
     http://127.0.0.1:8801/requests/2b8f…
 {"request_id": "2b8f…", "received_at": "2026-08-24T23:45:33.975Z", "method": "POST",
- "path": "/residents/life-agent/routines/inbox-read/run", "outcome": "ran",
- "detail": {"routine": "life-agent/inbox-read", "run_id": "…"}}
+ "path": "/residents/hob/routines/inbox-read/run", "outcome": "ran",
+ "detail": {"routine": "hob/inbox-read", "run_id": "…"}}
 ```
 
 `outcome` is the whole point. A run-now is written as `queued` and becomes `ran`,

@@ -28,7 +28,7 @@ open, and the shared secret has no business being handed to whatever holds port
 
 Resident agents (services that outlive any one Claude session, like a Telegram
 bot running claude -p per message) set CHRONICLE_AGENT_ID (stable villager
-identity, e.g. "life-agent") and optionally CHRONICLE_PROJECT (label). For a
+identity, e.g. "hob") and optionally CHRONICLE_PROJECT (label). For a
 resident, SessionEnd maps to `idle` rather than `session_ended`: the session's
 process is gone but the agent-as-service is still home, resting.
 

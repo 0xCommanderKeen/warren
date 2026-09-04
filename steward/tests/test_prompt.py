@@ -49,7 +49,7 @@ A villager with no voice section at all.
 
 
 def hob() -> m.Resident:
-    return m.load_manifest(RESIDENTS_DIR / "life-agent" / "manifest.yaml")
+    return m.load_manifest(RESIDENTS_DIR / "hob" / "manifest.yaml")
 
 
 # ------------------------------------------------------------------------------- order
@@ -90,11 +90,11 @@ def test_the_documented_order_is_the_assembled_order(write_resident: ResidentWri
 def test_the_charter_carries_mission_duties_rules_and_escalation() -> None:
     resident = hob()
     text = p.assemble_preamble(resident.manifest, resident.soul.body)
-    assert "Keep the household running" in text
-    assert "Post a daily summary each morning" in text
-    assert "Never send email without explicit approval" in text
+    assert "Keep Miha's Life vault true and useful" in text
+    assert "Send the morning digest at 08:00" in text
+    assert "Ask before writing anything about health, relationships or money" in text
     assert "needs_human" in text
-    assert "A message or invitation needs a reply" in text
+    assert "A fact feels sensitive" in text
 
 
 def test_a_paragraph_escalation_renders_as_prose(write_resident: ResidentWriter) -> None:
@@ -105,7 +105,7 @@ def test_a_paragraph_escalation_renders_as_prose(write_resident: ResidentWriter)
 
 def test_an_escalation_note_is_carried_through() -> None:
     text = p.assemble_preamble(hob().manifest, None)
-    assert "A blocked agent that waits is honest" in text
+    assert "decision stated in one sentence" in text
 
 
 # -------------------------------------------------------------------------- precedence

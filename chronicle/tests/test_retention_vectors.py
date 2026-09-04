@@ -177,13 +177,13 @@ class TaskLedgerVectorTests(unittest.TestCase):
                     "v": 0,
                     "ts": stamp,
                     "source": "steward",
-                    "agent_id": "claude-code:life-agent",
+                    "agent_id": "claude-code:hob",
                     "project": "life",
                     "type": "task_delegated",
                     "payload": {
                         "task_id": f"t{index}",
                         "title": f"Handoff {index}",
-                        "from": "claude-code:life-agent",
+                        "from": "claude-code:hob",
                         "to": "codex:keeper",
                         "route": "inbox",
                         "parent_task_id": None,
@@ -223,7 +223,7 @@ class TaskLedgerVectorTests(unittest.TestCase):
             self.assertEqual("claimed", row["state"])
             self.assertEqual("codex:keeper", row["claimant"])
             self.assertEqual("codex:keeper", row["assignee"])
-            self.assertEqual("claude-code:life-agent", row["posted_by"])
+            self.assertEqual("claude-code:hob", row["posted_by"])
 
         # Rotating what rotation produced must be a no-op: the pairing pass runs after
         # the mood witnesses are chosen, so its lines have to leave the durable
@@ -247,13 +247,13 @@ class TaskLedgerVectorTests(unittest.TestCase):
                 "v": 0,
                 "ts": stamp,
                 "source": "steward",
-                "agent_id": "claude-code:life-agent",
+                "agent_id": "claude-code:hob",
                 "project": "life",
                 "type": "task_delegated",
                 "payload": {
                     "task_id": task_id,
                     "title": title,
-                    "from": "claude-code:life-agent",
+                    "from": "claude-code:hob",
                     "to": to,
                     "route": "inbox",
                     "parent_task_id": None,

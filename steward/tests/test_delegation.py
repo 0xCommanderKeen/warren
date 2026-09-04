@@ -196,13 +196,13 @@ def refusal(
 def test_a_block_names_both_ends_and_the_work() -> None:
     output = """Done with my part.
 
-    <delegate to="life-agent" route="inbox">
+    <delegate to="hob" route="inbox">
     {"title": "Check the errand list", "detail": "the long version"}
     </delegate>
     """
     (parsed,) = dg.extract_handoffs(output)
     assert parsed.ok
-    assert parsed.to == "life-agent"
+    assert parsed.to == "hob"
     assert parsed.route == "inbox"
     assert parsed.title == "Check the errand list"
     assert parsed.detail == "the long version"
@@ -1093,19 +1093,27 @@ def test_a_session_of_an_unknown_resident_hands_nothing_over(
 # ------------------------------------------------------------------------- the pilot
 
 
-def test_project_fixture_hands_hob_work_and_the_whole_chain_is_readable(
-    store: Store, sink: ev.NullEmitter, tmp_path: Path
+def test_project_fixture_hands_a_fixture_work_and_the_whole_chain_is_readable(
+    store: Store, sink: ev.NullEmitter, tmp_path: Path, write_resident: ResidentWriter
 ) -> None:
-    """The handoff path, using a test-only sender and the shipped receiver.
+    """The handoff path, using test-only declarations at both ends.
 
     A project agent writes a ``<delegate>`` block in its output and finishes. Steward
-    validates it against both manifests, delivers it into Hob's declared route, and tells
-    the village. Hob picks it up on his own next wake-up, works it as an ordinary
+    validates it against both manifests, delivers it into the receiver's route, and tells
+    the village. The receiver picks it up on its next wake-up, works it as an ordinary
     provisioned session, and closes it — and every event from the handoff onwards names
     the parent, so the chain from the human's task to Hob's answer reads off the log.
     """
     sender = load_manifest(PROJECT_AGENT_FIXTURE)
-    receiver = load_manifest(REPO_ROOT / "residents" / "life-agent" / "manifest.yaml")
+    receiver_data = resident_manifest(
+        "receiver-resident", name="Receiver", routes=[inbox_route("handoff")]
+    )
+    receiver = load_manifest(
+        write_resident(
+            receiver_data,
+            soul=soul_for(receiver_data["soul"]["name"], receiver_data["agent_id"]),
+        )
+    )
     residents = (sender, receiver)
     dispatcher = b.Dispatcher(
         residents=residents,
@@ -1126,7 +1134,7 @@ def test_project_fixture_hands_hob_work_and_the_whole_chain_is_readable(
     output = (
         "I have the protocol half. The household half is not mine.\n\n"
         f"{prompt.ACTIONS_OPEN}\n"
-        '<delegate to="life-agent" route="handoff">\n'
+        '<delegate to="receiver-resident" route="handoff">\n'
         '{"title": "Check what the errand list actually contains",\n'
         ' "detail": "I need the real shape of an errand before I render one."}\n'
         "</delegate>\n"
@@ -1136,7 +1144,7 @@ def test_project_fixture_hands_hob_work_and_the_whole_chain_is_readable(
     assert delivery.accepted
     letter = delivery.task
     assert letter is not None
-    assert letter.assignee == "life-agent"
+    assert letter.assignee == "receiver-resident"
     assert letter.route == "handoff"
 
     delegated = sink.events[0]
@@ -1146,7 +1154,7 @@ def test_project_fixture_hands_hob_work_and_the_whole_chain_is_readable(
     assert delegated.payload["depth"] == 1
 
     (report,) = dispatcher.dispatch(NOW).reports
-    assert report.resident_id == "life-agent"
+    assert report.resident_id == "receiver-resident"
     assert report.done
 
     assert [event.type for event in sink.events] == [

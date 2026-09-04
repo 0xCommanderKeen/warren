@@ -245,13 +245,13 @@ deploy is pushed from a machine that has the repo checked out.
   user-level Codex hooks. It uses a distinct `codex:` identity without changing
   the default Claude adapter. Copyable configuration, trust review, and a smoke
   check are in [the protocol guide](docs/protocol.md#user-level-codex-setup).
-- **Life Agent emitter** — the same bundle installed at
-  `/root/.claude/burrow/` inside the `life-agent` container (via the
+- **Hob emitter** — the same bundle installed at
+  `/root/.claude/burrow/` inside the `hob` container (via the
   `claude-config` volume), invoked as `/root/.claude/burrow/burrow-emit` — a
   deployed path, unchanged by the identifier rename, and one the bundle still
   answers to. It converges on the new name whenever that container is next
   provisioned. It runs with
-  `CHRONICLE_AGENT_ID=life-agent CHRONICLE_PROJECT=life` and the same `CHRONICLE_URL` /
+  `CHRONICLE_AGENT_ID=hob CHRONICLE_PROJECT=life` and the same `CHRONICLE_URL` /
   `CHRONICLE_TOKEN` pair, so it appears as one resident villager that rests between
   turns instead of leaving.
 - **Local-only mode** — `uv run uvicorn serve:app --host 127.0.0.1 --port 8737` and no

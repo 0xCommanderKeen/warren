@@ -4,7 +4,7 @@
 # /root/.claude is a bind mount from the host (./claude beside the compose file), and a
 # bind mount hides whatever the image baked at that path. So the image carries the
 # canonical copies under /opt/steward and this script puts them into the volume at start.
-# That is the same shape life-agent's container has today — the emitter living in the
+# That is the same shape hob's container has today — the emitter living in the
 # claude-config volume — except that here the copy comes from the image instead of from
 # somebody's afternoon with scp.
 #

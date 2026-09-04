@@ -1008,11 +1008,11 @@ def test_request_env_reaches_the_session(stub_bin: StubWriter, tmp_path: Path) -
             timeout_s=10,
             env={
                 "ARGV_DUMP": str(tmp_path / "env.txt"),
-                "CHRONICLE_AGENT_ID": "claude-code:life-agent",
+                "CHRONICLE_AGENT_ID": "claude-code:hob",
             },
         )
     )
-    assert (tmp_path / "env.txt").read_text().strip() == "claude-code:life-agent"
+    assert (tmp_path / "env.txt").read_text().strip() == "claude-code:hob"
 
 
 # -------------------------------------------- the session environment (steward #41)
@@ -1082,11 +1082,11 @@ def test_a_session_sees_only_the_allowlist_and_what_steward_chose(
     observed = child_env(
         stub_bin,
         tmp_path,
-        request=request_for(tmp_path, env={"CHRONICLE_AGENT_ID": "claude-code:life-agent"}),
+        request=request_for(tmp_path, env={"CHRONICLE_AGENT_ID": "claude-code:hob"}),
     )
 
     assert "SOME_UNRELATED_SECRET" not in observed
-    assert observed["CHRONICLE_AGENT_ID"] == "claude-code:life-agent"
+    assert observed["CHRONICLE_AGENT_ID"] == "claude-code:hob"
     assert observed["STEWARD_STATE"] == "/state/scheduler.json", (
         "a session's own `steward delegate` has to open the same database"
     )

@@ -212,9 +212,8 @@ def test_hourly_and_daily_schedules_agree_with_the_manifest() -> None:
     scheduled = s.load_scheduled(RESIDENTS_DIR)
     keys = {item.key for item in scheduled}
     assert keys == {
-        "life-agent/daily-summary",
-        "life-agent/inbox-read",
-        "life-agent/close-of-day",
+        "hob/morning-digest",
+        "hob/close-of-day",
         "pip/heartbeat",
     }
     assert all(item.routine.schedule_tz == "Europe/Ljubljana" for item in scheduled)

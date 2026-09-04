@@ -38,5 +38,5 @@ budgets:
 delegation:
   send: true
   to:
-    - life-agent
+    - receiver-resident
 routines: []

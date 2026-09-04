@@ -172,7 +172,7 @@ def _require_residents(result: ValidationResult, root: Path) -> ValidationResult
                     f"{NO_MANIFESTS_PROBLEM} under {root.resolve()}, and no path was named "
                     f"on the command line — so this run validated nothing"
                 ),
-                example="residents/life-agent/manifest.yaml",
+                example="residents/hob/manifest.yaml",
                 severity=Severity.ERROR,
             ),
         ),

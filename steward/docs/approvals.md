@@ -134,7 +134,7 @@ already finished, so a person is the only one left to tell.
 For a session with shell access that wants the request registered before its turn ends.
 
 ```console
-$ steward approval raise life-agent \
+$ steward approval raise hob \
     --action send_email \
     --detail-json '{"to": "anna@example.com", "subject": "Re: Thursday"}' \
     --expires-in 4h --options approve,deny
@@ -220,7 +220,7 @@ timestamp:
 $ steward approval show <request_id>
 Hob wants to send email
 request:   7f1c…
-resident:  life-agent
+resident:  hob
 action:    send_email
 detail:    {"to": "anna@example.com", "subject": "Re: Thursday"}
 options:   approve, deny, edit
@@ -287,7 +287,7 @@ choice an operator makes by configuring both.
 ```json
 {
   "type": "needs_human",
-  "agent_id": "claude-code:life-agent",
+  "agent_id": "claude-code:hob",
   "payload": {
     "message": "Hob wants to send email",
     "request_id": "7f1c…",

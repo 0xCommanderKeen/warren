@@ -94,13 +94,13 @@ class ProtocolContractTest(unittest.TestCase):
             "v": 0,
             "ts": "2026-08-25T10:02:00.000Z",
             "source": "steward",
-            "agent_id": "claude-code:life-agent",
+            "agent_id": "claude-code:hob",
             "project": "life",
             "type": "task_delegated",
             "payload": {
                 "task_id": "task-2",
                 "title": "Draft the letter",
-                "from": "claude-code:life-agent",
+                "from": "claude-code:hob",
                 "to": "codex:keeper",
                 "route": "inbox",
                 "parent_task_id": None,
@@ -112,7 +112,7 @@ class ProtocolContractTest(unittest.TestCase):
         # somebody who did not send it would draw the wrong villager walking.
         event["payload"]["from"] = "codex:other"
         self.assertEqual(validate_event(event), "payload.from must match agent_id")
-        event["payload"]["from"] = "claude-code:life-agent"
+        event["payload"]["from"] = "claude-code:hob"
         # A root handoff carries an explicit null parent; a blank one is a lost chain.
         event["payload"]["parent_task_id"] = ""
         self.assertEqual(validate_event(event), "invalid payload.parent_task_id")
@@ -126,13 +126,13 @@ class ProtocolContractTest(unittest.TestCase):
             "v": 0,
             "ts": "2026-08-25T10:03:00.000Z",
             "source": "steward",
-            "agent_id": "claude-code:life-agent",
+            "agent_id": "claude-code:hob",
             "project": "life",
             "type": "task_session_finished",
             "payload": {
                 "task_id": "task-1",
                 "title": "Research X",
-                "claimant": "claude-code:life-agent",
+                "claimant": "claude-code:hob",
                 "run_id": "run-7",
                 "outcome": "ok",
                 "artifacts": [],
@@ -154,7 +154,7 @@ class ProtocolContractTest(unittest.TestCase):
             "v": 0,
             "ts": "2026-08-25T10:04:00.000Z",
             "source": "steward",
-            "agent_id": "claude-code:life-agent",
+            "agent_id": "claude-code:hob",
             "project": "life",
             "type": "chat_message_dropped",
             "payload": {
@@ -179,7 +179,7 @@ class ProtocolContractTest(unittest.TestCase):
             "v": 0,
             "ts": "2026-08-25T10:04:00.000Z",
             "source": "steward",
-            "agent_id": "claude-code:life-agent",
+            "agent_id": "claude-code:hob",
             "project": "life",
             "type": "chat_message_dropped",
             "payload": {
@@ -205,7 +205,7 @@ class ProtocolContractTest(unittest.TestCase):
             "v": 0,
             "ts": "2026-08-25T10:05:00.000Z",
             "source": "steward",
-            "agent_id": "claude-code:life-agent",
+            "agent_id": "claude-code:hob",
             "project": "life",
             "type": "resident_restarted",
             "payload": {"reason": "container was not running", "attempt": 3},

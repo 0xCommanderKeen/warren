@@ -285,8 +285,8 @@ def test_describe_missing_says_what_the_library_holds(
     write_skill: SkillWriter, tmp_path: Path
 ) -> None:
     write_skill("read-inbox")
-    message = sk.describe_missing("life-agent", ["errands"], library(tmp_path))
-    assert "life-agent is granted 'errands'" in message
+    message = sk.describe_missing("hob", ["errands"], library(tmp_path))
+    assert "hob is granted 'errands'" in message
     assert "it holds: read-inbox" in message
 
 
@@ -470,11 +470,11 @@ def test_every_shipped_skill_is_written_for_a_session_to_read() -> None:
 
 
 def test_hob_holds_the_defaults_plus_his_own_grants() -> None:
-    resident = m.load_manifest(REPO_ROOT / "residents" / "life-agent" / "manifest.yaml")
+    resident = m.load_manifest(REPO_ROOT / "residents" / "hob" / "manifest.yaml")
     resolved = sk.effective_skills(resident.manifest, sk.load_library(LIBRARY))
     names = [skill.name for skill in resolved]
     assert names[:4] == ["daily-summary", "escalate", "research", "write-journal"]
-    assert names[4:] == ["read-inbox", "read-calendar", "errands"]
+    assert names[4:] == ["vault-keeper", "morning-digest"]
     assert "write-blog-post" not in names, "Hob is granted what he was granted, and no more"
 
 

@@ -6,12 +6,12 @@ import {
 
 const manifest = () => ({
   version: 0,
-  id: "life-agent",
+  id: "hob",
   summary: "The household spirit.",
   soul: { name: "Hob", accent: "#a68a4f", role: "life bot", file: "soul.md" },
   charter: { mission: "Keep the household running.", duties: ["Post a summary."], rules: ["Never send email."] },
   budgets: { daily_cost_usd: 10 },
-  deploy: { host: "dxp2800", user: "Miha", container: "life-agent" },
+  deploy: { host: "dxp2800", user: "Miha", container: "hob" },
   routines: [{ id: "inbox-read", schedule: "15 * * * *" }],
 });
 

@@ -60,13 +60,13 @@ function router(table) {
 const SOUL = { name: "Hob", char: "Keeper", role: "household agent", accent: "#a68a4f" };
 
 const RESIDENT = {
-  id: "life-agent",
+  id: "hob",
   uid: "0198-uid",
-  agent_id: "claude-code:life-agent",
+  agent_id: "claude-code:hob",
   project: "household",
   summary: "keeps the house",
   retired: false,
-  path: "residents/life-agent/manifest.yaml",
+  path: "residents/hob/manifest.yaml",
   soul: SOUL,
   voice: "Plain sentences.",
   memory: { kind: "directory", path: "memory/" },
@@ -82,8 +82,8 @@ const RESIDENT = {
 };
 
 const ROUTINE = {
-  key: "life-agent/daily-summary",
-  resident: "life-agent",
+  key: "hob/daily-summary",
+  resident: "hob",
   resident_name: "Hob",
   accent: "#a68a4f",
   routine: "daily-summary",
@@ -113,7 +113,7 @@ const ROUTINES = {
 };
 
 const BUDGET = {
-  resident: "life-agent",
+  resident: "hob",
   window: { tz: "Europe/Ljubljana", day: "2026-08-31", end: "2026-08-31T22:00:00.000Z" },
   spent: { runs: 6, tokens: 20400, cost_usd: 5.2, duration_s: 812.4, unreported_runs: 0 },
   budgets: [{ budget: "daily_cost_usd", spent: 5.2, limit: 10, remaining: 4.8, exhausted: false }],
@@ -287,7 +287,7 @@ describe("running a routine now", () => {
     mount(<RoutinesPage />, {
       fetch: router({
         "/routines": json(200, ROUTINES),
-        "POST /residents/life-agent/routines/daily-summary/run": accepted,
+        "POST /residents/hob/routines/daily-summary/run": accepted,
         "/requests/req-1": (url, init) => log(url, init),
       }),
     });
@@ -311,7 +311,7 @@ describe("running a routine now", () => {
     mount(<RoutinesPage />, {
       fetch: router({
         "/routines": json(200, ROUTINES),
-        "POST /residents/life-agent/routines/daily-summary/run": accepted,
+        "POST /residents/hob/routines/daily-summary/run": accepted,
         "/requests/req-1": () =>
           json(200, { request_id: "req-1", outcome, detail: { run_id: "run-9" } }),
       }),
@@ -334,7 +334,7 @@ describe("running a routine now", () => {
     mount(<RoutinesPage />, {
       fetch: router({
         "/routines": json(200, ROUTINES),
-        "POST /residents/life-agent/routines/daily-summary/run": accepted,
+        "POST /residents/hob/routines/daily-summary/run": accepted,
         "/requests/req-1": (url, init) => log(url, init),
       }),
     });
@@ -430,7 +430,7 @@ const PENDING = {
   request_id: "ap-1",
   action: "send_email",
   message: "Hob wants to email the plumber",
-  resident: "life-agent",
+  resident: "hob",
   detail: { to: "plumber@example.com" },
   options: ["approve", "deny", "edit"],
   created_at: "2026-08-31T09:00:00.000Z",
@@ -815,7 +815,7 @@ describe("the residents list", () => {
     });
 
     const link = await screen.findByRole("link", { name: /Hob/ });
-    // Not /residents/life-agent: an id is a directory name and can be reused.
+    // Not /residents/hob: an id is a directory name and can be reused.
     expect(link.getAttribute("href")).toBe("/residents/0198-uid");
   });
 

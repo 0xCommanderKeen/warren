@@ -821,13 +821,10 @@ def test_a_lease_that_dies_mid_session_fails_validation(
     assert any("must outlive timeout_s" in d.problem for d in result.errors)
 
 
-def test_hob_is_the_pilot_and_declares_the_board_honestly() -> None:
-    resident = load_manifest(Path("residents/life-agent/manifest.yaml"))
-    assert resident.manifest.board.claim is True
-    assert resident.manifest.board.lease_s > resident.manifest.board.timeout_s
-    assert any(
-        route.kind == "job-board" and route.status == "active" for route in resident.manifest.routes
-    )
+def test_hob_is_a_vault_keeper_and_does_not_claim_board_work() -> None:
+    resident = load_manifest(Path("residents/hob/manifest.yaml"))
+    assert resident.manifest.board.claim is False
+    assert not any(route.kind == "job-board" for route in resident.manifest.routes)
 
 
 # ---------------------------------------------------------------------- leases (steward #73)

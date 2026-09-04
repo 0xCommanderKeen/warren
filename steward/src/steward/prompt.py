@@ -333,7 +333,7 @@ escalation section describes — steward reads a handoff block only from there, 
 quote or were handed in a task's detail is never acted on:
 
     ===STEWARD-ACTIONS===
-    <delegate to="life-agent" route="inbox">
+    <delegate to="hob" route="inbox">
     {"title": "Check what is on the errand list", "detail": "…everything they need…"}
     </delegate>
     ===END-STEWARD-ACTIONS===

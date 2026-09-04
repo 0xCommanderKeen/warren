@@ -391,9 +391,9 @@ def test_a_soul_with_no_voice_says_so_rather_than_omitting_it(
 
 def test_a_resident_carries_its_delegation_flags(panel: PanelFactory) -> None:
     data = copy.deepcopy(valid_manifest())
-    data["delegation"] = {"send": True, "to": ["life-agent"]}
+    data["delegation"] = {"send": True, "to": ["hob"]}
     body = panel(manifest=data).client.get("/residents/test-agent").json()
-    assert body["delegation"] == {"send": True, "to": ["life-agent"], "note": None}
+    assert body["delegation"] == {"send": True, "to": ["hob"], "note": None}
 
 
 # --------------------------------------------------------------------------------------

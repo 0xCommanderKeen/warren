@@ -136,7 +136,7 @@ class ClaudeSubagentAdapterTest(unittest.TestCase):
         }
         delivered = []
         with (
-            mock.patch.dict(os.environ, {"CHRONICLE_AGENT_ID": "life-agent"}),
+            mock.patch.dict(os.environ, {"CHRONICLE_AGENT_ID": "hob"}),
             mock.patch.object(sys, "stdin", io.StringIO(json.dumps(hook))),
             mock.patch.object(emit, "deliver", side_effect=delivered.append),
         ):
@@ -144,7 +144,7 @@ class ClaudeSubagentAdapterTest(unittest.TestCase):
         [event] = delivered
         self.assertEqual(event["agent_id"], "claude-code:child")
         self.assertEqual(event["type"], "session_ended")
-        self.assertEqual(event["payload"]["parent_agent_id"], "claude-code:life-agent")
+        self.assertEqual(event["payload"]["parent_agent_id"], "claude-code:hob")
 
 
 if __name__ == "__main__":

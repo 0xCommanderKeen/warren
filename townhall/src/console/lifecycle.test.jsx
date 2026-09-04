@@ -28,10 +28,10 @@ const json = (status, body) => ({
 });
 
 const RESIDENT = {
-  id: "life-agent",
+  id: "hob",
   uid: "0198-uid",
   retired: false,
-  path: "residents/life-agent/manifest.yaml",
+  path: "residents/hob/manifest.yaml",
   soul: { name: "Hob", char: "Keeper", role: "household agent", accent: "#a68a4f" },
   charter: { mission: "Keep the house.", duties: ["Read the inbox"], rules: ["Ask first"], escalation: "needs_human" },
   skills: [],
@@ -41,7 +41,7 @@ const RESIDENT = {
 
 /** Enough of a budget for the record page's own panel; this file is not about spending. */
 const BUDGET = {
-  resident: "life-agent",
+  resident: "hob",
   window: { tz: "Europe/Ljubljana", day: "2026-09-02", end: "2026-09-02T22:00:00.000Z" },
   spent: { runs: 0, tokens: 0, cost_usd: 0, duration_s: 0, unreported_runs: 0 },
   budgets: [],
@@ -54,14 +54,14 @@ const BUDGET = {
 const RETIRE_PLAN = {
   request_id: "req-1",
   message: "nothing was marked, committed, stopped, or removed: this is the plan",
-  resident: "life-agent",
-  manifest_path: "residents/life-agent/manifest.yaml",
+  resident: "hob",
+  manifest_path: "residents/hob/manifest.yaml",
   marked: true,
   stopped: false,
   scrubbed: false,
   commands: [
-    "ssh Miha@dxp2800 docker compose -f ~/docker/warren/residents/life-agent/docker-compose.yaml down --remove-orphans",
-    "ssh Miha@dxp2800 rm -f ~/docker/warren/residents/life-agent/.env ~/docker/warren/residents/life-agent/docker-compose.yaml",
+    "ssh Miha@dxp2800 docker compose -f ~/docker/warren/residents/hob/docker-compose.yaml down --remove-orphans",
+    "ssh Miha@dxp2800 rm -f ~/docker/warren/residents/hob/.env ~/docker/warren/residents/hob/docker-compose.yaml",
   ],
   commit: null,
   dry_run: true,
@@ -83,12 +83,12 @@ const RETIRE_DONE = {
 const PROVISION_PLAN = {
   request_id: "req-3",
   message: "nothing was sent, run, or written: this is the plan",
-  resident: "life-agent",
+  resident: "hob",
   act: "provision",
   dry_run: true,
   changed: false,
   provision: {
-    target: { host: "dxp2800", user: "Miha", path: "~/docker/warren/residents/life-agent", container: "steward-life-agent", image: "steward-resident:latest" },
+    target: { host: "dxp2800", user: "Miha", path: "~/docker/warren/residents/hob", container: "steward-hob", image: "steward-resident:latest" },
     commands: ["ssh Miha@dxp2800 docker compose … up -d"],
     sent: false,
   },
@@ -132,7 +132,7 @@ const posted = (fetch, path) =>
 afterEach(cleanup);
 
 describe("retiring a resident from its record", () => {
-  const RETIRE = "/residents/life-agent/retire";
+  const RETIRE = "/residents/hob/retire";
 
   it("shows steward's plan before it offers to do it", async () => {
     const fetch = steward({
@@ -247,7 +247,7 @@ describe("a retired resident's record", () => {
     const fetch = steward({
       resident: retired,
       posts: {
-        "/residents/life-agent/provision": json(200, {
+        "/residents/hob/provision": json(200, {
           ...PROVISION_PLAN,
           register: { ok: false, problems: ["memory.path '/data/x' is not a directory on this host"], next_fires: [] },
         }),
@@ -265,7 +265,7 @@ describe("a retired resident's record", () => {
   it("rehearses a provision before it runs one, exactly as retire does", async () => {
     const fetch = steward({
       resident: retired,
-      posts: { "/residents/life-agent/provision": json(200, PROVISION_PLAN) },
+      posts: { "/residents/hob/provision": json(200, PROVISION_PLAN) },
     });
     mount(fetch);
 
@@ -274,7 +274,7 @@ describe("a retired resident's record", () => {
     expect(await screen.findByRole("button", { name: /provision hob for real/i })).toBeTruthy();
     // Addressed by id, never by the uid this page is routed on: the provision route reads
     // `residents/<id>/manifest.yaml` off the disk and a uid names no directory.
-    expect(posted(fetch, "/residents/life-agent/provision")).toHaveLength(1);
-    expect(screen.getByText("Miha@dxp2800:~/docker/warren/residents/life-agent")).toBeTruthy();
+    expect(posted(fetch, "/residents/hob/provision")).toHaveLength(1);
+    expect(screen.getByText("Miha@dxp2800:~/docker/warren/residents/hob")).toBeTruthy();
   });
 });

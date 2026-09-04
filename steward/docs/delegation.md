@@ -33,7 +33,7 @@ and neither is inferred from good intentions.
 ```yaml
 delegation:
   send: true                 # default false: a resident with no block never delegates
-  to: [life-agent]           # optional allowlist; omit it to allow any receiver
+  to: [hob]           # optional allowlist; omit it to allow any receiver
   note: Background reading that is not village work.
 ```
 
@@ -104,7 +104,7 @@ exactly `===STEWARD-ACTIONS===` and closed by `===END-STEWARD-ACTIONS===`:
 
 ```
 ===STEWARD-ACTIONS===
-<delegate to="life-agent" route="handoff">
+<delegate to="hob" route="handoff">
 {"title": "Check what the errand list actually contains", "detail": "…"}
 </delegate>
 ===END-STEWARD-ACTIONS===
@@ -148,10 +148,10 @@ For a session with shell access that wants the handoff registered before its tur
 
 ```console
 $ steward delegate sender-resident \
-    --to life-agent --route handoff \
+    --to hob --route handoff \
     --title "Check what the errand list actually contains" \
     --detail "I need the real shape of an errand before I render one."
-sender-resident → life-agent via handoff: Check what the errand list actually contains
+sender-resident → hob via handoff: Check what the errand list actually contains
 b81f…-…-…                       # the task_id, on stdout
 ```
 
@@ -199,8 +199,8 @@ than to whichever resident happened to be last in the line.
 The origin is inherited at every hop; the chain itself is walked through `parent_task_id`.
 
 ```console
-$ steward inbox life-agent
-life-agent: routes accepting delegated work: handoff
+$ steward inbox hob
+hob: routes accepting delegated work: handoff
 open     b81f…  Check what the errand list actually contains
          from sender-resident via handoff (depth 1, origin task:2c9a…)
 
@@ -209,7 +209,7 @@ origin task:2c9a…
 2c9a…  Rewrite the projection rules
   posted by api — claimed
   b81f…  Check what the errand list actually contains
-    sender-resident → life-agent — done (ok)
+    sender-resident → hob — done (ok)
 ```
 
 `--format json` for the same thing machine-readably, and `GET /residents/{id}/inbox` /
@@ -220,7 +220,7 @@ Which is why `steward doctor` prints a line per resident about the post as well:
 
 ```console
 $ steward doctor
-life-agent: inbox 2 open via handoff
+hob: inbox 2 open via handoff
 sender-resident: inbox — takes no letters
 some-agent: inbox — 3 open letter(s) behind a closed route: handoff (disabled); nothing will pick them up
 ```
@@ -253,7 +253,7 @@ $ steward budget show --by-origin
 …
 by origin (2026-08-25..2026-08-25, all residents shown)
   task:2c9a…: $1.8400, 24310 token(s), 3 run(s)
-  resident:life-agent: $0.9100, 8800 token(s), 2 run(s)
+  resident:hob: $0.9100, 8800 token(s), 2 run(s)
 ```
 
 Each run **records its own origin** on the ledger row when it is ledgered. It used to be
@@ -274,7 +274,7 @@ needs the token.
 
 ```console
 $ curl -sS -X POST -H "Authorization: Bearer $STEWARD_TOKEN" \
-    -d '{"from": "sender-resident", "to": "life-agent", "route": "handoff",
+    -d '{"from": "sender-resident", "to": "hob", "route": "handoff",
          "title": "Check the errand list"}' \
     http://127.0.0.1:8801/delegate
 ```

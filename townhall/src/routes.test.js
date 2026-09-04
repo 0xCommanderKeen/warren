@@ -37,10 +37,10 @@ describe("base-prefix routing", () => {
     const base = "/observatory/";
     const routes = [
       routeTo.fleet(), routeTo.agent("d29c-…"), routeTo.residents(),
-      routeTo.resident("life-agent"), routeTo.residentNew(),
-      routeTo.residentDeclaration("life-agent"), routeTo.skills(),
+      routeTo.resident("hob"), routeTo.residentNew(),
+      routeTo.residentDeclaration("hob"), routeTo.skills(),
       routeTo.skill("read-inbox"), routeTo.skillNew(), routeTo.routines(),
-      routeTo.approvals(), routeTo.board(), routeTo.budgets(), routeTo.budgets("life-agent"),
+      routeTo.approvals(), routeTo.board(), routeTo.budgets(), routeTo.budgets("hob"),
       routeTo.diagnostics(),
     ];
     for (const route of routes) {
@@ -65,11 +65,11 @@ describe("route matching", () => {
     expect(matchRoute("/")).toEqual({ page: "fleet", params: {} });
     expect(matchRoute("/agents/abc")).toEqual({ page: "agent", params: { uuid: "abc" } });
     expect(matchRoute("/residents")).toEqual({ page: "residents", params: {} });
-    expect(matchRoute("/residents/life-agent")).toEqual({ page: "resident", params: { id: "life-agent" } });
+    expect(matchRoute("/residents/hob")).toEqual({ page: "resident", params: { id: "hob" } });
     expect(matchRoute("/residents/new")).toEqual({ page: "residentNew", params: {} });
-    expect(matchRoute("/residents/life-agent/declaration")).toEqual({
+    expect(matchRoute("/residents/hob/declaration")).toEqual({
       page: "residentDeclaration",
-      params: { id: "life-agent" },
+      params: { id: "hob" },
     });
     expect(matchRoute("/routines")).toEqual({ page: "routines", params: {} });
     expect(matchRoute("/approvals")).toEqual({ page: "approvals", params: {} });
@@ -78,7 +78,7 @@ describe("route matching", () => {
     expect(matchRoute("/skills/new")).toEqual({ page: "skillNew", params: {} });
     expect(matchRoute("/skills/read-inbox")).toEqual({ page: "skill", params: { name: "read-inbox" } });
     expect(matchRoute("/budgets")).toEqual({ page: "budgets", params: {} });
-    expect(matchRoute("/budgets/life-agent")).toEqual({ page: "budgets", params: { id: "life-agent" } });
+    expect(matchRoute("/budgets/hob")).toEqual({ page: "budgets", params: { id: "hob" } });
     expect(matchRoute("/diagnostics")).toEqual({ page: "diagnostics", params: {} });
   });
 

@@ -116,8 +116,8 @@ $ steward doctor                     # which brain, the journal, the post, what 
 $ steward scheduler run              # the daemon: sleep to the next due routine, fire
 $ steward scheduler tick             # fire anything due now, then exit (external cron)
 $ steward scheduler tick --dry-run   # print what is due right now, and the whole prompt
-$ steward journal life-agent         # what Hob has actually written, newest first
-$ steward show life-agent            # the exact preamble Hob's next session opens with
+$ steward journal hob         # what Hob has actually written, newest first
+$ steward show hob            # the exact preamble Hob's next session opens with
 ```
 
 `--dry-run` rehearses **this** tick: it prints the routines that are due at this moment
@@ -181,7 +181,7 @@ and the gated action never ran) and **first decision wins** (a replay changes no
 emits nothing). The grammar and both paths are in [docs/approvals.md](docs/approvals.md).
 
 ```console
-$ steward approval raise life-agent --action send_email --detail-json '{"to": "…"}'
+$ steward approval raise hob --action send_email --detail-json '{"to": "…"}'
 $ steward approval show <request_id>  # request, decision, decider, timestamps
 ```
 
@@ -210,7 +210,7 @@ what it ingested; this is one topic per resident over what steward raised, and i
 
 ```console
 $ steward notify list                 # transport, kinds, and the URL to subscribe to
-$ steward notify test life-agent      # one harmless tap, and whether it landed
+$ steward notify test hob      # one harmless tap, and whether it landed
 ```
 
 **Chat** (#108). `routes: {kind: chat}` used to be a description; now it is a doorway.
@@ -261,8 +261,8 @@ nothing — and a refused block still knocks at a human's door. The grammar, the
 and the lineage model are in [docs/delegation.md](docs/delegation.md).
 
 ```console
-$ steward delegate sender-resident --to life-agent --route handoff --title "…"
-$ steward inbox life-agent            # what is waiting, from whom, at what depth
+$ steward delegate sender-resident --to hob --route handoff --title "…"
+$ steward inbox hob            # what is waiting, from whom, at what depth
 $ steward task lineage <task_id>      # the whole chain, root first
 ```
 
@@ -310,7 +310,7 @@ refused loudly. Only a malformed final line lacking a newline is treated as a to
 
 ```console
 $ steward budget show                # today's spend against every declared cap
-$ steward budget unpause life-agent  # or approve the knock from chronicle's panel
+$ steward budget unpause hob  # or approve the knock from chronicle's panel
 $ steward watchdog run                # probe, sweep, bury stale runs, check budgets
 $ steward watchdog tick               # one pass, then exit (external cron)
 ```
@@ -404,7 +404,7 @@ reach containers by shelling out to a **local** `docker` client — `docker insp
 of those calls has ever looked at `deploy.host`.
 
 The failure this prevents is a quiet one, and it is the **watchdog's** half that is quiet.
-A watchdog on the wrong machine asks a docker that has never heard of `life-agent`, gets
+A watchdog on the wrong machine asks a docker that has never heard of `hob`, gets
 nothing, and reports the resident as *unsupervised* — honest about what it could see, and
 indistinguishable from a resident that has no container at all. It keeps burying stale runs
 and tripping budgets the whole time, so nothing looks wrong. (The scheduler's half already
@@ -418,9 +418,9 @@ other fleet-wide lines, below the per-resident block:
 ```console
 $ steward doctor
 …
-life-agent: inbox 0 open via handoff
+hob: inbox 0 open via handoff
 topology: docker at dxp2800's own docker answers as dxp2800 27.3.1
-life-agent: container life-agent on dxp2800 — supervised from here
+hob: container hob on dxp2800 — supervised from here
 watchdog: last pass …
 ```
 
@@ -559,8 +559,8 @@ with no supported way onto the nursery path at all (warren#270).
 `steward provision` is the way in for a manifest somebody wrote:
 
 ```console
-$ steward provision life-agent --dry-run    # the same plan, from the declaration itself
-$ steward provision life-agent
+$ steward provision hob --dry-run    # the same plan, from the declaration itself
+$ steward provision hob
 ```
 
 The declare stage is already done — by a person, in a file, in a commit — so this reads
@@ -619,7 +619,7 @@ mark and commit, and is released before Chronicle or host I/O.
 
 ```
 residents/
-  life-agent/       manifest.yaml + soul.md   Hob, the household spirit
+  hob/       manifest.yaml + soul.md   Hob, the household spirit
   pip/              manifest.yaml + soul.md   Pip, the pipeline canary
 skills/
   <name>/SKILL.md                             the shared library both draw on
@@ -647,7 +647,7 @@ that makes it. Regenerate with `make schema-write` and read the diff.
 $ steward validate                         # the whole residents/ tree
 ok: 3 valid resident(s), 0 error(s), 0 warning(s) in residents
 
-$ steward validate residents/life-agent    # or one resident, or one file
+$ steward validate residents/hob    # or one resident, or one file
 ```
 
 Diagnostics always name the file, the field path, the problem, and an example of a valid
