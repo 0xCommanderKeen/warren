@@ -1053,13 +1053,19 @@ and a provision dry run shows the same mount in the complete rendered Compose fr
 
 `steward-resident:latest` is built from [`docker/resident/Dockerfile`](../docker/resident/Dockerfile)
 in this repo. It is `node:22-slim` — **pinned by digest**, not by that tag, because a tag
-moves and an image built twice from one commit has to be one image — plus four things a
+moves and an image built twice from one commit has to be one image — plus five things a
 resident cannot work without:
 
 - the **claude CLI** (`@anthropic-ai/claude-code`), pinned by the `CLAUDE_VERSION` build
   arg so a rebuild never silently changes which brain a resident has;
 - **python3**, for the emitter — `chronicle-emit.py` is stdlib-only, which is why one file is
   the whole install;
+- **git and an ssh client** (`openssh-client`), because a resident's work is mostly repos
+  and a repo it reaches from a burrow is reached over a deploy key mounted into the
+  container. `node:22-slim` ships neither; git without ssh mounts a clone it can never
+  fetch (warren#389 found Hob's `/vault` that way). The image supplies the client only: a
+  session has no terminal to answer a host-key prompt on, so the directory a manifest
+  mounts at `/root/.ssh` has to carry `known_hosts` as well as a default-named key;
 - a **vendored copy of chronicle's emitter bundle**. The emitter's source is two files
   (`chronicle/hooks/emit.py` and the durable outbox it grew, `hooks/durable.py`); what is
   vendored is the single self-contained file `chronicle/hooks/build.py` flattens them into,
