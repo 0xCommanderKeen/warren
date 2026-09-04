@@ -74,6 +74,24 @@ def test_discord_protocol_is_rendered_only_with_a_nonempty_posts_allowlist(
     assert "Allowed channels: household" in rendered
 
 
+def test_discord_admin_protocol_lists_only_granted_verbs(write_resident: ResidentWriter) -> None:
+    data = valid_manifest()
+    data["app_grants"] = [
+        {
+            "id": "discord",
+            "name": "Discord",
+            "status": "granted",
+            "scopes": ["channels.manage"],
+        }
+    ]
+    manifest = m.load_manifest(write_resident(data)).manifest
+    rendered = p.assemble_preamble(manifest, None)
+    assert "create_channel" in rendered
+    assert "set_topic" in rendered
+    assert "archive_thread" not in rendered
+    assert " delete" not in rendered.lower()
+
+
 # ------------------------------------------------------------------------------- order
 
 

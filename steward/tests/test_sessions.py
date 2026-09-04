@@ -70,6 +70,12 @@ class _RecordingHooks:
     def __init__(self) -> None:
         self.harvested: list[dict[str, object]] = []
         self.decision_calls = 0
+        self.prepared: list[tuple[str, datetime]] = []
+
+    def prepare_session(self, resident: Resident, now: datetime, memory_fd: int | None) -> None:
+        """Capture the pre-session context refresh seam."""
+        self.prepared.append((resident.id, now))
+        assert memory_fd is None
 
     def decisions_for(self, resident_id: str) -> str | None:
         del resident_id
@@ -258,6 +264,7 @@ def test_a_claimed_task_uses_the_same_context_run_account_and_harvest_sequence(
     assert guard.records[0]["now"] == datetime(2026, 8, 24, 12, 0, 7, tzinfo=UTC)
     assert result.raised == ("approval-1",)
     assert result.handed_over == ("handoff-1",)
+    assert hooks.prepared == [("test-agent", NOW)]
     assert hooks.harvested == [{"output": "task done", "parent_task_id": "task-1", "now": NOW}]
 
 

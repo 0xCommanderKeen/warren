@@ -203,6 +203,8 @@ HTTP_TIMEOUT_MARGIN_S = 10.0
 SEND_TIMEOUT_S = 10.0
 DISCORD_REPLY_CHARS = 1900
 DISCORD_PAGE_SIZE = 50
+DISCORD_MEMBER_PAGE_SIZE = 1000
+DISCORD_MEMBER_MAX_PAGES = 100
 HTTP_TOO_MANY_REQUESTS = 429
 MAX_RATE_LIMIT_SLEEP_S = 30.0
 
@@ -1037,6 +1039,56 @@ class DiscordTransport:
             return None
         return dict(pairs)
 
+    def admin(
+        self,
+        token: str,
+        method: str,
+        path: str,
+        payload: Mapping[str, object] | None = None,
+    ) -> bool:
+        """Perform one scoped Discord write assembled by the policy-owning Poster."""
+        return self._request(token, method, path, payload) is not None
+
+    def guild_snapshot(self, token: str, guild: str) -> Mapping[str, object] | None:
+        """Read the guild context used by scoped resident mirror files."""
+        channels = self._request(token, "GET", f"/guilds/{guild}/channels")
+        if not isinstance(channels, list):
+            return None
+        members: list[object] = []
+        after = ""
+        for _page in range(DISCORD_MEMBER_MAX_PAGES):
+            suffix = f"&after={after}" if after else ""
+            page = self._request(
+                token,
+                "GET",
+                f"/guilds/{guild}/members?limit={DISCORD_MEMBER_PAGE_SIZE}{suffix}",
+            )
+            if not isinstance(page, list):
+                return None
+            members.extend(page)
+            if len(page) < DISCORD_MEMBER_PAGE_SIZE:
+                break
+            last = page[-1]
+            user = last.get("user") if isinstance(last, Mapping) else None
+            snowflake = user.get("id") if isinstance(user, Mapping) else None
+            if not isinstance(snowflake, str) or not snowflake.isdigit() or snowflake == after:
+                return None
+            after = snowflake
+        else:
+            return None
+        return {"channels": channels, "members": members}
+
+    def threads(self, token: str, guild: str) -> frozenset[str] | None:
+        """Resolve active thread ids inside one configured guild."""
+        value = self._request(token, "GET", f"/guilds/{guild}/threads/active")
+        if not isinstance(value, Mapping) or not isinstance(value.get("threads"), list):
+            return None
+        return frozenset(
+            str(item["id"])
+            for item in value["threads"]
+            if isinstance(item, Mapping) and str(item.get("id", "")).isdigit()
+        )
+
     def poll(self, token: str, offset: int) -> list[Message] | None:
         """Open operator DMs once, then fetch each channel after its cursor."""
         del offset  # Discord cursors are per DM channel, not per bot.
@@ -1190,7 +1242,8 @@ class DiscordTransport:
         for attempt in range(2):
             try:
                 with urllib.request.urlopen(request, timeout=self.timeout_s) as response:  # noqa: S310
-                    return json.loads(response.read().decode())
+                    body = response.read().decode()
+                    return json.loads(body) if body else {}
             except urllib.error.HTTPError as exc:
                 if exc.code == HTTP_TOO_MANY_REQUESTS and attempt == 0:
                     try:
@@ -1610,6 +1663,12 @@ class ChatBridge:
     def poll_once(self, now: datetime | None = None) -> list[ChatOutcome]:
         """Ask every reachable bot what it was sent, and answer it. Never raises."""
         moment = now or self.clock()
+        refresh = getattr(self.hooks, "refresh_discord_mirrors", None)
+        if callable(refresh):
+            try:
+                refresh(moment)
+            except Exception as exc:  # noqa: BLE001 — mirror context cannot stop chat
+                log.warning("Discord guild mirror refresh failed: %s", exc)
         outcomes: list[ChatOutcome] = []
         for route in self.deliverable():
             outcomes.extend(self._poll_route(route, moment))

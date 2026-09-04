@@ -9,6 +9,7 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -105,7 +106,28 @@ def test_the_added_types_are_the_additive_set() -> None:
         "chat_message_dropped",
         "chat_message_posted",
         "chat_post_refused",
+        "discord_channel_created",
+        "discord_topic_set",
+        "discord_thread_created",
+        "discord_thread_archived",
+        "discord_message_pinned",
     )
+
+
+def test_discord_admin_event_carries_no_authored_content() -> None:
+    resident = type(
+        "ResidentFact",
+        (),
+        {"id": "hob", "agent_id": "claude-code:hob", "project": "household"},
+    )()
+    event = ev.discord_admin_event(
+        event_type="discord_topic_set",
+        resident=cast("Any", resident),
+        route="discord",
+        channel="household",
+    )
+    assert event.payload == {"resident": "hob", "route": "discord", "channel": "household"}
+    assert ev.validate_event(event.to_dict()) == ()
 
 
 def test_task_posted_carries_the_board_payload() -> None:

@@ -73,6 +73,7 @@ __all__ = [
     "chat_message_posted_event",
     "chat_post_refused_event",
     "default_fallback_path",
+    "discord_admin_event",
     "needs_human_event",
     "needs_human_resolved_event",
     "resident_declared_event",
@@ -109,6 +110,11 @@ RESIDENT_RETIRED = "resident_retired"
 CHAT_MESSAGE_DROPPED = "chat_message_dropped"
 CHAT_MESSAGE_POSTED = "chat_message_posted"
 CHAT_POST_REFUSED = "chat_post_refused"
+DISCORD_CHANNEL_CREATED = "discord_channel_created"
+DISCORD_TOPIC_SET = "discord_topic_set"
+DISCORD_THREAD_CREATED = "discord_thread_created"
+DISCORD_THREAD_ARCHIVED = "discord_thread_archived"
+DISCORD_MESSAGE_PINNED = "discord_message_pinned"
 
 #: The event types steward adds to the protocol. Additive in *shape* — a v0 consumer that
 #: does not know one still parses the record — but not free: chronicle validates ``type``
@@ -134,6 +140,11 @@ EVENT_TYPES = (
     CHAT_MESSAGE_DROPPED,
     CHAT_MESSAGE_POSTED,
     CHAT_POST_REFUSED,
+    DISCORD_CHANNEL_CREATED,
+    DISCORD_TOPIC_SET,
+    DISCORD_THREAD_CREATED,
+    DISCORD_THREAD_ARCHIVED,
+    DISCORD_MESSAGE_PINNED,
 )
 
 #: Steward's own identity, for the work steward itself does rather than a resident.
@@ -1394,6 +1405,24 @@ def chat_post_refused_event(*, resident: Resident, route: str, channel: str, rea
             "channel": channel or "unknown",
             "reason": truncate_error(reason),
         },
+    )
+
+
+def discord_admin_event(*, event_type: str, resident: Resident, route: str, channel: str) -> Event:
+    """Record one scoped Discord mutation without copying authored content."""
+    if event_type not in {
+        DISCORD_CHANNEL_CREATED,
+        DISCORD_TOPIC_SET,
+        DISCORD_THREAD_CREATED,
+        DISCORD_THREAD_ARCHIVED,
+        DISCORD_MESSAGE_PINNED,
+    }:
+        raise ValueError(f"unknown Discord administration event {event_type!r}")
+    return Event(
+        type=event_type,
+        agent_id=resident.agent_id,
+        project=resident.project,
+        payload={"resident": resident.id, "route": route, "channel": channel},
     )
 
 

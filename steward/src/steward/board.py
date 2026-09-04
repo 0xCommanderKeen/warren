@@ -57,6 +57,7 @@ from typing import cast
 
 from steward import approvals
 from steward import delegation as dg
+from steward import discord_mirror as dm
 from steward import discord_posts as dp
 from steward import events as ev
 from steward import notify as nf
@@ -382,6 +383,7 @@ class Dispatcher:
     #: fake transport catches both the knocks a session raised and the tasks it closed.
     notifier: nf.Notifier = field(default_factory=nf.Notifier.from_env, repr=False)
     poster: dp.Poster | None = field(default=None, repr=False)
+    mirror: dm.GuildMirror | None = field(default=None, repr=False)
     sessions: ResidentSessions = field(init=False, repr=False)
     run_transitions: RunTransitions = field(init=False, repr=False)
 
@@ -391,6 +393,8 @@ class Dispatcher:
             self.claims = ResidentClaims(self.store)
         if self.poster is None:
             self.poster = dp.Poster.from_env(self.residents, self.store, self.emitter)
+        if self.mirror is None:
+            self.mirror = dm.GuildMirror.from_env(self.residents, self.store)
         self.sessions = ResidentSessions(
             workdir=self.workdir,
             runner_factory=self.runner_factory,
@@ -423,6 +427,18 @@ class Dispatcher:
         self.sessions.library = library
         if self.poster is not None:
             self.poster.refresh(residents)
+        if self.mirror is not None:
+            self.mirror.update_residents(residents)
+
+    def prepare_session(self, resident: Resident, now: datetime, memory_fd: int | None) -> None:
+        """Refresh scoped file context immediately before any resident session."""
+        if self.mirror is not None:
+            self.mirror.refresh(resident, now=now, force=True, memory_fd=memory_fd)
+
+    def refresh_discord_mirrors(self, now: datetime) -> None:
+        """Apply the guild mirror's fifteen-minute daemon cadence."""
+        if self.mirror is not None:
+            self.mirror.refresh_all(now=now)
 
     @classmethod
     def from_path(  # noqa: PLR0913 — every knob is keyword-only and independently useful
