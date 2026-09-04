@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sys
+import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -1729,7 +1730,6 @@ def chat_list(residents: Path, output_format: str) -> None:
         return
     if not reports:
         click.secho(f"no resident under {residents} declares a chat route", fg="yellow")
-        return
     for report in reports:
         state = "reachable" if report.reachable else f"{report.status} — not reachable yet"
         click.secho(
@@ -1741,6 +1741,10 @@ def chat_list(residents: Path, output_format: str) -> None:
         )
         if report.note:
             click.echo(f"  note:    {report.note}")
+    reported = {report.token_env for report in reports}
+    for name in (name for name in ch.token_env_names() if name not in reported):
+        state = "set" if os.environ[name].strip() else "unset"
+        click.echo(f"unassigned token: {name} ({state}) — no declared chat route")
 
 
 @chat_group.command("run")
@@ -1805,6 +1809,22 @@ def chat_run(  # noqa: PLR0913, PLR0917 — click passes one parameter per optio
                 state_path=state,
                 catchup_s=catchup_seconds,
             )
+            waiting = sorted(
+                set(ch.token_env_names()) | {route.address.token_env for route in bridge.routes}
+            )
+            if waiting and not bridge.deliverable():
+                click.secho(
+                    f"chat: idle — waiting for {', '.join(waiting)}; "
+                    "recreate the service after setting a token",
+                    fg="yellow",
+                    err=True,
+                )
+                # An unbounded service stays alive without polling. A bounded invocation
+                # is the public probe/test seam and returns immediately after reporting.
+                if max_polls is None:
+                    while True:
+                        time.sleep(ch.IDLE_SLEEP_S)
+                return
             outcomes = bridge.run(max_polls=max_polls)
         except ch.ChatError as exc:
             click.secho(str(exc), fg="red", err=True)

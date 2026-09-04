@@ -235,6 +235,12 @@ def test_a_blank_token_is_not_a_token():
     assert ch.tokens_from_env({"STEWARD_CHAT_TOKEN_PIP": "   "}) == {}
 
 
+def test_token_variable_names_include_empty_configured_slots():
+    env = {"STEWARD_CHAT_TOKEN_PIP": "", "STEWARD_CHAT_TOKEN_HOB": FAKE_BOT_TOKEN}
+
+    assert ch.token_env_names(env) == ["STEWARD_CHAT_TOKEN_HOB", "STEWARD_CHAT_TOKEN_PIP"]
+
+
 # --------------------------------------------------------------------------------------
 # the harness
 # --------------------------------------------------------------------------------------
@@ -1245,6 +1251,21 @@ def test_chat_list_over_a_fleet_that_declares_no_chat_says_so(
     assert "declares a chat route" in result.output
 
 
+def test_chat_list_names_configured_token_slots_without_declared_routes(
+    runner: CliRunner, write_resident: ResidentWriter, monkeypatch
+):
+    tree = write_resident().parent.parent
+    monkeypatch.setenv("STEWARD_CHAT_TOKEN_PIP", "")
+    monkeypatch.setenv("STEWARD_CHAT_TOKEN_HOB", FAKE_BOT_TOKEN)
+
+    result = runner.invoke(main, ["chat", "list", "--residents", str(tree)])
+
+    assert result.exit_code == 0
+    assert "STEWARD_CHAT_TOKEN_PIP (unset)" in result.output
+    assert "STEWARD_CHAT_TOKEN_HOB (set)" in result.output
+    assert FAKE_BOT_TOKEN not in result.output
+
+
 def test_an_unreadable_poll_timeout_falls_back_to_the_default():
     assert ch.poll_timeout_from_env({ch.POLL_TIMEOUT_ENV: "soon"}) == ch.DEFAULT_POLL_TIMEOUT_S
     assert ch.poll_timeout_from_env({ch.POLL_TIMEOUT_ENV: "-3"}) == ch.DEFAULT_POLL_TIMEOUT_S
@@ -1494,9 +1515,11 @@ def test_a_chat_api_that_is_not_http_reaches_nothing():
     assert transport.poll(FAKE_BOT_TOKEN, 0) is None
 
 
-def test_chat_run_refuses_loudly_when_no_bot_is_wired_up(
-    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+def test_chat_run_sits_idle_and_names_every_token_it_is_waiting_for(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path, monkeypatch
 ):
+    # A token for some future/unassigned bot does not make this route runnable.
+    monkeypatch.setenv("STEWARD_CHAT_TOKEN_HOB", FAKE_BOT_TOKEN)
     tree = write_resident(chat_manifest(tmp_path / "memory")).parent.parent
 
     result = runner.invoke(
@@ -1509,9 +1532,10 @@ def test_chat_run_refuses_loudly_when_no_bot_is_wired_up(
             "--db",
             str(tmp_path / "cli.db"),
             "--max-polls",
-            "1",
+            "0",
         ],
     )
 
-    assert result.exit_code == 1
+    assert result.exit_code == 0
+    assert "idle" in result.output
     assert "STEWARD_CHAT_TOKEN_TESTY" in result.output

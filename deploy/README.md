@@ -66,6 +66,32 @@ Secrets, in a `.env` beside each compose file, mode `0600`, never in git:
 `deploy.sh` refuses to roll out a service whose `.env` is missing and says what it must
 contain. Data — chronicle's `/data`, steward's `data/` — is never written by the script.
 
+### Wiring Telegram chat
+
+The chat daemon starts with the rest of the control plane. With no bot token it stays
+idle, and `docker logs steward-chat` names the variables it is waiting for. Put the
+credentials in `~/docker/warren/steward/.env` on the burrow (mode `0600`), never in a
+manifest or Compose file:
+
+```dotenv
+STEWARD_CHAT_TOKEN_PIP=<token from BotFather>
+STEWARD_CHAT_TOKEN_HOB=<token from BotFather>
+STEWARD_CHAT_OPERATORS=<Telegram user id>
+```
+
+`STEWARD_CHAT_OPERATORS` is a comma-separated list when more than one Telegram user may
+talk to the fleet. Check the wiring without revealing a token, then recreate only the
+process whose environment changed:
+
+```sh
+cd ~/docker/warren/steward
+docker compose exec -T chat steward chat list --residents /checkout/steward/residents
+docker compose up -d --force-recreate chat
+```
+
+Run `chat list` again after recreating; each declared route says whether its named token
+is set, but never prints the value.
+
 ## The residents checkout
 
 The control plane does not serve the residents tree baked into its image. It serves —
