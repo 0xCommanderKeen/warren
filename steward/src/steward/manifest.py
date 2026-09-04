@@ -1351,6 +1351,28 @@ class Deploy(_Model):
         default_factory=list,
         description="Extra bind mounts made available inside the resident container.",
     )
+    tz: str | None = Field(
+        default=None,
+        description=(
+            "IANA zone the container's clock reads in (TZ). Default: the routines' "
+            "schedule_tz when they all agree; required when they disagree."
+        ),
+    )
+
+    @field_validator("tz")
+    @classmethod
+    def _check_tz(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        try:
+            zoneinfo.ZoneInfo(stripped)
+        except zoneinfo.ZoneInfoNotFoundError, ValueError, ModuleNotFoundError:
+            raise ValueError(
+                f"deploy.tz {stripped!r} is not an IANA time zone; "
+                f"the container's clock has to be written down to mean anything"
+            ) from None
+        return stripped
 
 
 class Delegation(_Model):
@@ -1836,6 +1858,7 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "routines.id": "id: daily-summary",
     "routines.schedule": "schedule: '0 7 * * *'",
     "routines.schedule_tz": "schedule_tz: Europe/Ljubljana  (IANA name; defaults to UTC)",
+    "deploy.tz": "tz: Europe/Ljubljana  (IANA name; defaults to the routines' schedule_tz)",
     "routines.prompt": "prompt: Write today's household summary.",
     "routines.requires": "requires: [read-inbox]  (a default skill, or one granted above)",
     "routines.timeout_s": "timeout_s: 900",
@@ -2519,6 +2542,54 @@ def _check_mount_collisions(manifest: ResidentManifest, source: Path) -> list[Di
     return diagnostics
 
 
+class ZoneDisagreementError(ValueError):
+    """The routines read their schedules in different zones and ``deploy.tz`` is unset."""
+
+
+def container_zone(manifest: ResidentManifest) -> str:
+    """Return the IANA zone the resident's container clock is set to (warren#386).
+
+    ``deploy.tz`` when declared; otherwise the routines' ``schedule_tz`` when every routine
+    agrees (a resident with no routines reads as :data:`DEFAULT_SCHEDULE_TZ`). Routines
+    that disagree with no ``deploy.tz`` to settle it raise :class:`ZoneDisagreementError`:
+    validation turns that into an error, so the nursery never has to pick a clock for a
+    manifest that never chose one.
+    """
+    if manifest.deploy.tz is not None:
+        return manifest.deploy.tz
+    zones = sorted({routine.schedule_tz for routine in manifest.routines})
+    if not zones:
+        return DEFAULT_SCHEDULE_TZ
+    if len(zones) > 1:
+        raise ZoneDisagreementError(
+            f"routines read their schedules in {', '.join(zones)} and deploy.tz does not "
+            f"say which one the container's clock follows"
+        )
+    return zones[0]
+
+
+def _check_container_zone(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
+    """Refuse a manifest whose container clock has no single answer.
+
+    ``TZ`` is rendered into every container so ``date`` inside a session agrees with the
+    routines' wall clock; a resident stamping "today" from ``date`` is otherwise one
+    late-evening edge away from a wrong journal filename. When the routines disagree
+    among themselves the manifest has to say which zone the container follows.
+    """
+    try:
+        container_zone(manifest)
+    except ZoneDisagreementError as exc:
+        return [
+            Diagnostic(
+                file=source,
+                field_path="deploy.tz",
+                problem=str(exc),
+                example="deploy: {tz: Europe/Ljubljana}",
+            )
+        ]
+    return []
+
+
 #: Runner kinds a session cannot be placed in a container under. ``mock`` spawns nothing,
 #: so the declaration would read as containment while the "session" ran in-process; a
 #: ``command`` template substitutes ``{workdir}`` on the control plane, so its argv would
@@ -2989,6 +3060,7 @@ def _validate_manifest(source: Path, library: SkillLibrary) -> ValidationResult:
     diagnostics.extend(_check_tools_are_enforceable(manifest, source))
     diagnostics.extend(_check_workspace_is_reachable(manifest, source))
     diagnostics.extend(_check_mount_collisions(manifest, source))
+    diagnostics.extend(_check_container_zone(manifest, source))
     diagnostics.extend(_check_placement(manifest, source))
     diagnostics.extend(_check_delegation(manifest, source))
     diagnostics.extend(_check_soul_agreement(manifest, soul, source))

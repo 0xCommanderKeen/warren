@@ -142,6 +142,38 @@ def test_the_compose_fragment_declares_the_container_a_sandbox(write_resident) -
     )
 
 
+def test_the_compose_fragment_sets_the_clock_to_the_routines_zone(write_resident) -> None:
+    """``TZ`` follows the routines' ``schedule_tz`` when they all agree (warren#386)."""
+    data = valid_manifest()
+    for routine in data["routines"]:
+        routine["schedule_tz"] = "Europe/Ljubljana"
+    one = load_manifest(write_resident(data))
+    service = yaml.safe_load(render_compose(one, target_for(one.manifest)))["services"][
+        "test-agent"
+    ]
+    assert service["environment"]["TZ"] == "Europe/Ljubljana"
+
+
+def test_deploy_tz_wins_over_the_routines_zone(write_resident) -> None:
+    data = valid_manifest()
+    for routine in data["routines"]:
+        routine["schedule_tz"] = "Europe/Ljubljana"
+    data["deploy"] = {"tz": "America/New_York"}
+    one = load_manifest(write_resident(data))
+    service = yaml.safe_load(render_compose(one, target_for(one.manifest)))["services"][
+        "test-agent"
+    ]
+    assert service["environment"]["TZ"] == "America/New_York"
+
+
+def test_a_resident_with_no_routines_keeps_a_utc_clock(write_resident) -> None:
+    one = resident(write_resident, routines=[])
+    service = yaml.safe_load(render_compose(one, target_for(one.manifest)))["services"][
+        "test-agent"
+    ]
+    assert service["environment"]["TZ"] == "UTC"
+
+
 def test_the_compose_fragment_references_the_secrets_instead_of_carrying_them(
     write_resident,
 ) -> None:
