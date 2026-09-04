@@ -243,6 +243,7 @@ routes:
     address: mailbox:household   # a reference, never a credential
     status: active           # active | pending | disabled
     posts_to: []             # Discord chat only; allowed guild channel names
+    listens_in: []           # Discord chat only; channels where @mentions are answered
     note: Optional.
 ```
 
@@ -262,9 +263,12 @@ Three kinds are more than description, because steward itself delivers through t
   `telegram:pip` — and the bot's token lives in steward's environment as
   `STEWARD_CHAT_TOKEN_PIP`; a token written here is refused by validation, because a
   manifest is git. A route ships `pending` for exactly that reason: it cannot carry the
-  secret that would make it real. A Discord chat route may declare `posts_to: [household]`;
-  empty or absent means the resident may post to no rooms. Names are resolved to channel
-  ids by steward. See [docs/chat.md](chat.md#discord-room-posts).
+  secret that would make it real. A Discord chat route may declare `posts_to: [household]`
+  for outbound posts and `listens_in: [household]` for inbound `@mentions`; either empty
+  allowlist denies that act. Names are resolved to channel ids once per daemon start;
+  `listens_in` accepts at most ten names. See
+  [Discord channel mentions](chat.md#discord-channel-mentions) and
+  [Discord room posts](chat.md#discord-room-posts).
 
 Every kind here is **inbound**: a way work reaches this resident. The other direction —
 steward tapping a person about this resident, one-way, with nothing listening for a reply —

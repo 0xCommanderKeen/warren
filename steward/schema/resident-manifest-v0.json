@@ -582,6 +582,15 @@
           },
           "title": "Posts To",
           "type": "array"
+        },
+        "listens_in": {
+          "description": "Discord channel names where this resident may answer mentions. Empty listens only in operator DMs.",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 10,
+          "title": "Listens In",
+          "type": "array"
         }
       },
       "required": [
