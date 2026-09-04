@@ -2221,6 +2221,115 @@
         "summary": "Get Resident Budget"
       }
     },
+    "/residents/{resident_id}/conversations": {
+      "get": {
+        "description": "List the rolling conversation windows held in this resident's memory.",
+        "operationId": "list_conversations_residents__resident_id__conversations_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resident_id",
+            "required": true,
+            "schema": {
+              "title": "Resident Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Conversations Residents  Resident Id  Conversations Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Conversations"
+      }
+    },
+    "/residents/{resident_id}/conversations/{conversation}": {
+      "get": {
+        "description": "Return one rolling conversation window, oldest turn first.",
+        "operationId": "get_conversation_residents__resident_id__conversations__conversation__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resident_id",
+            "required": true,
+            "schema": {
+              "title": "Resident Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "conversation",
+            "required": true,
+            "schema": {
+              "title": "Conversation",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Conversation Residents  Resident Id  Conversations  Conversation  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Conversation"
+      }
+    },
     "/residents/{resident_id}/declaration": {
       "get": {
         "description": "Return the two files that declare this resident, as text and as data.\n\nThe editable source, not the projection :func:`resident_view` serves. Both are\nuseful and they are not the same thing: the view is assembled from a validated\nmodel and is what a fleet list draws, while this is what is actually in git \u2014\ncomments, field order, and all \u2014 which is the only thing you can sensibly write\nback. ``PUT`` takes exactly this shape.",

@@ -8,7 +8,7 @@
  * three panels this page exists for cannot come from the projection, and asking it for them
  * would mean rendering an emptier answer than steward has.
  *
- * The five reads are settled independently rather than awaited together, because a resident
+ * The six panels are settled independently rather than awaited together, because a resident
  * whose journal directory is missing should still show its charter. A panel that could not
  * be read renders steward's refusal in its own place, which is a smaller and more useful
  * failure than a page that is entirely a stack trace.
@@ -25,7 +25,7 @@ import { LifecyclePanel } from "../console/lifecycle.jsx";
 import { stamp } from "../console/time.js";
 import { agentUuid, payloadSummary } from "../model.js";
 
-/** Read five things at once and keep each answer separate, refusals included. */
+/** Read each panel independently and keep every answer separate, refusals included. */
 function useResidentPanels(id) {
   const { client } = useSteward();
   return useStewardQuery(
@@ -37,13 +37,23 @@ function useResidentPanels(id) {
           client.readBudget(id, { signal }),
           client.readJournal(id, { signal, query: { limit: 8 } }),
           client.readInbox(id, { signal }),
+          client.listConversations(id, { signal }).then(async (listing) => ({
+            ...listing,
+            conversations: await Promise.all(
+              (listing.conversations || []).map(async (summary) => ({
+                ...summary,
+                ...(await client.readConversation(id, summary.id, { signal })),
+              })),
+            ),
+          })),
         ].map((promise) => promise.then((value) => ({ value }), (error) => ({ error }))),
-      ).then(([resident, routines, budget, journal, inbox]) => ({
+      ).then(([resident, routines, budget, journal, inbox, conversations]) => ({
         resident,
         routines,
         budget,
         journal,
         inbox,
+        conversations,
       })),
     [id],
   );
@@ -367,6 +377,73 @@ function InboxPanel({ settled }) {
   );
 }
 
+function ConversationsPanel({ settled, resident }) {
+  if (settled.error) {
+    return (
+      <Panel title="Conversations">
+        <Problem error={settled.error} />
+      </Panel>
+    );
+  }
+  const hasChatRoute = (resident.routes || []).some((route) => route.kind === "chat");
+  const conversations = hasChatRoute ? settled.value.conversations || [] : [];
+  return (
+    <Panel title="Conversations">
+      <p className="mb-4 mt-0 text-[12px] leading-[1.7] text-dim">
+        This is the 20-turn window the resident itself remembers, not a complete history. The
+        full session transcript lives at{" "}
+        <code>&lt;claude&gt;/projects/&lt;workdir&gt;/&lt;session&gt;.jsonl</code> on the resident host
+        and is not shown here.
+      </p>
+      {conversations.length ? (
+        <div className="space-y-5">
+          {conversations.map((conversation) => (
+            <section
+              key={conversation.id}
+              aria-label={`Conversation ${conversation.id}`}
+              className="border border-rule bg-ink/[.02] p-4"
+            >
+              <div className="mb-4 flex flex-wrap justify-between gap-2 font-mono text-[9.5px] uppercase tracking-[.14em] text-faint">
+                <span>conversation {conversation.id}</span>
+                <span>{conversation.turn_count} turns · {stamp(conversation.last_turn_at)}</span>
+              </div>
+              <div className="space-y-2.5">
+                {(conversation.turns || []).map((turn, index) => {
+                  const operator = turn.speaker === "operator";
+                  return (
+                    <div
+                      key={`${turn.at}:${index}`}
+                      data-speaker={turn.speaker}
+                      className={`w-fit max-w-[82%] border px-3 py-2 ${
+                        operator
+                          ? "ml-auto border-ember/35 bg-ember/[.06] text-right"
+                          : "mr-auto border-rule bg-deep text-left"
+                      }`}
+                    >
+                      <p className="m-0 whitespace-pre-wrap text-[12.5px] leading-[1.65] text-read">
+                        {turn.text}
+                      </p>
+                      <time className="mt-1 block font-mono text-[9px] text-faint" dateTime={turn.at}>
+                        {stamp(turn.at)}
+                      </time>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          ))}
+        </div>
+      ) : (
+        <Empty title={hasChatRoute ? "Nothing remembered yet." : "No chat route."}>
+          {hasChatRoute
+            ? "No conversation window has been written for this resident yet."
+            : "This resident declares no chat route, so there is no phone conversation to show."}
+        </Empty>
+      )}
+    </Panel>
+  );
+}
+
 function EventFeed({ resident, model }) {
   const person = model?.people.find(
     (item) => item.residency === "resident" && agentUuid(item.id) === resident.uid,
@@ -497,6 +574,7 @@ export default function ResidentDetail({ id, model }) {
       <BudgetPanel settled={data.budget} id={id} />
       <JournalPanel settled={data.journal} />
       <InboxPanel settled={data.inbox} />
+      <ConversationsPanel settled={data.conversations} resident={resident} />
 
       <EventFeed resident={resident} model={model} />
 

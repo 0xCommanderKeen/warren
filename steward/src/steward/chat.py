@@ -667,6 +667,40 @@ class Transcript:
             )
 
 
+@dataclass(frozen=True, slots=True)
+class ConversationSummary:
+    """The list-view facts for one remembered conversation."""
+
+    id: str
+    last_turn_at: str
+    turn_count: int
+
+
+def conversation_summaries(manifest: ResidentManifest) -> list[ConversationSummary]:
+    """Return readable conversation windows, newest conversation first."""
+    directory = resolve_chat_dir(manifest)
+    summaries: list[ConversationSummary] = []
+    try:
+        paths = directory.glob("*.jsonl") if directory.is_dir() else ()
+        for path in paths:
+            turns = Transcript(manifest, path.stem).turns()
+            if turns:
+                summaries.append(
+                    ConversationSummary(
+                        id=path.stem,
+                        last_turn_at=turns[-1].at,
+                        turn_count=len(turns),
+                    )
+                )
+    except OSError:
+        return []
+    return sorted(
+        summaries,
+        key=lambda summary: (summary.last_turn_at, summary.id),
+        reverse=True,
+    )
+
+
 # --------------------------------------------------------------------------------------
 # the wire
 # --------------------------------------------------------------------------------------

@@ -397,6 +397,92 @@ def test_a_resident_carries_its_delegation_flags(panel: PanelFactory) -> None:
 
 
 # --------------------------------------------------------------------------------------
+# the conversation window
+# --------------------------------------------------------------------------------------
+
+
+def test_conversations_list_and_read_the_residents_remembered_window(
+    panel: PanelFactory, tmp_path: Path
+) -> None:
+    memory = tmp_path / "test-agent-memory"
+    data = copy.deepcopy(valid_manifest())
+    data["memory"]["path"] = str(memory)
+    data["routes"].append(
+        {"id": "chat", "kind": "chat", "address": "telegram:testy", "status": "active"}
+    )
+    built = panel(manifest=data)
+    chat = memory / "chat"
+    chat.mkdir(parents=True)
+    (chat / "4242.jsonl").write_text(
+        '{"at":"2026-09-04T08:00:00Z","speaker":"operator","text":"hello"}\n'
+        '{"at":"2026-09-04T08:00:02Z","speaker":"hob","text":"receipt 521f54b"}\n',
+        encoding="utf-8",
+    )
+
+    listed = built.client.get("/residents/test-agent/conversations")
+    assert listed.status_code == 200
+    assert listed.json() == {
+        "resident": "test-agent",
+        "conversations": [{"id": "4242", "last_turn_at": "2026-09-04T08:00:02Z", "turn_count": 2}],
+    }
+
+    read = built.client.get("/residents/test-agent/conversations/4242")
+    assert read.status_code == 200
+    assert read.json() == {
+        "resident": "test-agent",
+        "conversation": "4242",
+        "turns": [
+            {"at": "2026-09-04T08:00:00Z", "speaker": "operator", "text": "hello"},
+            {"at": "2026-09-04T08:00:02Z", "speaker": "hob", "text": "receipt 521f54b"},
+        ],
+    }
+
+
+def test_conversation_reads_scrub_secrets_and_stay_behind_the_operator_token(
+    panel: PanelFactory, tmp_path: Path
+) -> None:
+    memory = tmp_path / "test-agent-memory"
+    data = copy.deepcopy(valid_manifest())
+    data["memory"]["path"] = str(memory)
+    data["routes"].append(
+        {"id": "chat", "kind": "chat", "address": "telegram:testy", "status": "active"}
+    )
+    built = panel(manifest=data)
+    chat = memory / "chat"
+    chat.mkdir(parents=True)
+    (chat / "4242.jsonl").write_text(
+        '{"at":"2026-09-04T08:00:00Z","speaker":"operator",'
+        '"text":"token 123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef"}\n',
+        encoding="utf-8",
+    )
+
+    anonymous = TestClient(built.client.app)
+    assert anonymous.get("/residents/test-agent/conversations").status_code == 401
+    body = built.client.get("/residents/test-agent/conversations/4242").json()
+    assert body["turns"][0]["text"] == "token [redacted:secret]"
+
+
+def test_a_resident_without_a_chat_route_lists_no_stale_conversation(
+    panel: PanelFactory, tmp_path: Path
+) -> None:
+    memory = tmp_path / "test-agent-memory"
+    data = copy.deepcopy(valid_manifest())
+    data["memory"]["path"] = str(memory)
+    built = panel(manifest=data)
+    chat = memory / "chat"
+    chat.mkdir(parents=True)
+    (chat / "4242.jsonl").write_text(
+        '{"at":"2026-09-04T08:00:00Z","speaker":"operator","text":"stale"}\n',
+        encoding="utf-8",
+    )
+
+    assert built.client.get("/residents/test-agent/conversations").json() == {
+        "resident": "test-agent",
+        "conversations": [],
+    }
+
+
+# --------------------------------------------------------------------------------------
 # the deploy path, as the pending ledger sees it
 #
 # A panel renders a deploy from two things and invents neither: the 201 body's own

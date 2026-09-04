@@ -70,6 +70,7 @@ const RESIDENT = {
   soul: SOUL,
   voice: "Plain sentences.",
   memory: { kind: "directory", path: "memory/" },
+  routes: [{ id: "chat", kind: "chat", address: "telegram:hob", status: "active" }],
   runner: { kind: "claude", model: "claude-opus-5" },
   charter: {
     mission: "Keep the household running.",
@@ -141,12 +142,26 @@ const INBOX = {
   pending: 1,
 };
 
+const CONVERSATIONS = {
+  conversations: [{ id: "4242", last_turn_at: "2026-09-04T08:00:02Z", turn_count: 2 }],
+};
+
+const CONVERSATION = {
+  conversation: "4242",
+  turns: [
+    { at: "2026-09-04T08:00:00Z", speaker: "operator", text: "Did the digest arrive?" },
+    { at: "2026-09-04T08:00:02Z", speaker: "hob", text: "receipt 521f54b" },
+  ],
+};
+
 const residentStubs = {
   "/residents/0198-uid": json(200, RESIDENT),
   "/routines": json(200, ROUTINES),
   "/residents/0198-uid/budget": json(200, BUDGET),
   "/residents/0198-uid/journal": json(200, JOURNAL),
   "/residents/0198-uid/inbox": json(200, INBOX),
+  "/residents/0198-uid/conversations": json(200, CONVERSATIONS),
+  "/residents/0198-uid/conversations/4242": json(200, CONVERSATION),
 };
 
 beforeEach(() => window.history.replaceState({}, "", "/"));
@@ -213,6 +228,35 @@ describe("a resident's record", () => {
     expect(screen.getByText("$5.2000")).toBeTruthy();
     // Named twice on this page — the routine's schedule zone and the budget window's.
     expect(screen.getAllByText(/Europe\/Ljubljana/).length).toBeGreaterThan(0);
+  });
+
+  it("shows the remembered conversation window with its newest turn at the bottom", async () => {
+    mount(<ResidentsPage page="resident" params={{ id: "0198-uid" }} />, {
+      fetch: router(residentStubs),
+    });
+
+    const conversation = await screen.findByLabelText("Conversation 4242");
+    expect(conversation.textContent).toContain("Did the digest arrive?");
+    expect(conversation.textContent).toContain("receipt 521f54b");
+    expect(conversation.textContent.indexOf("Did the digest arrive?")).toBeLessThan(
+      conversation.textContent.indexOf("receipt 521f54b"),
+    );
+    expect(conversation.querySelector('[data-speaker="operator"]')?.className).toContain("ml-auto");
+    expect(screen.getByText(/20-turn window the resident itself remembers/i)).toBeTruthy();
+    expect(screen.getByText(/full session transcript/i)).toBeTruthy();
+  });
+
+  it("says there is no conversation when the resident declares no chat route", async () => {
+    mount(<ResidentsPage page="resident" params={{ id: "0198-uid" }} />, {
+      fetch: router({
+        ...residentStubs,
+        "/residents/0198-uid": json(200, { ...RESIDENT, routes: [] }),
+        "/residents/0198-uid/conversations": json(200, { conversations: [] }),
+      }),
+    });
+
+    expect(await screen.findByText("No chat route.")).toBeTruthy();
+    expect(screen.getByText(/no phone conversation to show/i)).toBeTruthy();
   });
 
   it("renders a panel steward refused without losing the panels it answered", async () => {
