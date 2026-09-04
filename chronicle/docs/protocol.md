@@ -422,8 +422,8 @@ none) and the event `ts`. Those named fields only: the
 raw record still reaches that villager's history exactly as it arrived, which is why
 Steward keeps the stranger's text out of the event in the first place.
 
-Rotation holds the same line: `retention` imports the reducer's ambient set rather than
-mirroring it, so a knock is never carried forward as a villager's state witness and a
+Rotation holds the same line: `retention_projection` imports the reducer's ambient set
+rather than mirroring it, so a knock is never carried forward as a villager's state witness and a
 departed villager cannot be resurrected by somebody ringing its bell.
 
 It is also the one event type an *outsider* causes, which is why its **volume** is bounded
@@ -435,7 +435,8 @@ Neither is data loss — but both are an outsider choosing what the projection s
 is the thing it is otherwise careful about.
 
 So every channel a knock lands in is *split* rather than merely bounded, by one shared rule
-(`village_state.ambient_share`, which `retention` imports the way it imports the ambient set):
+(`village_state.ambient_share`, which `retention_projection` imports the way it imports the
+ambient set):
 
 Outbound Discord events are visible audit facts, but not activity-state or mood evidence.
 They remain in a resident's bounded history and may supply its newest timeline sentence,
@@ -740,8 +741,8 @@ complains about; only the decision is invariant. `tests/fixtures/approval-lifecy
 projection against Python rotation. The JavaScript side is gone (warren#219), but
 the rules were always rotation's, so `tests/test_retention_approvals.py` enforces
 both files against the Python that owns them: identity against
-`retention._approval_lifecycle_identity`, lifecycle against the single close
-`retention._approval_keep_indexes` carries forward.
+`retention_approvals._approval_lifecycle_identity`, lifecycle against the single close
+`retention_approvals._approval_keep_indexes` carries forward.
 
 The panel keeps at most five newest confirmed request cards (action, detail and
 decision) alongside any newer pending queue. Closing one card therefore does not erase
