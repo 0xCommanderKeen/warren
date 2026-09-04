@@ -676,6 +676,22 @@ Diagnostics always name the file, the field path, the problem, and an example of
 value, and the same check is importable (`steward.validate_tree`, `steward.load_manifest`)
 so the scheduler, the API, and CI share one load-and-validate path.
 
+**One writer per resource** (warren#440). Every writable resource — a clone, a vault, a
+directory on a burrow — has exactly one resident that writes it. Others may read it as
+much as they like. Two residents holding the same tree open for writing produce the one
+failure nobody can debug from a transcript: a change that was there and then was not,
+overwritten by a colleague who never knew. Validation enforces it — two `mode: rw` mounts
+resolving to one host path is an error naming both residents, and the write API's gate
+refuses the `PUT` that would create the second one — so the rule holds for a fleet edited
+through the panel, not only for one assembled by hand.
+
+Its corollary is about the org chart rather than the filesystem: **split a job into two
+residents when their trust differs, not when their titles do.** Backend and frontend
+development on one repo is one resident, because it is one clone; a librarian that only
+recommends and a worker that rewrites library data are two, because one of them may
+destroy something and the other may not. A manager owns conversations and letters — it
+delegates, it does not write files — so a manager and its report never contend.
+
 ## Development
 
 Python 3.14, [uv](https://docs.astral.sh/uv/), ruff, ty, pytest.

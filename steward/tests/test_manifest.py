@@ -1623,9 +1623,15 @@ def test_an_extra_mount_cannot_mask_a_residents_managed_directories(
     assert "collides" in problem_for(result, "deploy.mounts[0].container")
 
 
-def test_two_read_write_mounts_of_one_host_path_warn_and_name_both_residents(
+def test_two_read_write_mounts_of_one_host_path_are_refused_naming_both_residents(
     write_resident: ResidentWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """#440: one writer per resource is a rule, so the second writer fails the tree.
+
+    The two mounts below spell the same host path differently — ``~/`` against
+    ``STEWARD_BURROW_HOME`` and the absolute form — so this also pins that the check
+    compares resolved paths rather than the text a manifest happened to use.
+    """
     monkeypatch.setenv("STEWARD_BURROW_HOME", "/home/Miha")
     root = tmp_path / "residents"
     first = valid_manifest()
@@ -1651,9 +1657,12 @@ def test_two_read_write_mounts_of_one_host_path_warn_and_name_both_residents(
 
     result = m.validate_tree(root)
 
-    warnings = [d for d in result.warnings if "one writer" in d.problem]
-    assert len(warnings) == 2
-    assert all("test-agent" in d.problem and "second-agent" in d.problem for d in warnings)
+    assert not result.ok, field_paths(result)
+    competing = [d for d in result.errors if "one writer" in d.problem]
+    assert len(competing) == 2
+    assert all(d.field_path == "deploy.mounts" for d in competing)
+    assert all("test-agent" in d.problem and "second-agent" in d.problem for d in competing)
+    assert all("/home/Miha/docker/shared" in d.problem for d in competing)
 
 
 def test_a_shared_host_path_with_only_one_writer_is_silent(
@@ -1681,7 +1690,42 @@ def test_a_shared_host_path_with_only_one_writer_is_silent(
 
     result = m.validate_tree(root)
 
-    assert [d for d in result.warnings if "one writer" in d.problem] == []
+    assert result.ok, field_paths(result)
+    assert [d for d in result.diagnostics if "one writer" in d.problem] == []
+
+
+def test_the_same_path_on_two_different_burrows_is_two_resources(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """#440: residents on separate hosts share no filesystem, so they cannot contend.
+
+    `deploy.host` is the documented escape hatch for a resident that does not live where
+    everything else lives. Refusing that pair would be a hard error nobody could fix
+    except by renaming a directory on an unrelated machine.
+    """
+    root = tmp_path / "residents"
+    mounts = [{"host": "~/docker/shared", "container": "/shared", "mode": "rw"}]
+    first = valid_manifest()
+    first["deploy"] = {"host": "dxp2800", "mounts": mounts}
+    second = valid_manifest() | {
+        "uid": "3a78217a-df03-4f3b-a46a-4c75b4ad929f",
+        "id": "second-agent",
+        "home": 1,
+        "agent_id": "claude-code:second-agent",
+        "deploy": {"host": "other-burrow", "mounts": mounts},
+    }
+    write_resident(first, root=root)
+    write_resident(
+        second,
+        root=root,
+        directory="second-agent",
+        soul=VALID_SOUL.replace("test-agent", "second-agent"),
+    )
+
+    result = m.validate_tree(root)
+
+    assert result.ok, field_paths(result)
+    assert [d for d in result.diagnostics if "one writer" in d.problem] == []
 
 
 @pytest.mark.parametrize(
