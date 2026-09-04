@@ -235,6 +235,12 @@ def test_a_blank_token_is_not_a_token():
     assert ch.tokens_from_env({"STEWARD_CHAT_TOKEN_PIP": "   "}) == {}
 
 
+def test_token_variable_names_include_empty_configured_slots():
+    env = {"STEWARD_CHAT_TOKEN_PIP": "", "STEWARD_CHAT_TOKEN_HOB": FAKE_BOT_TOKEN}
+
+    assert ch.token_env_names(env) == ["STEWARD_CHAT_TOKEN_HOB", "STEWARD_CHAT_TOKEN_PIP"]
+
+
 # --------------------------------------------------------------------------------------
 # the harness
 # --------------------------------------------------------------------------------------

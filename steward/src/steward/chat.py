@@ -136,6 +136,7 @@ __all__ = [
     "poll_timeout_from_env",
     "resolve_chat_dir",
     "token_env_name",
+    "token_env_names",
     "tokens_from_env",
 ]
 
@@ -263,6 +264,12 @@ def token_env_name(reference: str) -> str:
     return f"{TOKEN_ENV_PREFIX}{folded}"
 
 
+def token_env_names(env: Mapping[str, str] | None = None) -> list[str]:
+    """Return every configured bot-token variable name, including empty slots."""
+    source = os.environ if env is None else env
+    return sorted(name for name in source if name.startswith(TOKEN_ENV_PREFIX))
+
+
 def tokens_from_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
     """Return every bot token in the environment, keyed by the variable that held it.
 
@@ -271,10 +278,9 @@ def tokens_from_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
     :func:`describe_chat` is where that shows up as something an operator can read.
     """
     source = os.environ if env is None else env
+    names = set(token_env_names(source))
     return {
-        name: value.strip()
-        for name, value in source.items()
-        if name.startswith(TOKEN_ENV_PREFIX) and value.strip()
+        name: value.strip() for name, value in source.items() if name in names and value.strip()
     }
 
 
