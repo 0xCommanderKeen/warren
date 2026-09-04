@@ -16,6 +16,7 @@ from retention_policy import (
 )
 from village_state import AMBIENT_TYPES, STATE_NEUTRAL_TYPES, ambient_share
 
+
 def _routine_start_tie(event):
     payload = event["payload"]
     # Python strings compare by Unicode scalar value. Compare this fieldwise

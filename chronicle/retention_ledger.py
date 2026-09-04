@@ -18,6 +18,7 @@ from village_state import (
     reopened_by_lease,
 )
 
+
 def event_ms(event):
     """Return event time in epoch ms, or zero when missing or invalid."""
     ts = event.get("ts")

@@ -11,6 +11,7 @@ from types import MappingProxyType
 
 from protocol import EVENT_TYPES as PROTOCOL_EVENT_TYPES
 
+
 _POLICY_PATH = Path(__file__).with_name("retention-policy.json")
 POLICY = MappingProxyType(json.loads(_POLICY_PATH.read_text(encoding="utf-8")))
 

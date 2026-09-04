@@ -10,6 +10,7 @@ from protocol import validate_event
 from typed_json import semantic_key
 from retention_policy import KEEP_APPROVALS
 
+
 def _approval_resolution_identity(event, shape=None):
     """The exact fields a closing event shares with its immutable request."""
     payload = event.get("payload") or {}

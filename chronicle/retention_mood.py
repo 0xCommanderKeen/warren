@@ -31,6 +31,7 @@ from retention_policy import (
     MOOD_WORK_WEIGHTS,
 )
 
+
 def _json_domain_within(value, max_depth=math.inf):
     """Iteratively prove a bounded JSON tree, rejecting cycles and aliases."""
     seen = set()
