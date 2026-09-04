@@ -7,6 +7,7 @@ in the request log — so the tests here mostly assert on what is *absent*.
 
 from __future__ import annotations
 
+import json
 import stat
 import subprocess
 from collections.abc import Iterator
@@ -54,8 +55,6 @@ class Vault:
 
     def events(self, event_type: str) -> list[dict[str, Any]]:
         """Return the events of one type this app actually emitted."""
-        import json  # noqa: PLC0415 — one reader, kept beside the only thing that parses
-
         if not self.events_path.is_file():
             return []
         lines = self.events_path.read_text(encoding="utf-8").splitlines()

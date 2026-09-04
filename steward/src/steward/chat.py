@@ -1944,6 +1944,10 @@ class ChatBridge:
             # A door that is no longer declared has no health to report. Left behind, it
             # would keep ``run`` awake believing something reachable still exists.
             del self._health[key]
+        for key in [key for key in self._offsets if key not in live]:
+            # And its poll offset goes with it, so a route that is declared, retired and
+            # declared again does not resume from a cursor belonging to the last time.
+            del self._offsets[key]
         return True
 
     def _refresh_health(self, now: datetime) -> list[ChatOutcome]:
