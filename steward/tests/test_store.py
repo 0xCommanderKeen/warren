@@ -1600,3 +1600,10 @@ def test_a_delivery_needs_a_run_and_a_known_status(store: Store) -> None:
     assert store.run_record("never-opened") is None
     with pytest.raises(ValueError, match="invalid delivery status"):
         store.record_delivery("never-opened", "lost")  # ty: ignore[invalid-argument-type]
+
+
+def test_losing_the_add_column_race_to_a_neighbour_is_nothing(store: Store) -> None:
+    """Four daemons boot at once after a deploy; three of them find the column already there."""
+    store._add_column("open_runs", "delivery", "TEXT")
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        store._add_column("no_such_table", "delivery", "TEXT")

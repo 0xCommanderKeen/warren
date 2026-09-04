@@ -1033,7 +1033,23 @@ class Store:
             }
             for name, declaration in columns.items():
                 if name not in present:
-                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+                    self._add_column(table, name, declaration)
+
+    def _add_column(self, table: str, name: str, declaration: str) -> None:
+        """Add one column, tolerating a neighbour that got there first.
+
+        The API, scheduler, chat and watchdog all open this file at boot, and after a
+        deploy that ships a new column all four read ``table_info`` before any of them
+        has altered the table. Three of them then lose the ``ALTER`` race, and losing it
+        must be nothing: the column they wanted exists, which is the whole point. Seen
+        on the first boot after warren#400 (``duplicate column name: delivery``), where
+        the loser's crash-and-restart tripped the deploy's liveness check.
+        """
+        try:
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
 
     @classmethod
     def open_default(cls) -> Store:
