@@ -129,6 +129,40 @@ def test_a_non_boolean_defaults_fails(write_skill: SkillWriter) -> None:
     assert diagnostics[0].field_path == "defaults"
 
 
+@pytest.mark.parametrize(
+    "keys",
+    [
+        "1: numeric\nunexpected: value",
+        "true: flag\nunexpected: value",
+        "false: flag",
+        "null: empty",
+    ],
+)
+def test_non_string_frontmatter_keys_are_diagnostics(write_skill: SkillWriter, keys: str) -> None:
+    path = write_skill(
+        "research", text=f"---\nname: research\ndescription: Research.\n{keys}\n---\n\nBody.\n"
+    )
+    skill, diagnostics = sk.load_skill(path.parent)
+    assert skill is None
+    assert any(
+        d.field_path == "frontmatter" and "keys must be strings" in d.problem for d in diagnostics
+    )
+
+
+@pytest.mark.parametrize("field", ["name", "description"])
+@pytest.mark.parametrize(
+    "value", ["[research]", "{topic: research}", "[]", "{}", "true", "123", "null"]
+)
+def test_non_string_fields_are_diagnostics(
+    write_skill: SkillWriter, field: str, value: str
+) -> None:
+    other = "description: Research." if field == "name" else "name: research"
+    path = write_skill("research", text=f"---\n{other}\n{field}: {value}\n---\n\nBody.\n")
+    skill, diagnostics = sk.load_skill(path.parent)
+    assert skill is None
+    assert any(d.field_path == field and "must be a string" in d.problem for d in diagnostics)
+
+
 def test_broken_yaml_frontmatter_is_a_diagnostic_not_a_crash(write_skill: SkillWriter) -> None:
     path = write_skill("research", text="---\nname: [unclosed\n---\n\nBody.\n")
     skill, diagnostics = sk.load_skill(path.parent)
@@ -191,6 +225,37 @@ def test_the_library_is_sorted_and_addressable_by_name(write_skill: SkillWriter,
     assert "research" in loaded
     assert len(loaded) == 2
     assert [skill.name for skill in loaded] == ["errands", "research"]
+
+
+@pytest.mark.parametrize(
+    ("frontmatter", "field"),
+    [
+        ("name: broken\ndescription: Bad.\n1: numeric\nunexpected: value", "frontmatter"),
+        ("name: broken\ndescription: Bad.\ntrue: flag\nunexpected: value", "frontmatter"),
+        ("name: [broken]\ndescription: Bad.", "name"),
+        ("name: broken\ndescription: {topic: research}", "description"),
+    ],
+)
+def test_a_malformed_skill_does_not_abort_library_or_resident_validation(
+    write_skill: SkillWriter,
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    frontmatter: str,
+    field: str,
+) -> None:
+    broken = write_skill("broken", text=f"---\n{frontmatter}\n---\n\nBody.\n")
+    write_skill("daily-summary")
+    write_skill("write-journal")
+    write_resident()
+
+    loaded = library(tmp_path)
+    assert loaded.names == ("daily-summary", "write-journal")
+    assert any(d.file == broken and d.field_path == field for d in loaded.errors)
+
+    result = m.validate_tree(tmp_path / "residents")
+    assert not result.ok
+    assert len(result.residents) == 1
+    assert any(d.file == broken and d.field_path == field for d in result.diagnostics)
 
 
 def test_a_directory_without_a_skill_file_is_a_complaint(tmp_path: Path) -> None:
@@ -416,9 +481,27 @@ def test_a_symlink_inside_the_skills_directory_is_unlinked_not_followed(tmp_path
     assert (victim / "precious.txt").read_text(encoding="utf-8") == "keep me", "the target is not"
 
 
-def test_a_materialized_skill_round_trips_through_the_parser(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Cite things.",
+        "Triage: inbox",
+        "Read #inbox",
+        "on",
+        "false",
+        "yes",
+        "null",
+        "123",
+        'Read "inbox" and the operator\'s notes.',
+        "Sort the inbox\nname: something-else",
+        "First line\n\nSecond line",
+    ],
+)
+def test_a_materialized_skill_round_trips_through_the_parser(
+    tmp_path: Path, description: str
+) -> None:
     """What lands on disk is what steward parsed: one representation, two readers."""
-    original = sk.Skill(name="research", description="Cite things.", body="Read it.", default=True)
+    original = sk.Skill(name="research", description=description, body="Read it.", default=True)
     sk.materialize([original], tmp_path, "skills")
     parsed, diagnostics = sk.load_skill(tmp_path / "skills" / "research")
     assert diagnostics == []
