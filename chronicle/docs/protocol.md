@@ -874,8 +874,8 @@ and work weights shared with retention in `mood_policy.py`:
   this agent's `pending` records. Resolved and collision records are excluded.
   Plain/fallback `needs_human` knocks do not set this signal, although they can
   still set villager state to `knocking` and contribute to the count and anchor.
-  The reducer receives approvals before the panel's 40-request presentation
-  limit, so an older pending request cannot disappear behind newer questions.
+  The reducer receives approvals before the projection's configurable presentation
+  limit (200 by default), so an older pending request cannot disappear behind newer questions.
 
 Enough evidence means a pending structured request, a failure streak of at
 least two, or at least six input events. There is no minimum time span,
