@@ -719,6 +719,14 @@ finished goes back to `open` loudly, and a request nobody answered is a `deny`, 
 quiet yes. A restart is announced, a run that never reported back is buried out loud, and
 a resident that has spent its day stops and says which number stopped it.
 
+### Response contracts
+
+The request ledger, routine list and run-now receipt publish response models in the
+[offline OpenAPI artifact](docs/openapi.json). `make openapi-write` regenerates it;
+`make check` validates actual HTTP answers against it and checks the finite
+[remaining response inventory](docs/response-migration.md). Townhall validates its
+shared rendering fixtures against the same artifact.
+
 ### Driving a session offline
 
 Three of steward's most consequential paths only open when a session actually *says*

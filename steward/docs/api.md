@@ -19,7 +19,11 @@ the credential too: a bearer scheme on every operation and the `401` every route
 answer, so a client generated from it presents the token rather than meeting a blanket
 refusal. Townhall's console reads that file in-tree and fails its own suite when its
 hand-written client drifts from it (warren#321); `tests/test_openapi_contract.py` fails
-when the file drifts from the routes.
+when the file drifts from the routes. The request ledger list/detail, routine list,
+and run-now receipt publish explicit response models, including required nullable fields.
+The run path's refusal envelopes are also typed. Real HTTP responses and shared Townhall
+rendering fixtures validate against the committed document; other response endpoints
+remain in the checked [migration inventory](response-migration.md).
 
 ## The contract: acknowledgement, not effect
 
