@@ -8,8 +8,8 @@ import uvicorn
 
 
 class RunningServer:
-    def __init__(self, serve_module):
-        self._serve = serve_module
+    def __init__(self, application):
+        self._application = application
         self.server = None
         self.thread = None
         self._socket = None
@@ -23,9 +23,9 @@ class RunningServer:
         self._socket.listen()
         address = self._socket.getsockname()
         uvicorn_server = uvicorn.Server(
-            uvicorn.Config(self._serve.app, log_level="error", lifespan="on")
+            uvicorn.Config(self._application, log_level="error", lifespan="on")
         )
-        self.server = _ServerView(uvicorn_server, address, self._serve.app)
+        self.server = _ServerView(uvicorn_server, address, self._application)
         self.thread = threading.Thread(
             target=uvicorn_server.run, kwargs={"sockets": [self._socket]}, daemon=True
         )

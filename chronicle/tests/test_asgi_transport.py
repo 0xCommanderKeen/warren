@@ -674,9 +674,8 @@ class ASGITransportContractTests(unittest.TestCase):
                 return original(item)
 
             with (
-                mock.patch.object(serve, "EVENTS", path),
                 mock.patch.object(serve, "append_event", side_effect=observed_append),
-                TestClient(serve.app) as client,
+                TestClient(serve.create_app(Config(events=Path(path)))) as client,
             ):
                 self.assertEqual(client.post("/events", json={"v": 0}).status_code, 400)
                 self.assertEqual(client.post("/events", json=event).status_code, 204)
