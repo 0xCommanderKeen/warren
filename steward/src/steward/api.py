@@ -627,7 +627,7 @@ def create_app(  # noqa: PLR0913 — injectable collaborators are the public tes
             CORSMiddleware,
             allow_origins=list(settings.cors_origins),
             allow_credentials=False,
-            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_methods=["GET", "POST", "PUT", "OPTIONS"],
             allow_headers=["Authorization", "Content-Type"],
         )
     app.state.store = db
