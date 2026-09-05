@@ -17,6 +17,7 @@ from conftest import (
     REPO_ROOT,
     SECOND_RESIDENT_UID,
     VALID_RESIDENT_UID,
+    VALID_SOUL,
     ResidentWriter,
     ScratchRepo,
     SkillWriter,
@@ -4244,6 +4245,57 @@ def tapping_manifest() -> dict[str, Any]:
     data = valid_manifest()
     data["notifications"] = {"transport": "ntfy", "on": ["needs_human"], "note": "Miha's phone"}
     return data
+
+
+@pytest.mark.parametrize("explicit_seed", [False, True])
+def test_notify_list_defaults_to_live_checkout_when_seed_disagrees(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    explicit_seed: bool,
+) -> None:
+    """A bare operator command must not verify the image's seed back to them."""
+    write_resident(tapping_manifest())
+    checkout = tmp_path / "checkout" / "steward" / "residents"
+    write_resident(root=checkout)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("STEWARD_RESIDENTS", str(checkout))
+
+    args = ["notify", "list"] + (["--residents", "residents"] if explicit_seed else [])
+    result = runner.invoke(main, args)
+
+    assert result.exit_code == 0, result.output
+    expected = "test-agent: ntfy — active" if explicit_seed else "test-agent: taps nobody"
+    assert expected in result.output
+
+
+@pytest.mark.parametrize("command", [["validate"], ["doctor"], ["skills"], ["journal", "live"]])
+def test_other_cli_defaults_read_live_checkout(
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_bin: StubWriter,
+    command: list[str],
+) -> None:
+    """Positional defaults and individually declared options use the same tree."""
+    write_resident()
+    manifest = valid_manifest()
+    manifest["id"] = "live"
+    manifest["agent_id"] = "claude-code:live"
+    manifest["memory"]["path"] = str(tmp_path / "memory")
+    checkout = tmp_path / "checkout" / "steward" / "residents"
+    write_resident(manifest, root=checkout, soul=VALID_SOUL.replace("test-agent", "live"))
+    stub_bin("claude", CURRENT_CLAUDE)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("STEWARD_RESIDENTS", str(checkout))
+
+    result = CliRunner().invoke(main, command)
+
+    assert result.exit_code == 0, result.output
+    assert (str(checkout) if command == ["validate"] else "live") in result.output
+    assert "test-agent" not in result.output
 
 
 def test_notify_list_prints_the_address_an_operator_has_to_subscribe_to(
