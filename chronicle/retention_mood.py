@@ -12,6 +12,7 @@ import math
 import re
 
 from approval_protocol import structured_approval
+from mood_policy import MOOD_TERMINAL_TYPES, MOOD_WORK_WEIGHTS
 from protocol import validate_event
 from typed_json import canonical_string, decode_graph, semantic_key
 from retention_approvals import (
@@ -27,8 +28,6 @@ from retention_policy import (
     MOOD_AUTHORITY_MAX_BYTES,
     MOOD_AUTHORITY_MAX_DEPTH,
     MOOD_ORDINARY_SUPERSEDERS,
-    MOOD_TERMINAL_TYPES,
-    MOOD_WORK_WEIGHTS,
 )
 
 
