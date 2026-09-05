@@ -43,8 +43,9 @@ def router(deps: Deps) -> APIRouter:
             _refuse(
                 404,
                 "unknown_request",
-                f"no request {request_id!r}; refused calls have no individual receipt, "
-                "but authentication failures appear in aggregate AUTH summaries",
+                f"no request {request_id!r}; most refused calls have no individual log entry, "
+                "but overlapping run-now refusals are logged and authentication failures "
+                "appear in aggregate AUTH summaries",
             )
         return record.to_dict()
 
