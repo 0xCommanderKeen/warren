@@ -1,6 +1,5 @@
 """Routine ledger and run-now HTTP routes."""
 
-from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -17,19 +16,9 @@ from steward.scheduler import (
     default_state_path,
     scheduler_liveness,
 )
-from steward.store import LedgerEntry, RequestRecord
+from steward.store import LedgerEntry
 
 ALREADY_RUNNING_ERROR = "already_running"
-
-
-def latest_run_requests(records: Sequence[RequestRecord]) -> dict[str, dict[str, Any]]:
-    """Index the request log by routine key, keeping the newest entry for each."""
-    latest: dict[str, dict[str, Any]] = {}
-    for record in records:
-        key = record.detail.get("routine")
-        if isinstance(key, str):
-            latest[key] = record.to_dict()
-    return latest
 
 
 def last_run_view(entry: LedgerEntry | None) -> dict[str, Any] | None:
@@ -97,7 +86,13 @@ def router(deps: Deps) -> APIRouter:
         result = validate_path(deps.residents_dir, deps.settings.skills_dir)
         state = SchedulerState.load(default_state_path())
         now = datetime.now(UTC)
-        latest = latest_run_requests(deps.db.requests())
+        latest = deps.db.latest_routine_requests(
+            [
+                f"{resident.id}/{routine.id}"
+                for resident in result.residents
+                for routine in resident.manifest.routines
+            ]
+        )
         runs_by_key = deps.db.latest_routine_runs()
         routines = []
         for resident in result.residents:
@@ -122,7 +117,7 @@ def router(deps: Deps) -> APIRouter:
                         "next_fire": item.next_fire_after(now).isoformat()
                         if routine.enabled and not resident.retired
                         else None,
-                        "last_request": latest.get(item.key),
+                        "last_request": latest[item.key].to_dict() if item.key in latest else None,
                         "last_run": last_run_view(runs_by_key.get(item.key)),
                     }
                 )

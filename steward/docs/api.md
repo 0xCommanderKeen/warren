@@ -1106,7 +1106,14 @@ handoff `delegated`. A client polls one of these rather than deciding on its own
 202 went well.
 
 `GET /requests` is the log, **newest first**, with `?limit=` (default 50, clamped to
-1–500). `404 unknown_request` for an id nobody logged — and only *accepted* mutating
+1–500). `?resident=hob` filters by the exact resident segment of `/residents/{id}/…`
+(or `detail.resident` for collection writes such as resident creation), before applying
+the limit. Timestamp ties use reverse insertion order. Both filters and limits run in
+SQLite; `/routines` separately looks up only the newest request for each declared routine.
+The complete audit trail remains available to deliberate Store callers through
+`export_request_history()` (oldest first).
+
+`404 unknown_request` for an id nobody logged — and only *accepted* mutating
 requests are logged, so a refused one has no id to look up. That is the same promise as
 everywhere else here: nothing is written for a request that was refused.
 

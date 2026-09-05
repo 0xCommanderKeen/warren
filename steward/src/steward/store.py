@@ -140,6 +140,13 @@ ORIGIN_UNATTRIBUTED = "unattributed"
 
 DB_FILENAME = "steward.db"
 
+# The resident path segment is authoritative; collection writes (creation) carry
+# detail.resident instead. Keep this expression identical in the index and query.
+_REQUEST_RESIDENT = """CASE WHEN substr(path, 1, 11) = '/residents/'
+    THEN substr(substr(path, 12), 1, instr(substr(path, 12) || '/', '/') - 1)
+    ELSE CASE WHEN json_type(detail, '$.resident') = 'text'
+        THEN json_extract(detail, '$.resident') END END"""
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
     task_id          TEXT PRIMARY KEY,
@@ -178,6 +185,12 @@ CREATE TABLE IF NOT EXISTS requests (
     detail       TEXT NOT NULL DEFAULT '{}',
     approval_id  TEXT
 );
+
+-- Ascending timestamp plus implicit rowid supports a reverse scan of both tie keys.
+CREATE INDEX IF NOT EXISTS requests_received ON requests(received_at);
+CREATE INDEX IF NOT EXISTS requests_routine_received
+    ON requests(json_extract(detail, '$.routine'), received_at)
+    WHERE json_type(detail, '$.routine') = 'text';
 
 CREATE TABLE IF NOT EXISTS approval_announcements (
     request_id    TEXT PRIMARY KEY REFERENCES approvals(request_id),
@@ -1050,6 +1063,10 @@ class Store:
             self._conn.executescript(_SCHEMA)
             self._add_missing_columns()
             self._conn.executescript(_LATE_INDEXES)
+            self._conn.execute(
+                f"CREATE INDEX IF NOT EXISTS requests_resident_received "
+                f"ON requests(({_REQUEST_RESIDENT}), received_at)"
+            )
 
     def _add_missing_columns(self) -> None:
         """Bring an older database up to the current shape without losing a row.
@@ -3268,7 +3285,36 @@ class Store:
             ).fetchone()
         return RequestRecord.from_row(row) if row else None
 
-    def requests(self) -> list[RequestRecord]:
+    def recent_requests(self, *, limit: int, resident: str | None = None) -> list[RequestRecord]:
+        """Return at most ``limit`` requests, newest first, including insertion-order ties."""
+        if limit < 1:
+            raise ValueError("request limit must be positive")
+        predicate = "" if resident is None else f" WHERE ({_REQUEST_RESIDENT}) = ?"
+        parameters = (limit,) if resident is None else (resident, limit)
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM requests{predicate} "  # noqa: S608 — static SQL; values bound below
+                "ORDER BY received_at DESC, rowid DESC LIMIT ?",
+                parameters,
+            ).fetchall()
+        return [RequestRecord.from_row(row) for row in rows]
+
+    def latest_routine_requests(self, keys: Sequence[str]) -> dict[str, RequestRecord]:
+        """Look up one newest request per declared routine, without reading its history."""
+        latest: dict[str, RequestRecord] = {}
+        with self._lock:
+            for key in dict.fromkeys(keys):
+                row = self._conn.execute(
+                    "SELECT * FROM requests WHERE json_type(detail, '$.routine') = 'text' "
+                    "AND json_extract(detail, '$.routine') = ? "
+                    "ORDER BY received_at DESC, rowid DESC LIMIT 1",
+                    (key,),
+                ).fetchone()
+                if row is not None:
+                    latest[key] = RequestRecord.from_row(row)
+        return latest
+
+    def export_request_history(self) -> list[RequestRecord]:
         """Return every logged request, oldest first. The audit trail, in one call."""
         with self._lock:
             rows = self._conn.execute(
