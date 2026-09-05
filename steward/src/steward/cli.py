@@ -3,11 +3,12 @@
 import json
 import logging
 import os
+import sqlite3
 import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NoReturn
@@ -42,6 +43,7 @@ from steward.approvals import (
 from steward.board import BoardReport, Dispatcher, board_preflight, claimable_skills
 from steward.budgets import BudgetGuard, BudgetStatus
 from steward.claims import ResidentClaims, stale_before
+from steward.credential_policy import CREDENTIAL_KEY_PATTERN
 from steward.delegation import DelegationError, Delegator, Handoff, max_depth
 from steward.deploy import TransportError, placement_for
 from steward.health import HealthFailure
@@ -509,7 +511,7 @@ def _render_effective_set(
     click.secho(f"  runner {resident.manifest.runner.kind} — {where}", fg="bright_black")
 
 
-def _report_reach(resident: Resident) -> int:
+def _report_reach(resident: Resident, output: _DoctorOutput) -> int:
     """Say what a resident may reach and where, and whether the installed brain can do it.
 
     Printed for every resident rather than only the bounded ones, because "which residents
@@ -525,24 +527,36 @@ def _report_reach(resident: Resident) -> int:
     tools = manifest.tools
     placement = placement_for(manifest)
     complaint = check_cli_support(manifest.runner, tools, manifest.workspace, placement)
+    output.record(
+        "reach",
+        "error" if complaint else "ok",
+        {
+            "supported": complaint is None,
+            "problem": complaint,
+            "tools": tools.model_dump(mode="json"),
+            "workspace": list(manifest.workspace),
+            "mounts": [mount.model_dump(mode="json") for mount in manifest.deploy.mounts],
+        },
+        resident.id,
+    )
     if complaint:
-        click.secho(f"{resident.id}: tools {tools.describe()} — {complaint}", fg="red", err=True)
+        output.secho(f"{resident.id}: tools {tools.describe()} — {complaint}", fg="red", err=True)
         return 1
     colour = "yellow" if tools.unrestricted else "green"
-    click.secho(f"{resident.id}: tools {tools.describe()}", fg=colour)
+    output.secho(f"{resident.id}: tools {tools.describe()}", fg=colour)
     if manifest.workspace:
         # A widening grant, so it is worth saying out loud even when nothing is wrong: this
         # resident works somewhere other than the one directory its memory location names.
-        click.secho(f"{resident.id}: workspace {', '.join(manifest.workspace)}", fg="yellow")
+        output.secho(f"{resident.id}: workspace {', '.join(manifest.workspace)}", fg="yellow")
     for mount in manifest.deploy.mounts:
-        click.secho(
+        output.secho(
             f"{resident.id}: mount {mount.host} -> {mount.container} ({mount.mode})",
             fg="yellow" if mount.mode == "rw" else "bright_black",
         )
-    return _report_telemetry(resident, placement)
+    return _report_telemetry(resident, placement, output)
 
 
-def _report_telemetry(resident: Resident, placement: Placement) -> int:
+def _report_telemetry(resident: Resident, placement: Placement, output: _DoctorOutput) -> int:
     """Say whether this resident's sessions will tell the village what they did.
 
     Quiet is not a problem, so it is not counted: a fleet can legitimately run with
@@ -582,10 +596,22 @@ def _report_telemetry(resident: Resident, placement: Placement) -> int:
     be a confident claim about a channel that does not exist for it.
     """
     if resident.manifest.runner.kind != ClaudeRunner.kind:
+        output.record(
+            "telemetry",
+            "info",
+            {"enabled": False, "emitter": None, "available": None, "reason": "unsupported_runner"},
+            resident.id,
+        )
         return 0
     emitter = session_emitter(placement)
     if emitter is None:
-        click.secho(
+        output.record(
+            "telemetry",
+            "warning",
+            {"enabled": False, "emitter": None, "available": None, "reason": "not_configured"},
+            resident.id,
+        )
+        output.secho(
             f"{resident.id}: per-session events off — no emitter for {placement.describe()} "
             f"placement; export {SESSION_EMITTER_ENV} in the environment the scheduler runs "
             f"in to turn them on",
@@ -593,15 +619,27 @@ def _report_telemetry(resident: Resident, placement: Placement) -> int:
         )
         return 0
     complaint = check_session_emitter(placement)
+    output.record(
+        "telemetry",
+        "error" if complaint else "ok",
+        {
+            "enabled": True,
+            "emitter": emitter,
+            "available": complaint is None,
+            "problem": complaint,
+            "local_configuration": not placement.is_container,
+        },
+        resident.id,
+    )
     if complaint:
-        click.secho(f"{resident.id}: per-session events — {complaint}", fg="red", err=True)
+        output.secho(f"{resident.id}: per-session events — {complaint}", fg="red", err=True)
         return 1
     # Local placement only: a container's emitter was just verified in the container, but a
     # local one was resolved from *this* process's environment, and the process that will
     # actually launch the session is the scheduler. Saying where the answer came from is
     # the difference between a report and an assertion.
     where = "" if placement.is_container else f" (${SESSION_EMITTER_ENV}, read here)"
-    click.secho(f"{resident.id}: per-session events via {emitter}{where}", fg="bright_black")
+    output.secho(f"{resident.id}: per-session events via {emitter}{where}", fg="bright_black")
     undeliverable = check_session_ingest(placement)
     if undeliverable:
         # Same hedge as the line above, and it earns it twice over: the token this was
@@ -609,8 +647,19 @@ def _report_telemetry(resident: Resident, placement: Placement) -> int:
         # and the process that will launch the session is the scheduler, under whatever
         # account it runs as. Said, rather than quietly asserted.
         outbox = session_emitter_outbox(placement)
+        output.record(
+            "telemetry_delivery",
+            "warning",
+            {
+                "deliverable": False,
+                "problem": undeliverable,
+                "outbox_reading": outbox,
+                "local_configuration": True,
+            },
+            resident.id,
+        )
         reading = f"; {outbox} (read here)" if outbox else "; no outbox reading here"
-        click.secho(f"{resident.id}: per-session events — {undeliverable}{reading}", fg="yellow")
+        output.secho(f"{resident.id}: per-session events — {undeliverable}{reading}", fg="yellow")
     return 0
 
 
@@ -726,10 +775,76 @@ def _org_handoffs(node: OrgNode, sends: Sequence[OrgEdge]) -> str:
 # --------------------------------------------------------------------------------------
 
 
+@dataclass
+class _DoctorOutput:
+    """Keep structured observations beside the existing terminal rendering."""
+
+    json_output: bool = False
+    checks: list[dict[str, Any]] = field(default_factory=list)
+    diagnostics: list[dict[str, Any]] = field(default_factory=list)
+    residents: list[dict[str, Any]] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+    def record(
+        self,
+        name: str,
+        status: str,
+        details: dict[str, Any],
+        resident: str | None = None,
+    ) -> None:
+        self.checks.append(
+            {"name": name, "resident": resident, "status": status, "details": details}
+        )
+
+    def echo(self, message: str) -> None:
+        if not self.json_output:
+            click.echo(message)
+
+    def secho(self, message: str, *, fg: str, err: bool = False) -> None:
+        if not self.json_output:
+            click.secho(message, fg=fg, err=err)
+
+    def finish(self, code: int) -> None:
+        if self.json_output:
+            payload = {
+                "schema_version": 1,
+                "ok": code == EXIT_OK,
+                "residents": self.residents,
+                "checks": self.checks,
+                "diagnostics": self.diagnostics,
+                "errors": self.errors,
+            }
+            # Scrub before serialization so credentials containing quotes/newlines cannot
+            # evade redaction through JSON escaping. Never include session claim tokens.
+            secrets = sorted(
+                (
+                    value
+                    for key, value in os.environ.items()
+                    if value and CREDENTIAL_KEY_PATTERN.search(key)
+                ),
+                key=len,
+                reverse=True,
+            )
+
+            def safe(value: object) -> object:
+                if isinstance(value, str):
+                    for secret in secrets:
+                        value = value.replace(secret, "[REDACTED]")
+                    return redact_secrets(value)
+                if isinstance(value, dict):
+                    return {key: safe(item) for key, item in value.items()}
+                if isinstance(value, (list, tuple)):
+                    return [safe(item) for item in value]
+                return value
+
+            click.echo(json.dumps(safe(payload), indent=2))
+
+
 @main.command()
 @click.argument("residents", type=click.Path(path_type=Path), default=None)
 @_DB_OPTION
-def doctor(residents: Path | None, db: Path | None) -> None:
+@click.option("--json", "json_output", is_flag=True, help="Emit structured health checks as JSON.")
+def doctor(residents: Path | None, db: Path | None, *, json_output: bool) -> None:
     """Check that what the manifests declare can actually run, here, now.
 
     Names the brain each resident runs on, whether its binary exists, what it has spent
@@ -741,18 +856,46 @@ def doctor(residents: Path | None, db: Path | None) -> None:
     are work nobody will ever pick up. Board claimants are pre-flighted here too — a
     resident that claims work and schedules none is a resident nothing else checks.
     """
+    output = _DoctorOutput(json_output=json_output)
+    try:
+        code = _run_doctor(residents, db, output)
+    except (click.ClickException, OSError, sqlite3.Error) as exc:
+        if not json_output:
+            raise
+        output.errors.append(str(exc))
+        code = EXIT_INVALID
+    output.finish(code)
+    sys.exit(code)
+
+
+def _run_doctor(residents: Path | None, db: Path | None, output: _DoctorOutput) -> int:
+    """Run each existing probe once, regardless of the requested rendering."""
     from steward.master_auth import rotation_status  # noqa: PLC0415 — doctor-only diagnostic
 
-    click.echo("master token: " + rotation_status(os.environ, datetime.now(UTC)))
+    rotation = rotation_status(os.environ, datetime.now(UTC))
+    output.record(
+        "master_token",
+        "info",
+        {
+            "current_configured": bool(os.environ.get("STEWARD_TOKEN")),
+            "previous_configured": bool(os.environ.get("STEWARD_TOKEN_PREVIOUS")),
+            "rotation": rotation,
+        },
+    )
+    output.echo("master token: " + rotation)
     defaulted = residents is None
     residents = residents or default_residents_dir()
     result = validate_paths([residents])
     if defaulted:
         result = _require_residents(result, residents)
-    if result.diagnostics:
+    output.diagnostics = [_diagnostic_as_dict(d) for d in result.diagnostics]
+    output.residents = [
+        {"id": r.id, "retired": r.retired} for r in _doctor_residents(result.residents)
+    ]
+    if result.diagnostics and not output.json_output:
         _report_text(result, [residents])
     if not result.ok:
-        sys.exit(EXIT_INVALID)
+        return EXIT_INVALID
 
     problems = 0
     # The same library validate_paths above resolved for itself: passing no skills dir does
@@ -766,36 +909,55 @@ def doctor(residents: Path | None, db: Path | None) -> None:
             if resident.retired:
                 # Still valid, still in git, still readable — and doing nothing. Saying
                 # "ready" about it would be the one line of this report that is untrue.
-                click.secho(f"{resident.id}: retired — fires nothing", fg="bright_black")
+                output.secho(f"{resident.id}: retired — fires nothing", fg="bright_black")
                 continue
             placement = placement_for(resident.manifest)
             complaint = check_runner(resident.manifest.runner, placement)
+            output.record(
+                "runner",
+                "error" if complaint else "ok",
+                {
+                    "kind": resident.manifest.runner.kind,
+                    "model": resident.manifest.runner.model,
+                    "placement": asdict(placement),
+                    "ready": complaint is None,
+                    "problem": complaint,
+                },
+                resident.id,
+            )
             label = _runner_label(resident, placement)
             if complaint:
                 problems += 1
-                click.secho(f"{label} — {complaint}", fg="red", err=True)
+                output.secho(f"{label} — {complaint}", fg="red", err=True)
             else:
-                click.secho(f"{label} — ready", fg="green")
-            problems += _report_reach(resident)
+                output.secho(f"{label} — ready", fg="green")
+            problems += _report_reach(resident, output)
             # Before the journal line, which probes by creating the directory it names: a
             # claimant with no working directory must be reported as doctor found it, not
             # as doctor left it.
-            problems += _report_claimant(resident, library)
-            problems += _report_journal(resident)
-            problems += _report_budget(guard.status(resident.manifest))
-            problems += _report_inbox(resident, store)
-            problems += _report_session_claim(resident, store)
-        problems += _report_topology(result.residents)
-        problems += _report_health_failures(store.health.latest())
-        problems += _report_watchdog(store.last_watchdog_pass())
-    problems += _report_scheduler(SchedulerState.load(default_state_path()))
+            problems += _report_claimant(resident, library, output)
+            problems += _report_journal(resident, output)
+            problems += _report_budget(guard.status(resident.manifest), output)
+            problems += _report_inbox(resident, store, output)
+            problems += _report_session_claim(resident, store, output)
+        problems += _report_topology(result.residents, output)
+        problems += _report_health_failures(store.health.latest(), output)
+        problems += _report_watchdog(store.last_watchdog_pass(), output)
+    problems += _report_scheduler(SchedulerState.load(default_state_path()), output)
 
+    _report_upcoming(residents, library, output)
+    return EXIT_OK if problems == 0 else EXIT_INVALID
+
+
+def _report_upcoming(residents: Path, library: SkillLibrary, output: _DoctorOutput) -> None:
+    """Read and report the next fires using the same schedule source as the daemon."""
     source = TreeSource(residents_dir=Path(residents), env=dict(os.environ))
     try:
         snapshot = source.load()
     except SchedulerError as exc:
         raise click.ClickException(str(exc)) from exc
     scheduled = snapshot.scheduled
+    upcoming: list[dict[str, Any]] = []
     if scheduled:
         engine = Scheduler(
             scheduled,
@@ -803,15 +965,23 @@ def doctor(residents: Path | None, db: Path | None) -> None:
             library=library,
         )
         for item, moment in engine.upcoming(datetime.now(UTC)):
+            upcoming.append(
+                {
+                    "key": item.key,
+                    "schedule": item.routine.schedule,
+                    "timezone": item.routine.schedule_tz,
+                    "next_fire": moment.isoformat(),
+                }
+            )
             local = moment.strftime("%Y-%m-%d %H:%M")
-            click.echo(
+            output.echo(
                 f"  {item.key}: '{item.routine.schedule}' {item.routine.schedule_tz} "
                 f"→ next {local} {item.routine.schedule_tz}"
             )
     else:
-        click.echo("  no enabled routines")
+        output.echo("  no enabled routines")
 
-    sys.exit(EXIT_OK if problems == 0 else EXIT_INVALID)
+    output.record("routines", "ok", {"upcoming": upcoming})
 
 
 def _doctor_residents(residents: Sequence[Resident]) -> tuple[Resident, ...]:
@@ -851,11 +1021,12 @@ def _runner_label(resident: Resident, placement: Placement) -> str:
     return label
 
 
-def _report_journal(resident: Resident) -> int:
+def _report_journal(resident: Resident, output: _DoctorOutput) -> int:
     """Print where this resident's journal lives, or why it has none. Returns problems."""
     complaint = journal_complaint(resident.manifest)
     if complaint:
-        click.secho(f"{resident.id}: journal — {complaint}", fg="red", err=True)
+        output.record("journal", "error", {"problem": complaint, "writable": None}, resident.id)
+        output.secho(f"{resident.id}: journal — {complaint}", fg="red", err=True)
         return 1
     directory = resolve_journal_dir(resident.manifest, source=resident.path)
     closer = next(
@@ -864,23 +1035,34 @@ def _report_journal(resident: Resident) -> int:
     )
     ends_with = f"closed by {closer}" if closer else "no routine closes the day"
     unwritable = _probe_writable(directory)
+    output.record(
+        "journal",
+        "warning" if unwritable else "ok",
+        {
+            "directory": str(directory),
+            "writable": unwritable is None,
+            "closer": closer,
+            "problem": unwritable,
+        },
+        resident.id,
+    )
     if unwritable is not None:
         # A warning, not a failure: a shipped resident's journal is a container path like
         # /data that is unwritable on the laptop running doctor and perfectly writable in the
         # container. Doctor still says so out loud — the point of steward #89 — but it does
         # not fail the whole run over a path that is not this host's to write.
-        click.secho(
+        output.secho(
             f"{resident.id}: journal {directory} — {unwritable} (writable on the resident's "
             f"own host?); {ends_with}",
             fg="yellow",
             err=True,
         )
         return 0
-    click.secho(f"{resident.id}: journal {directory} — writable, {ends_with}", fg="green")
+    output.secho(f"{resident.id}: journal {directory} — writable, {ends_with}", fg="green")
     return 0
 
 
-def _report_claimant(resident: Resident, library: SkillLibrary) -> int:
+def _report_claimant(resident: Resident, library: SkillLibrary, output: _DoctorOutput) -> int:
     """Pre-flight a board claimant, so a notice is not claimed and dropped. Returns problems.
 
     The per-resident loop is the right hook: a resident that claims board work and declares
@@ -910,37 +1092,56 @@ def _report_claimant(resident: Resident, library: SkillLibrary) -> int:
       path that is not this host's to have.
     """
     if not resident.manifest.board.claim:
+        output.record("board", "info", {"claimant": False}, resident.id)
         return 0
     cwd = Path.cwd()
     complaints = board_preflight([resident], library, cwd)
     if not complaints:
-        click.secho(f"{resident.id}: board — claimant, runner and skills resolve", fg="green")
+        output.record(
+            "board", "ok", {"claimant": True, "problems": [], "workdir_ready": True}, resident.id
+        )
+        output.secho(f"{resident.id}: board — claimant, runner and skills resolve", fg="green")
         return 0
     refusal = workdir_refusal(resident, cwd, library)
     off_host = f"{resident.id}: board — {refusal}" if refusal else None
+    blocking = [complaint for complaint in complaints if complaint != off_host]
+    output.record(
+        "board",
+        "error" if blocking else "warning",
+        {
+            "claimant": True,
+            "problems": blocking,
+            "workdir_ready": refusal is None,
+            "workdir_problem": refusal,
+        },
+        resident.id,
+    )
     problems = 0
     for complaint in complaints:
         if complaint == off_host:
-            click.secho(f"{complaint} (a directory it has on its own host?)", fg="yellow", err=True)
+            output.secho(
+                f"{complaint} (a directory it has on its own host?)", fg="yellow", err=True
+            )
             continue
         # Red, and counted — see the docstring for which of these doctor can actually reach
         # and which the caller above already decided the exit code on.
-        click.secho(complaint, fg="red", err=True)
+        output.secho(complaint, fg="red", err=True)
         problems += 1
     return problems
 
 
-def _report_budget(status: BudgetStatus) -> int:
+def _report_budget(status: BudgetStatus, output: _DoctorOutput) -> int:
     """Print what this resident has spent today. A pause is a problem worth exiting on."""
+    output.record("budget", "error" if status.paused else "ok", status.to_dict(), status.resident)
     if status.paused:
-        click.secho(f"{status.resident}: budget — {status.summary()}", fg="red", err=True)
+        output.secho(f"{status.resident}: budget — {status.summary()}", fg="red", err=True)
         return 1
     colour = "green" if status.declared else "bright_black"
-    click.secho(f"{status.resident}: budget {status.summary()}", fg=colour)
+    output.secho(f"{status.resident}: budget {status.summary()}", fg=colour)
     return 0
 
 
-def _report_inbox(resident: Resident, store: Store) -> int:
+def _report_inbox(resident: Resident, store: Store, output: _DoctorOutput) -> int:
     """Print how much post is waiting and whether a door is open to take it.
 
     Read from the *raw* declared routes rather than ``delegation_routes``, because the
@@ -952,23 +1153,36 @@ def _report_inbox(resident: Resident, store: Store) -> int:
     """
     routes = resident.inbound_routes
     if not routes:
-        click.secho(f"{resident.id}: inbox — takes no letters", fg="bright_black")
+        output.record(
+            "inbox", "info", {"pending": None, "accepting": [], "routes": []}, resident.id
+        )
+        output.secho(f"{resident.id}: inbox — takes no letters", fg="bright_black")
         return 0
     pending = store.inbox_count(resident.id)
     accepting = [route.id for route in routes if route.accepts_delegation]
+    output.record(
+        "inbox",
+        "ok" if accepting else ("error" if pending else "warning"),
+        {
+            "pending": pending,
+            "accepting": accepting,
+            "routes": [{"id": route.id, "status": route.status} for route in routes],
+        },
+        resident.id,
+    )
     if accepting:
-        click.secho(f"{resident.id}: inbox {pending} open via {', '.join(accepting)}", fg="green")
+        output.secho(f"{resident.id}: inbox {pending} open via {', '.join(accepting)}", fg="green")
         return 0
     shut = ", ".join(f"{route.id} ({route.status})" for route in routes)
     if pending:
-        click.secho(
+        output.secho(
             f"{resident.id}: inbox — {pending} open letter(s) behind a closed route: {shut}; "
             "nothing will pick them up",
             fg="red",
             err=True,
         )
         return 1
-    click.secho(f"{resident.id}: inbox 0 open — route closed: {shut}", fg="yellow")
+    output.secho(f"{resident.id}: inbox 0 open — route closed: {shut}", fg="yellow")
     return 0
 
 
@@ -994,7 +1208,7 @@ def _print_topology(report: Survey, *, alarm: str, ok_lines: bool = True) -> Non
         click.secho(note.text, fg="green" if note.ok else alarm, err=not note.ok)
 
 
-def _report_topology(residents: Sequence[Resident]) -> int:
+def _report_topology(residents: Sequence[Resident], output: _DoctorOutput) -> int:
     """Say whether the docker this host reaches holds the containers manifests name (#59).
 
     Never a problem worth exiting on — :func:`_print_topology` has the reason. What *is*
@@ -1005,17 +1219,28 @@ def _report_topology(residents: Sequence[Resident]) -> int:
     """
     assigned = residents_on_this_burrow(residents)
     assigned_ids = ", ".join(resident.id for resident in assigned) or "none"
-    click.secho(f"burrow {this_burrow()} fires: {assigned_ids}", fg="green")
+    output.secho(f"burrow {this_burrow()} fires: {assigned_ids}", fg="green")
     elsewhere = ", ".join(
         resident.id for resident in residents if not resident.retired and resident not in assigned
     )
     if elsewhere:
-        click.secho(f"other burrows fire: {elsewhere}", fg="bright_black")
-    _print_topology(survey(residents), alarm="yellow")
+        output.secho(f"other burrows fire: {elsewhere}", fg="bright_black")
+    topology = survey(residents)
+    output.record(
+        "topology",
+        "warning" if topology.unreachable else "ok",
+        {
+            **asdict(topology),
+            "assigned": [r.id for r in assigned],
+            "elsewhere": [r.id for r in residents if not r.retired and r not in assigned],
+        },
+    )
+    if not output.json_output:
+        _print_topology(topology, alarm="yellow")
     return 0
 
 
-def _report_session_claim(resident: Resident, store: Store) -> int:
+def _report_session_claim(resident: Resident, store: Store, output: _DoctorOutput) -> int:
     """Say who is running this resident right now, if anybody is (warren#111).
 
     Never a problem on its own — a resident with a session going is a resident doing its
@@ -1026,15 +1251,30 @@ def _report_session_claim(resident: Resident, store: Store) -> int:
     hand. Saying "reclaimable" is the whole point of printing the stale case at all.
     """
     claim = store.resident_claim(resident.id)
+    details: dict[str, Any] = {"live": False, "stale": False, "holder": None}
+    if claim is not None:
+        live = claim.live_at(stale_before())
+        details = {
+            "live": live,
+            "stale": claim.released_at is None and not live,
+            "holder": claim.holder,
+            "kind": claim.kind,
+            "ref": claim.ref,
+            "run_id": claim.run_id,
+            "claimed_at": claim.claimed_at,
+            "heartbeat_at": claim.heartbeat_at,
+            "released_at": claim.released_at,
+        }
+    output.record("session", "warning" if details["stale"] else "info", details, resident.id)
     if claim is None:
         return 0
     if claim.released_at is not None:
-        click.secho(f"{resident.id}: no session running", fg="bright_black")
+        output.secho(f"{resident.id}: no session running", fg="bright_black")
         return 0
-    if claim.live_at(stale_before()):
-        click.secho(f"{resident.id}: running — {claim.describe()}", fg="green")
+    if details["live"]:
+        output.secho(f"{resident.id}: running — {claim.describe()}", fg="green")
         return 0
-    click.secho(
+    output.secho(
         f"{resident.id}: a stale session claim is on file — {claim.describe()}; its holder "
         "stopped reporting in, so the next fire reclaims it",
         fg="yellow",
@@ -1042,16 +1282,17 @@ def _report_session_claim(resident: Resident, store: Store) -> int:
     return 0
 
 
-def _report_watchdog(last: dict[str, Any] | None) -> int:
+def _report_watchdog(last: dict[str, Any] | None, output: _DoctorOutput) -> int:
     """Say when the watchdog last swept, or that nothing is watching. Never a guess."""
+    output.record("watchdog", "warning" if last is None else "ok", last or {"last_pass_at": None})
     if last is None:
-        click.secho(
+        output.secho(
             "watchdog: has never made a pass — nothing is noticing a stuck run or a dead "
             "container; run `steward watchdog run`",
             fg="yellow",
         )
         return 0
-    click.secho(
+    output.secho(
         f"watchdog: last pass {last['last_pass_at']} "
         f"({last['passes']} pass(es), {last['interventions']} intervention(s))",
         fg="green",
@@ -1059,11 +1300,16 @@ def _report_watchdog(last: dict[str, Any] | None) -> int:
     return 0
 
 
-def _report_health_failures(failures: HealthFailure | None) -> int:
+def _report_health_failures(failures: HealthFailure | None, output: _DoctorOutput) -> int:
     """Name durable accounting/enforcement failures; either makes budgets unhealthy."""
+    output.record(
+        "budget_health",
+        "error" if failures else "ok",
+        asdict(failures) if failures else {"count": 0},
+    )
     if failures is None:
         return 0
-    click.secho(
+    output.secho(
         f"budget health: {failures.count} durable failure(s); latest {failures.kind} for "
         f"{failures.resident} run {failures.run_id} at {failures.failed_at}: {failures.error}",
         fg="red",
@@ -1072,7 +1318,7 @@ def _report_health_failures(failures: HealthFailure | None) -> int:
     return 1
 
 
-def _report_scheduler(state: SchedulerState) -> int:
+def _report_scheduler(state: SchedulerState, output: _DoctorOutput) -> int:
     """Say when a scheduler last woke up, so the next-fire list below can be read.
 
     Never a problem worth exiting on: doctor is routinely run on a laptop while the daemon
@@ -1081,21 +1327,22 @@ def _report_scheduler(state: SchedulerState) -> int:
     only line that says whether anything is around to keep it.
     """
     liveness = scheduler_liveness(state)
+    output.record("scheduler", "ok" if liveness["alive"] else "warning", liveness)
     if liveness["alive"] is None:
-        click.secho(
+        output.secho(
             f"scheduler: has never ticked {state.path} — nothing has ever fired from this "
             "state file; run `steward scheduler run`",
             fg="yellow",
         )
         return 0
     if not liveness["alive"]:
-        click.secho(
+        output.secho(
             f"scheduler: last tick {liveness['last_tick']} — older than "
             f"{liveness['stale_after_s']:.0f}s, so nothing is firing the routines below",
             fg="yellow",
         )
         return 0
-    click.secho(f"scheduler: last tick {liveness['last_tick']} — up", fg="green")
+    output.secho(f"scheduler: last tick {liveness['last_tick']} — up", fg="green")
     return 0
 
 
