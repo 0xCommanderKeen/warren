@@ -348,6 +348,8 @@ def _charge_note(rehearsal: Rehearsal) -> str:
     if rehearsal.charged_to:
         return f"was charged to {rehearsal.charged_to}'s budget line"
     return "was charged to no resident's budget line, because a human asked for it"
+
+
 #: What a declaration edit that no decision authorises is answered with. One error slug
 #: for every way an approval can fail to cover a write — unknown, somebody else's, still
 #: pending, denied, expired, spent, or simply about a different edit — because the caller's
