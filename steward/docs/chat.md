@@ -427,9 +427,12 @@ starts answering.
 ### Discord channel mentions
 
 A Discord chat route may add `listens_in: [household, projects]`, up to ten channel names.
-Steward resolves those names against `STEWARD_CHAT_DISCORD_GUILD` once when the daemon starts,
-reports unknown names in `steward chat list`, and polls each channel once per pass. Empty or
-absent keeps the existing DM-only behavior.
+Steward resolves those names against `STEWARD_CHAT_DISCORD_GUILD` at startup and on reload,
+reports unknown names in `steward chat list`, and polls each channel once per pass. Reload
+replaces each bot's listening set with the union of its routes' current rooms. Removed rooms
+cannot start sessions or receive replies through that route, even if another route still
+listens there. Empty or absent keeps the existing DM-only behavior. Failed discovery closes
+channel listening until a later reload resolves the names successfully.
 
 Each channel cursor starts at its newest message, so a restart never answers history. Steward
 ignores ordinary channel talk and reacts only when Discord's message payload says the bot's
