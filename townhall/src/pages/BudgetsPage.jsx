@@ -159,7 +159,7 @@ function SpendPanel({ budget }) {
   );
 }
 
-function CapsForm({ id, declaration, onWritten }) {
+function CapsForm({ id, declaration, onWritten, refreshing }) {
   const { client } = useSteward();
   const [draft, setDraft] = useState(declaration.manifest);
   const {
@@ -193,6 +193,7 @@ function CapsForm({ id, declaration, onWritten }) {
 
   async function save(event) {
     event.preventDefault();
+    if (refreshing) return;
     const answer = await write(draft);
     if (!answer) return;
     onWritten?.();
@@ -215,6 +216,7 @@ function CapsForm({ id, declaration, onWritten }) {
             problems={diagnosticsFor(diagnostics, field.path)}
           >
             <Input
+              disabled={refreshing}
               inputMode="decimal"
               placeholder="unlimited"
               value={scalarValue(getIn(draft, field.path))}
@@ -255,7 +257,7 @@ function CapsForm({ id, declaration, onWritten }) {
       ) : null}
 
       <Actions>
-        <Button tone="primary" type="submit" disabled={saving || !dirty}>
+        <Button tone="primary" type="submit" disabled={saving || refreshing || !dirty}>
           {saving ? "asking steward…" : dirty ? "Write caps" : "Nothing changed"}
         </Button>
         <Link to={routeTo.budgets()} className={buttonClass("ghost")}>
@@ -272,21 +274,40 @@ function ResidentBudget({ id }) {
   const budget = useStewardQuery((signal) => client.readBudget(id, { signal }), [id]);
   const declaration = useStewardQuery((signal) => client.readDeclaration(id, { signal }), [id]);
 
-  if (budget.loading || declaration.loading) return <Loading>reading the ledger…</Loading>;
-  if (budget.error) return <Problem error={budget.error} />;
-  if (declaration.error) return <Problem error={declaration.error} />;
-  if (!budget.data || !declaration.data) return null;
+  if ((!budget.data || !declaration.data) && (budget.loading || declaration.loading)) {
+    return <Loading>reading the ledger…</Loading>;
+  }
+  if (!budget.data || !declaration.data) {
+    if (budget.error) return <Problem error={budget.error} />;
+    if (declaration.error) return <Problem error={declaration.error} />;
+    return null;
+  }
+
+  // Same-resident revalidation keeps the form and its write evidence mounted. The
+  // keyed resident boundary below gives navigation fresh queries and a fresh receipt.
+  const refreshing = budget.loading || declaration.loading;
+  const refreshError = budget.error || declaration.error;
+  const refresh = () => {
+    declaration.refresh();
+    budget.refresh();
+  };
 
   return (
     <div className="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(340px,1fr))] items-start">
       <div>
+        {refreshing ? <Note>Refreshing caps and spend…</Note> : null}
+        {refreshError ? (
+          <>
+            <Problem error={refreshError} />
+            <Note>Showing the last loaded caps and spend. Refresh before writing again.</Note>
+            <Button disabled={refreshing} onClick={refresh}>Retry refresh</Button>
+          </>
+        ) : null}
         <CapsForm
           id={id}
           declaration={declaration.data}
-          onWritten={() => {
-            declaration.refresh();
-            budget.refresh();
-          }}
+          refreshing={refreshing || Boolean(refreshError)}
+          onWritten={refresh}
         />
       </div>
       <SpendPanel budget={budget.data} />
@@ -323,7 +344,7 @@ export default function BudgetsPage({ params }) {
         )}
       </PageHead>
 
-      {locked ? <Gate what="Budgets" /> : id ? <ResidentBudget id={id} /> : (
+      {locked ? <Gate what="Budgets" /> : id ? <ResidentBudget key={id} id={id} /> : (
         <>
           <BudgetList />
           <Section>Where these numbers come from</Section>

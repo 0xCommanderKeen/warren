@@ -61,7 +61,8 @@ which of the two this tab is carrying.
 - **Board** — the job board, and the form that posts to it.
 - **Skills** — the library, and the editor for adding and replacing one.
 - **Budgets** — daily caps per resident, with the spend steward has actually recorded
-  against them.
+  against them. A cap save keeps its receipt and commit visible while both reads refresh;
+  failed refreshes retain that evidence and require a successful retry before another write.
 - **Diagnostics** — the snapshot's bounded `diagnostics` array, grouped by kind: what the
   projection could not fold cleanly, and every knock at a resident's chat bot that nobody
   answered. The second page that needs no credential.
