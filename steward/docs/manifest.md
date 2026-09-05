@@ -1185,6 +1185,11 @@ filesystem boundary. This trades Docker's outer AppArmor confinement for the nes
 sandbox; review these explicit settings in the provision plan. No host sysctl or global
 security policy is changed. Existing containers must be reprovisioned to receive them.
 The profile's source and Apache-2.0 license are retained under `src/steward/templates/`.
+The host must also permit unprivileged user namespaces and UID mapping. Hardened hosts
+(such as Ubuntu 24.04 with AppArmor user-namespace restrictions) can still reject this
+configuration; Steward does not relax host policy automatically. The image CI job uses
+Ubuntu 22.04, and the full probe was also verified on dxp2800. See
+[Ubuntu's namespace restrictions](https://documentation.ubuntu.com/security/security-features/privilege-restriction/apparmor/).
 
 A Codex container gets its own `./codex:/root/.codex` bind mount and
 `CODEX_HOME=/root/.codex`. The provisioning plan lists `codex/.keep` and `codex-seccomp.json`; the entrypoint makes
@@ -1192,7 +1197,16 @@ the directory private (0700) and preserves its contents. Reprovisioning and imag
 retain login credentials. The bundle never contains credentials or a generated user config.
 Extra mounts cannot mask this managed directory.
 
-After reviewing the actual provision plan and creating the container, an operator can log in:
+After reviewing the actual provision plan and creating the container, first check the
+sandbox on that host without starting a model session (Docker uses the configured memory
+working directory):
+
+```sh
+docker exec steward-karen codex sandbox -c 'sandbox_mode="workspace-write"' -c sandbox_workspace_write.network_access=true -- true
+```
+
+Resolve any namespace or UID-mapping refusal before login and the paid session. An operator
+can then log in:
 
 ```sh
 docker exec -it steward-karen codex login --device-auth

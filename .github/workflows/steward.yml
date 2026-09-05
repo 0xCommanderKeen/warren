@@ -115,7 +115,10 @@ jobs:
     if: >-
       github.event_name == 'push'
       || needs.check.outputs.image-inputs-changed == 'true'
-    runs-on: ubuntu-latest
+    # Match the NAS's support for unprivileged nested user namespaces. Ubuntu 24.04's
+    # host AppArmor mediation can deny uid_map even for an unconfined Docker profile.
+    # Ubuntu 22.04 runs the probe without changing any host security settings.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
 
