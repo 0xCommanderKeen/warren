@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -21,6 +21,7 @@ from steward import budgets as bg
 from steward import events as ev
 from steward import watchdog as w
 from steward.manifest import Resident, load_manifest
+from steward.run_lifecycle import RunTransitions
 from steward.runners import run_argv
 from steward.scheduler import SchedulerState, TreeSource
 from steward.store import Store
@@ -643,9 +644,36 @@ def test_an_active_post_run_tail_keeps_ownership_and_cannot_be_buried(
 
 
 def test_session_close_wins_after_scan_before_watchdog_transition(
-    resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
+    resident: Resident, sink: ev.NullEmitter, tmp_path: Path
 ) -> None:
     """A stale snapshot grants no authority; the conditional terminal transition decides."""
+
+    class SessionWinsAtTransition(Store):
+        def claim_run_terminal(  # noqa: PLR0913
+            self,
+            run_id: str,
+            *,
+            event: str,
+            event_id: str,
+            owner_token: str | None = None,
+            stale_before: str | None = None,
+            now: str | None = None,
+        ) -> bool:
+            if stale_before is not None:
+                terminal = ev.RunContext(
+                    resident.agent_id, resident.project, "daily-summary", run_id
+                ).finished(outcome="success", artifacts=(), duration_s=1)
+                assert RunTransitions(self).session_claim(run_id, terminal, owner_token="", now=NOW)
+            return super().claim_run_terminal(
+                run_id,
+                event=event,
+                event_id=event_id,
+                owner_token=owner_token,
+                stale_before=stale_before,
+                now=now,
+            )
+
+    store = SessionWinsAtTransition(":memory:")
     log = write_log(tmp_path / "events.jsonl")
     store.open_run(
         run_id="finishing",
@@ -660,15 +688,14 @@ def test_session_close_wins_after_scan_before_watchdog_transition(
     )
     dog = build(resident, store, sink, tmp_path, fallback=log)
 
-    class SessionWinsAtTransition:
-        def watchdog_close(self, run_id: str, **_kwargs: object) -> bool:
-            assert store.close_run(run_id, now=ev.utc_now_iso(NOW))
-            return False
-
-    dog.runs = cast("Any", SessionWinsAtTransition())
-
-    assert dog.bury_stale_runs(NOW) == []
-    assert [event for event in sink.events if event.type == ev.ROUTINE_FAILED] == []
+    try:
+        assert dog.bury_stale_runs(NOW) == []
+        # The next pass must publish the actual session winner, never the stale failure.
+        assert dog.runs.publish_pending(sink, now=NOW) == ["finishing"]
+        assert [event.type for event in sink.events] == [ev.ROUTINE_FINISHED]
+        assert store.open_runs() == []
+    finally:
+        store.close()
 
 
 def test_concurrent_watchdogs_publish_exactly_one_terminal_event(

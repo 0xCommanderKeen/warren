@@ -1114,7 +1114,7 @@ class Watchdog:
 
     # -- burying runs that vanished ----------------------------------------------------
 
-    def bury_stale_runs(self, now: datetime) -> list[StaleRun]:  # noqa: C901
+    def bury_stale_runs(self, now: datetime) -> list[StaleRun]:
         """Close every unbracketed run with the ``routine_failed`` its session never sent.
 
         The store's primary key on ``run_id`` is what makes this exactly-once: a run that
@@ -1144,8 +1144,7 @@ class Watchdog:
             log.warning("refusing to bury runs without trustworthy close evidence: %s", exc)
             return []
         buried: list[StaleRun] = []
-        if hasattr(self.runs, "publish_pending"):
-            self.runs.publish_pending(self.emitter, now=now)
+        self.runs.publish_pending(self.emitter, now=now)
         for run in stale:
             # A task death belongs to the lease sweep. If that sweep has not produced a
             # run-specific terminal fact, leave the run pending; a generic routine death
@@ -1162,13 +1161,9 @@ class Watchdog:
                 run_id=run.run_id,
                 error=NEVER_REPORTED_BACK,
             )
-            if run.registered and hasattr(self.runs, "watchdog_claim"):
+            if run.registered:
                 registry_lost = not self.runs.watchdog_claim(
                     run.run_id, terminal, now=now, grace_s=self.grace_s
-                )
-            elif run.registered:
-                registry_lost = not self.runs.watchdog_close(
-                    run.run_id, now=now, grace_s=self.grace_s
                 )
             else:
                 registry_lost = False

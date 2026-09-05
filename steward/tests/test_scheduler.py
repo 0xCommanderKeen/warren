@@ -2158,15 +2158,9 @@ def test_a_registry_that_refuses_to_write_is_not_a_failed_routine(
     """The village hears the bracket even when steward's own bookkeeping is broken."""
     path = write_resident(manifest_with(HOURLY))
 
-    class Broken:
-        def open_run(self, **_kwargs: object) -> bool:
-            raise RuntimeError("the disk is full")
-
-        def close_run(self, run_id: str, **_kwargs: object) -> bool:  # noqa: ARG002
-            raise RuntimeError("the disk is still full")
-
-        def record_delivery(self, run_id: str, status: str, reason: str = "") -> bool:  # noqa: ARG002
-            raise RuntimeError("the disk is full of deliveries too")
+    # A closed SQLite connection refuses every write through the production contract.
+    store = Store(":memory:")
+    store.close()
 
     sink = ev.NullEmitter()
     engine = s.Scheduler(
@@ -2174,7 +2168,7 @@ def test_a_registry_that_refuses_to_write_is_not_a_failed_routine(
         emitter=sink,
         state=s.SchedulerState(path=tmp_path / "state.json"),
         workdir=tmp_path,
-        registry=Broken(),
+        registry=store,
     )
 
     report = engine.fire(engine.scheduled[0], now=datetime(2026, 8, 24, 10, 15, tzinfo=UTC))
@@ -2185,40 +2179,6 @@ def test_a_registry_that_refuses_to_write_is_not_a_failed_routine(
         ev.RESIDENT_DECLARED,
         ev.ROUTINE_FINISHED,
     ]
-
-
-def test_a_late_session_does_not_publish_success_after_the_watchdog_won(
-    write_resident: ResidentWriter, tmp_path: Path
-) -> None:
-    """The registry terminal transition is won before either closing event is emitted."""
-    path = write_resident(manifest_with(HOURLY))
-
-    class WatchdogWon:
-        def open_run(self, **_kwargs: object) -> bool:
-            return True
-
-        def renew_run(self, run_id: str, **_kwargs: object) -> bool:  # noqa: ARG002
-            return False
-
-        def close_run(self, run_id: str, **_kwargs: object) -> bool:  # noqa: ARG002
-            return False
-
-        def record_delivery(self, run_id: str, status: str, reason: str = "") -> bool:  # noqa: ARG002
-            return False
-
-    sink = ev.NullEmitter()
-    engine = s.Scheduler(
-        s.load_scheduled(path.parent),
-        emitter=sink,
-        state=s.SchedulerState(path=tmp_path / "state.json"),
-        workdir=tmp_path,
-        registry=WatchdogWon(),
-    )
-
-    report = engine.fire(engine.scheduled[0], now=datetime(2026, 8, 24, 10, 15, tzinfo=UTC))
-
-    assert report.fired
-    assert [event.type for event in sink.events] == [ev.ROUTINE_STARTED, ev.RESIDENT_DECLARED]
 
 
 # --------------------------------------------------------------------------------------

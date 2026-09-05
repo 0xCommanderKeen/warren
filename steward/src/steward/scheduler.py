@@ -71,7 +71,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol, cast, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 from zoneinfo import ZoneInfo
 
 from croniter import croniter
@@ -209,7 +209,7 @@ class WakeHooks(Protocol):
         ...
 
 
-class RunRegistry(Protocol):
+class RunRegistry(RunStore, Protocol):
     """Where steward writes down that a session is open, and that it closed.
 
     A structural protocol for the third time, and for a duller reason than its
@@ -241,10 +241,6 @@ class RunRegistry(Protocol):
         now: str | None = None,
     ) -> bool:
         """Record that a session has started, and return whether this call opened it."""
-        ...
-
-    def close_run(self, run_id: str, *, now: str | None = None) -> bool:
-        """Record that a session reported back, and return whether this call closed it."""
         ...
 
     def record_delivery(self, run_id: str, status: DeliveryStatus, reason: str = "") -> bool:
@@ -816,9 +812,7 @@ class Scheduler:
         # a steward with no database has no second process firing sessions either.
         self.claims = claims
         self.clock = clock or (lambda: datetime.now(UTC))
-        self.run_transitions = (
-            RunTransitions(cast("RunStore", registry)) if registry is not None else None
-        )
+        self.run_transitions = RunTransitions(registry) if registry is not None else None
         # One library for the fleet: improving a skill improves every resident holding
         # it. An unconfigured library means no skill is injected and none is written.
         self.library = library if library is not None else SkillLibrary()

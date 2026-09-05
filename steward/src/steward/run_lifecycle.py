@@ -13,9 +13,13 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Protocol
 
 from steward import events as ev
+from steward.runners import RunResult
+
+if TYPE_CHECKING:  # Store imports Scheduler, which uses this lifecycle seam.
+    from steward.store import JobRecord, OpenRun
 
 log = logging.getLogger("steward.run_lifecycle")
 RUN_HEARTBEAT_EVERY_S = 15.0
@@ -37,12 +41,29 @@ class RunStore(Protocol):
         """Renew an open run."""
         ...
 
-    def close_run(self, run_id: str, *, now: str | None = None) -> bool:
-        """Claim a normal terminal close."""
+    def renew_task_run(self, run_id: str, *, owner_token: str, now: str | None = None) -> bool:
+        """Atomically renew the run heartbeat and its exact task attempt lease."""
         ...
 
-    def close_stale_run(self, run_id: str, *, stale_before: str, now: str | None = None) -> bool:
-        """Claim a watchdog close for an expired lease."""
+    def finish_job_and_claim_run_terminal(  # noqa: PLR0913 - atomic task/run transition
+        self,
+        task_id: str,
+        *,
+        run_id: str,
+        event: str,
+        event_id: str,
+        status: str,
+        claimant: str,
+        outcome: str | None = None,
+        reason: str | None = None,
+        artifacts: Sequence[str] = (),
+        final_message: str = "",
+        lease: str | None = None,
+        owner_token: str | None = None,
+        stale_before: str | None = None,
+        now: str | None = None,
+    ) -> JobRecord | None:
+        """Finish the exact board claim and choose its terminal fact atomically."""
         ...
 
     def claim_run_terminal(  # noqa: PLR0913 - mirrors the durable store operation
@@ -58,7 +79,7 @@ class RunStore(Protocol):
         """Choose an immutable terminal event under one authority condition."""
         ...
 
-    def terminal_runs(self) -> Sequence[Any]:
+    def terminal_runs(self) -> Sequence[OpenRun]:
         """Return chosen terminal events awaiting finalization."""
         ...
 
@@ -95,11 +116,7 @@ class RunTransitions:
         def beat() -> None:
             while not stop.wait(self.heartbeat_every_s):
                 try:
-                    renew = (
-                        cast("Any", self.store).renew_task_run
-                        if task_attempt and hasattr(self.store, "renew_task_run")
-                        else self.store.renew_run
-                    )
+                    renew = self.store.renew_task_run if task_attempt else self.store.renew_run
                     if not renew(run_id, owner_token=owner_token):
                         return
                 except Exception as exc:  # noqa: BLE001
@@ -119,33 +136,28 @@ class RunTransitions:
         """Let the live owner durably choose its immutable terminal event."""
         event_id = f"run-terminal:{run_id}"
         event = _identified(event, event_id)
-        store = cast("Any", self.store)
-        if not hasattr(store, "claim_run_terminal"):
-            return self.store.close_run(run_id, now=ev.utc_now_iso(now))
-        return bool(
-            store.claim_run_terminal(
-                run_id,
-                event=event.to_json(),
-                event_id=event_id,
-                owner_token=owner_token,
-                now=ev.utc_now_iso(now),
-            )
+        return self.store.claim_run_terminal(
+            run_id,
+            event=event.to_json(),
+            event_id=event_id,
+            owner_token=owner_token,
+            now=ev.utc_now_iso(now),
         )
 
     def task_session_claim(  # noqa: PLR0913
         self,
-        job: Any,  # noqa: ANN401
+        job: JobRecord,
         event: ev.Event,
         *,
-        result: Any,  # noqa: ANN401
+        result: RunResult,
         claimant: str,
         owner_token: str,
         now: datetime,
-    ) -> Any | None:  # noqa: ANN401
+    ) -> JobRecord | None:
         """Atomically finish a board claim and choose the exact fact that reports it."""
         event_id = f"run-terminal:{event.payload['run_id']}"
         event = _identified(event, event_id)
-        return cast("Any", self.store).finish_job_and_claim_run_terminal(
+        return self.store.finish_job_and_claim_run_terminal(
             job.task_id,
             run_id=event.payload["run_id"],
             event=event.to_json(),
@@ -175,26 +187,15 @@ class RunTransitions:
             now=ev.utc_now_iso(now),
         )
 
-    def watchdog_close(self, run_id: str, *, now: datetime, grace_s: float) -> bool:
-        """Compatibility spelling for old test doubles; new callers choose an event."""
-        return self.store.close_stale_run(
-            run_id,
-            stale_before=ev.utc_now_iso(now - timedelta(seconds=grace_s)),
-            now=ev.utc_now_iso(now),
-        )
-
     def publish_pending(self, emitter: ev.Emitter, *, now: datetime) -> list[str]:
         """Replay every chosen fact and finalize it only after a durable sink accepts it."""
         published = []
-        store = cast("Any", self.store)
-        if not hasattr(store, "terminal_runs"):
-            return published
-        for run in store.terminal_runs():
+        for run in self.store.terminal_runs():
             if not run.terminal_event or not run.terminal_event_id:
                 continue
             event = _event_from_json(run.terminal_event)
             durable = getattr(emitter, "emit_durable", emitter.emit)(event)
-            if durable and store.mark_run_terminal_published(
+            if durable and self.store.mark_run_terminal_published(
                 run.run_id, run.terminal_event_id, now=ev.utc_now_iso(now)
             ):
                 published.append(run.run_id)
