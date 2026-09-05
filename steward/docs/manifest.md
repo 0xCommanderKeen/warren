@@ -1748,8 +1748,9 @@ skills/
   write-blog-post/SKILL.md
   vault-keeper/SKILL.md       # granted to the resident that keeps the Life vault
   morning-digest/SKILL.md
-  write-skill/SKILL.md        # the HR crafts: writing skills, drafting residents
-  raise-resident/SKILL.md
+  write-skill/SKILL.md        # the HR crafts: writing skills, drafting residents,
+  raise-resident/SKILL.md     # and granting one skill against an approval
+  grant-skill/SKILL.md
 ```
 
 ```markdown
