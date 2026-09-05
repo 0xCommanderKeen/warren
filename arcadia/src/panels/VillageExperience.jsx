@@ -313,6 +313,16 @@ export function VillageExperience({ snapshot, stewardClient, active = true }) {
   const [layoutRevision, setLayoutRevision] = useState(0);
   const [editingLayout, setEditingLayout] = useState(false);
   const world = useMemo(() => layout.current.update(snapshot), [snapshot, layoutRevision]);
+  const deskRoster = useMemo(() => {
+    const people = new Map(world.agents.map(agent => [agent.id, agent]));
+    // A declared resident keeps a desk even between sessions. Project-only
+    // manifest matches cannot identify an individual desk reservation.
+    for (const resident of snapshot.residents ?? []) {
+      const id = resident.match?.agent_id;
+      if (id && !people.has(id)) people.set(id, { id });
+    }
+    return [...people.values()];
+  }, [world.agents, snapshot.residents]);
   const changeLayout = (action) => {
     const result = action();
     if (result.ok && result.changed) setLayoutRevision(value => value + 1);
@@ -640,6 +650,7 @@ export function VillageExperience({ snapshot, stewardClient, active = true }) {
                   key={room.id}
                   building={room}
                   agents={roomAgents}
+                  villagers={deskRoster}
                   focusAgentId={follow ? selectedAgent?.id : taskFocusAgentId}
                   paused={paused}
                   quality={quality === "auto" ? adaptiveDetail : quality}
