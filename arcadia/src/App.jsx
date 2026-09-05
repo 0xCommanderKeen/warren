@@ -142,6 +142,8 @@ function VillageShell({ snapshot, stewardClient, connectionStatus }) {
   const heading = useRef(null);
   const villageHeading = useRef(null);
   const view = viewFromHash(hash);
+  const [visitedVillage, setVisitedVillage] = useState(view === "village");
+  useEffect(() => { if (view === "village") setVisitedVillage(true); }, [view]);
   const previousView = useRef(view);
   const approvals = pendingApprovals(snapshot.approvals);
   useEffect(() => {
@@ -219,7 +221,8 @@ function VillageShell({ snapshot, stewardClient, connectionStatus }) {
             </p>
           </div>
         </section>
-        {view === "village" ? <VillageExperience snapshot={snapshot} stewardClient={stewardClient} /> : <section className={`village-secondary-view ${view === "records" ? "records-page" : "requests-page"}`} aria-label={view === "records" ? "Village records" : "Village requests"} id={view === "records" ? "records" : "requests-view"}>
+        {(visitedVillage || view === "village") && <div className="village-scene-view" hidden={view !== "village"}><VillageExperience snapshot={snapshot} stewardClient={stewardClient} active={view === "village"} /></div>}
+        {view !== "village" && <section className={`village-secondary-view ${view === "records" ? "records-page" : "requests-page"}`} aria-label={view === "records" ? "Village records" : "Village requests"} id={view === "records" ? "records" : "requests-view"}>
           <header className="secondary-view-heading">
             <div><p className="eyebrow">{view === "records" ? "The village almanac" : "Waiting for your answer"}</p><h2 ref={heading} tabIndex={-1}>{view === "records" ? "Village records" : "Requests"}</h2><p>{view === "records" ? "Recorded work, routines, and resident declarations." : "Review pending requests and send an answer to Steward."}</p></div>
             <a className="back-to-village" href="#village">← Back to village</a>

@@ -542,7 +542,7 @@ describe("deliberate records and request views", () => {
     fireEvent.click(screen.getByRole("link", { name: "Village records", exact: true }));
     expect(window.location.hash).toBe("#records");
     expect(screen.getByRole("region", { name: "Notice board" })).toBeVisible();
-    expect(screen.queryByTestId("village-canvas")).not.toBeInTheDocument();
+    expect(screen.getByTestId("village-canvas")).not.toBeVisible();
     fireEvent.click(screen.getByRole("link", { name: /Back to village/ }));
     expect(window.location.hash).toBe("#village");
     expect(screen.getByTestId("village-canvas")).toBeVisible();
@@ -601,4 +601,18 @@ describe("deliberate records and request views", () => {
     } finally { Element.prototype.scrollIntoView = original; }
   });
 
+});
+
+
+it("preserves the directory filter but dismisses profiles when leaving the village", () => {
+  render(<App envelope={fixture} />);
+  fireEvent.change(screen.getByRole("searchbox", { name: "Find a villager" }), { target: { value: "Keeper" } });
+  fireEvent.click(document.querySelector(".ve-person"));
+  expect(screen.getByRole("dialog", { name: "Keeper" })).toBeVisible();
+  fireEvent.click(screen.getByRole("link", { name: "Village records", exact: true }));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("link", { name: /Back to village/ }));
+  expect(screen.getByRole("searchbox", { name: "Find a villager" })).toHaveValue("Keeper");
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "View Keeper’s profile ↗" })).toBeVisible();
 });

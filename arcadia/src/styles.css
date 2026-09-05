@@ -342,3 +342,5 @@ button:disabled {
 .requests-page .approval-knocks { margin-top:0; }
 .requests-empty { border:1px dashed #c7cbb8; border-radius:8px; padding:30px 20px; text-align:center; color:#7d866e; }
 @media(max-width:600px) { .secondary-view-heading { align-items:start; flex-direction:column; gap:16px; } .masthead nav { flex-wrap:wrap; row-gap:13px; } }
+
+.village-scene-view[hidden] { display: none; }

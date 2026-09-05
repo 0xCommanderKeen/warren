@@ -297,7 +297,7 @@ function AgentDetails({
   );
 }
 
-export function VillageExperience({ snapshot, stewardClient }) {
+export function VillageExperience({ snapshot, stewardClient, active = true }) {
   const layout = useRef(null);
   if (!layout.current) {
     let savedLayout = null;
@@ -332,6 +332,7 @@ export function VillageExperience({ snapshot, stewardClient }) {
   }, [world]);
   const [selection, setSelection] = useState(null);
   const [profileOpen, setProfileOpen] = useState(false);
+  useEffect(() => { if (!active) setProfileOpen(false); }, [active]);
   const [roomId, setRoomId] = useState(null);
   const [roomError, setRoomError] = useState(null);
   const [roomCameraCommand, setRoomCameraCommand] = useState(null);
@@ -355,7 +356,7 @@ export function VillageExperience({ snapshot, stewardClient }) {
   useEffect(() => {
     const enteredRoom = roomId && roomId !== previousScrollRoom.current;
     previousScrollRoom.current = roomId;
-    if (selection?.kind === "agent" || !selection || !globalThis.matchMedia?.("(max-width: 800px)").matches)
+    if (!active || selection?.kind === "agent" || !selection || !globalThis.matchMedia?.("(max-width: 800px)").matches)
       return;
     const target = enteredRoom ? roomRef.current : detailRef.current;
     target?.scrollIntoView?.({
@@ -365,7 +366,7 @@ export function VillageExperience({ snapshot, stewardClient }) {
         : "smooth",
       block: "nearest",
     });
-  }, [selection?.kind, selection?.id, roomId]);
+  }, [selection?.kind, selection?.id, roomId, active]);
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState("people");
   const [filter, setFilter] = useState("all");
@@ -501,7 +502,7 @@ export function VillageExperience({ snapshot, stewardClient }) {
     }
   }, [selection, selectedAgent, selectedBuilding]);
   useEffect(() => {
-    if (!follow || !selectedAgent) { setFollowDestination(null); return; }
+    if (!active || !follow || !selectedAgent) { setFollowDestination(null); return; }
     const nextRoom = selectedAgent.indoor ? selectedAgent.buildingId : null;
     if (roomId === nextRoom) { setFollowDestination(null); return; }
     const enter = () => { setRoomId(nextRoom); setRoomCameraCommand(null); setFollowDestination(null); };
@@ -509,7 +510,7 @@ export function VillageExperience({ snapshot, stewardClient }) {
     setFollowDestination(world.buildings.find(building => building.id === selectedAgent.buildingId)?.name || "The village");
     const timer = setTimeout(enter, 850);
     return () => clearTimeout(timer);
-  }, [follow, selectedAgent?.id, selectedAgent?.buildingId, selectedAgent?.indoor, roomId, paused]);
+  }, [active, follow, selectedAgent?.id, selectedAgent?.buildingId, selectedAgent?.indoor, roomId, paused]);
   const overview = () => {
     setRoomId(null);
     setRoomCameraCommand(null);
@@ -594,7 +595,7 @@ export function VillageExperience({ snapshot, stewardClient }) {
         {follow && selectedAgent && <span className="ve-following" role="status">Following {selectedAgent.name} <button onClick={() => setFollow(false)}>Stop following</button></span>}
       </nav>
       {followDestination && <p className="ve-follow-destination" role="status">Next view: {followDestination}</p>}
-      <VillageNavigator world={world} selection={selection} onSelect={select} onOverview={overview}
+      <VillageNavigator active={active} world={world} selection={selection} onSelect={select} onOverview={overview}
         mapHost={mapHost} camera={cameraView} roomId={roomId} visible={!room && cameraView.zoom > 1.4} />
       <div className="ve-main">
         <section
@@ -1011,7 +1012,7 @@ export function VillageExperience({ snapshot, stewardClient }) {
           {selectedAgent ? (
             <>
             <button className="ve-open-profile" onClick={() => setProfileOpen(true)}>View {selectedAgent.name}’s profile ↗</button>
-            {profileOpen && <AgentProfile onClose={() => setProfileOpen(false)}>
+            {active && profileOpen && <AgentProfile onClose={() => setProfileOpen(false)}>
             <AgentDetails
               detailRef={detailRef}
               agent={selectedAgent}
