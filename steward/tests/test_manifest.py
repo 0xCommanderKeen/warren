@@ -2309,3 +2309,53 @@ def test_extra_mounts_cannot_replace_codex_auth(write_resident, container: str) 
     data["deploy"] = {"mounts": [{"host": "/srv/other", "container": container, "mode": "rw"}]}
     result = m.validate_manifest(write_resident(data))
     assert "collides" in problem_for(result, "deploy.mounts[0].container")
+
+
+def test_bare_notification_on_explains_yaml_boolean_and_quoted_fix(
+    write_resident: ResidentWriter,
+) -> None:
+    path = write_resident()
+    with path.open("a") as stream:
+        stream.write("\nnotifications:\n  transport: ntfy\n  on: [needs_human]\n")
+    result = m.validate_manifest(path)
+    assert not result.ok
+    diagnostic = next(d for d in result.errors if d.field_path == "notifications")
+    assert "YAML" in diagnostic.problem
+    assert "boolean true" in diagnostic.problem
+    assert "'on'" in diagnostic.problem
+    assert '"on":' in diagnostic.problem
+    assert yaml.safe_load(diagnostic.example) == {
+        "notifications": {"transport": "ntfy", "on": ["needs_human"]}
+    }
+    path.write_text(path.read_text().replace("  on:", '  "on":'))
+    assert m.validate_manifest(path).ok
+
+
+@pytest.mark.parametrize(
+    ("key", "boolean"),
+    [
+        ("on", "true"),
+        ("yes", "true"),
+        ("true", "true"),
+        ("off", "false"),
+        ("no", "false"),
+        ("false", "false"),
+        ("ON", "true"),
+    ],
+)
+@pytest.mark.parametrize("container", ["", "notifications", "budgets"])
+def test_boolean_yaml_keys_explain_coercion_in_any_model(
+    write_resident: ResidentWriter,
+    key: str,
+    boolean: str,
+    container: str,
+) -> None:
+    path = write_resident()
+    with path.open("a") as stream:
+        stream.write(f"\n{container}:\n  {key}: []\n" if container else f"\n{key}: []\n")
+    result = m.validate_manifest(path)
+    assert not result.ok
+    diagnostic = next(d for d in result.errors if "YAML" in d.problem)
+    assert diagnostic.field_path == (container or "<root>")
+    assert f"boolean {boolean}" in diagnostic.problem
+    assert "Quote the intended key" in diagnostic.problem
