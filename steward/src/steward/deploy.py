@@ -110,6 +110,7 @@ __all__ = [
     "TransportError",
     "bundle_changes",
     "bundle_for",
+    "bundle_names",
     "compose_argv",
     "emitter_env",
     "memory_host_dir",
@@ -351,6 +352,7 @@ def render_compose(
             "CHRONICLE_TOKEN": "${CHRONICLE_TOKEN-}",
             "STEWARD_URL": "${STEWARD_URL:?steward writes this into .env at provision time}",
             "STEWARD_RESIDENT": resident.id,
+            **({"CODEX_HOME": "/root/.codex"} if resident.manifest.runner.kind == "codex" else {}),
             # The resident image runs as root (no USER: the vault and key mounts are
             # root-owned), and the claude CLI refuses `--permission-mode
             # bypassPermissions` for root — "cannot be used with root/sudo privileges" —
@@ -371,6 +373,7 @@ def render_compose(
         "volumes": [
             f"./memory:{memory_path}",
             "./claude:/root/.claude",
+            *(["./codex:/root/.codex"] if resident.manifest.runner.kind == "codex" else []),
             *(
                 f"{resolve_mount_host_path(mount.host, burrow_home)}:{mount.container}"
                 + (":ro" if mount.mode == "ro" else "")
@@ -469,8 +472,9 @@ def bundle_for(
 
     Everything the container needs and nothing it does not: the compose fragment, the
     ``.env`` steward writes from its own environment, the manifest and soul so the machine
-    carries the same declaration git does, and two empty directories for the volumes so
-    docker does not create them as root.
+    carries the same declaration git does, and empty directories for the managed volumes.
+    The entrypoint protects the Codex credential directory without seeding or replacing
+    its contents.
     """
     files: dict[str, bytes] = {
         COMPOSE_FILENAME: render_compose(resident, target, host_env).encode("utf-8"),
@@ -479,6 +483,8 @@ def bundle_for(
         "memory/.keep": b"",
         "claude/.keep": b"",
     }
+    if resident.manifest.runner.kind == "codex":
+        files["codex/.keep"] = b""
     soul_path = resident.directory / resident.manifest.soul.file
     if soul_path.is_file():
         files[SOUL_FILENAME] = soul_path.read_bytes()
@@ -496,6 +502,11 @@ BUNDLE_NAMES: tuple[str, ...] = (
     "memory/.keep",
     "claude/.keep",
 )
+
+
+def bundle_names(resident: Resident) -> tuple[str, ...]:
+    """List staged files, including the selected runner's persistent login directory."""
+    return BUNDLE_NAMES + (("codex/.keep",) if resident.manifest.runner.kind == "codex" else ())
 
 
 def bundle_changes(transport: Transport, files: Mapping[str, bytes], path: str) -> tuple[str, ...]:

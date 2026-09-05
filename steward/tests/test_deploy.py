@@ -27,6 +27,7 @@ from steward.deploy import (
     TransportError,
     bundle_changes,
     bundle_for,
+    bundle_names,
     compose_argv,
     emitter_env,
     memory_host_dir,
@@ -813,3 +814,15 @@ def test_memory_host_dir_resolves_tilde_against_the_burrow_home(write_resident) 
         "/home/Miha/notes/memory"
     )
     assert memory_host_dir(local, {}) == Path("~/notes/memory").expanduser()
+
+
+def test_codex_bundle_persists_only_its_own_auth_directory(write_resident) -> None:
+    one = resident(write_resident, runner={"kind": "codex"}, tools="unrestricted")
+    files = bundle_for(one, target_for(one.manifest), VILLAGE)
+    service = yaml.safe_load(files[COMPOSE_FILENAME])["services"][one.id]
+
+    assert "./codex:/root/.codex" in service["volumes"]
+    assert service["environment"]["CODEX_HOME"] == "/root/.codex"
+    assert files["codex/.keep"] == b""
+    assert set(bundle_names(one)) == set(files)
+    assert not any("auth.json" in name or "config.toml" in name for name in files)

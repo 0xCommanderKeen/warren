@@ -44,7 +44,8 @@ jobs:
 
       # Did this pull request touch anything the resident image is built from? The build
       # context is docker/resident/ and the Makefile supplies the pins and the platform;
-      # nothing else in the tree reaches the image. chronicle/hooks/** is deliberately
+      # The Codex runner and its runtime probe also trigger an image integration test.
+      # chronicle/hooks/** is deliberately
       # absent: the image COPYs the vendored emitter, not the source, and an emitter
       # change that is not re-vendored into docker/resident/ in the same PR fails the
       # byte comparison in Tests below — a re-vendored one trips this filter by itself.
@@ -58,6 +59,8 @@ jobs:
               - 'steward/docker/resident/**'
               - 'steward/Makefile'
               - '.github/workflows/steward.yml'
+              - 'steward/src/steward/runners.py'
+              - 'steward/tests/test_codex_runtime.py'
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -121,6 +124,14 @@ jobs:
       # Dockerfile's own `claude --version` check inside the npm layer.
       - name: Build the resident image
         run: make image
+
+      - name: Install uv for the Codex runtime probe
+        uses: astral-sh/setup-uv@v7
+
+      - name: Exercise Codex shell and API access without a real model
+        env:
+          CODEX_RUNTIME_IMAGE: steward-resident:latest
+        run: uv run --locked pytest tests/test_codex_runtime.py --no-cov
 
       # An image that cannot say what it was built from is an image nobody can debug.
       - name: Check the revision label
