@@ -17,8 +17,6 @@ from steward.deploy import (
     CHRONICLE_TOKEN_ENV,
     CHRONICLE_URL_ENV,
     COMPOSE_FILENAME,
-    DEFAULT_HOST,
-    DEFAULT_USER,
     ENV_FILENAME,
     STEWARD_URL_ENV,
     BurrowTransport,
@@ -58,8 +56,8 @@ def test_a_manifest_with_no_deploy_block_still_has_an_address(write_resident) ->
     """The dxp2800 layout is a documented default, not an assumption nobody wrote down."""
     target = target_for(resident(write_resident).manifest)
 
-    assert target.host == DEFAULT_HOST
-    assert target.user == DEFAULT_USER
+    assert target.host == "dxp2800"
+    assert target.user == "Miha"
     assert target.container == "steward-test-agent"
     assert target.path == "~/docker/warren/residents/test-agent"
     assert target.image == "steward-resident:latest"
@@ -543,7 +541,7 @@ def test_a_host_steward_never_reached_is_not_an_empty_one(command: Unreachable, 
     with pytest.raises(TransportError) as raised:
         SshTransport(command=command).read("~/docker/x/compose.yaml")
 
-    assert f"{DEFAULT_USER}@{DEFAULT_HOST}" in str(raised.value), why
+    assert "Miha@dxp2800" in str(raised.value), why
 
 
 class Filesystem:
@@ -650,7 +648,7 @@ def test_a_resident_of_this_burrow_is_provisioned_here_not_over_ssh(write_reside
     """
     here = target_for(resident(write_resident).manifest)
     elsewhere = target_for(resident(write_resident, deploy={"host": "other-nas"}).manifest)
-    burrow = {BURROW_ENV: DEFAULT_HOST, BURROW_HOME_ENV: "/home/Miha"}
+    burrow = {BURROW_ENV: "dxp2800", BURROW_HOME_ENV: "/home/Miha"}
 
     local = transport_for(here, burrow)
     assert isinstance(local, BurrowTransport)
@@ -662,9 +660,9 @@ def test_a_resident_of_this_burrow_is_provisioned_here_not_over_ssh(write_reside
 
 def test_the_burrow_transport_defaults_home_to_the_deploy_user(write_resident) -> None:
     target = target_for(resident(write_resident).manifest)
-    built = transport_for(target, {BURROW_ENV: DEFAULT_HOST})
+    built = transport_for(target, {BURROW_ENV: "dxp2800"})
     assert isinstance(built, BurrowTransport)
-    assert built.home == f"/home/{DEFAULT_USER}"
+    assert built.home == "/home/Miha"
 
 
 # ------------------------------------------------------------------ the burrow transport

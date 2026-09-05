@@ -525,8 +525,9 @@ scheduler on every tick, so "registered" means the manifest is valid, the runner
 exists, the journal location is writable, every granted skill resolves — the same
 `steward doctor` check — and here is when each routine next fires.
 
-Where a resident lands is a manifest question with documented defaults (`dxp2800`, `Miha`,
-`~/docker/warren/residents/<id>`, `steward-resident:latest`); override any of them in
+Where a resident lands is explicit: manifest host/user override `STEWARD_DEPLOY_HOST` and
+`STEWARD_DEPLOY_USER`. This NAS compose configuration supplies `dxp2800` and `Miha`.
+Paths and images retain their documented defaults; override them in
 [`deploy`](docs/manifest.md#deploy--where-this-resident-runs).
 
 **What a resident's container actually is.** `steward-resident` is built from

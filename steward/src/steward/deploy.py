@@ -34,14 +34,11 @@ drive one implementation of provisioning.
 tree. So :class:`SshTransport` holds a :data:`steward.runners.PipedRun` and calls it, and
 nothing in this module ever launches anything itself.
 
-## The defaults are the dxp2800 layout, written down
+## Explicit placement
 
-A manifest that declares no ``deploy`` block still deploys, to the place everything else
-in this fleet is: host ``dxp2800``, user ``Miha``, compose directory
-``~/docker/warren/residents/<id>``, image ``steward-resident:latest``. Those are defaults, not
-assumptions — every one of them is a field a manifest can override, and
-``steward new-resident --dry-run`` (or ``steward provision <id> --dry-run``, for a manifest
-somebody wrote by hand) prints the resolved values before anything moves.
+Host and SSH user come from resident deploy fields, then STEWARD_DEPLOY_HOST and
+STEWARD_DEPLOY_USER. Missing placement refuses rather than guessing a personal machine.
+Path, image and command retain their documented defaults. Dry runs print the resolved target.
 
 The image is this repo's own: ``docker/resident/Dockerfile``, built by ``make image``,
 carrying the ``claude`` CLI and a vendored copy of chronicle's hook emitter. Steward does not
@@ -64,11 +61,10 @@ from steward.deployment_rules import (
     BURROW_ENV,
     BURROW_HOME_ENV,
     DEFAULT_COMMAND,
-    DEFAULT_HOST,
     DEFAULT_IMAGE,
     DEFAULT_RESIDENTS_ROOT,
     DEFAULT_ROOT,
-    DEFAULT_USER,
+    DeploymentSettings,
     burrow_home_for,
     container_zone,
     memory_path_for,
@@ -95,11 +91,9 @@ __all__ = [
     "BURROW_HOME_ENV",
     "COMPOSE_FILENAME",
     "DEFAULT_COMMAND",
-    "DEFAULT_HOST",
     "DEFAULT_IMAGE",
     "DEFAULT_RESIDENTS_ROOT",
     "DEFAULT_ROOT",
-    "DEFAULT_USER",
     "ENV_FILENAME",
     "SSH_FAILURE_STATUS",
     "BurrowTransport",
@@ -223,14 +217,17 @@ class DeployTarget:
         }
 
 
-def target_for(manifest: ResidentManifest) -> DeployTarget:
-    """Resolve where a resident runs from its manifest, filling in the dxp2800 defaults."""
+def target_for(
+    manifest: ResidentManifest, settings: DeploymentSettings | None = None
+) -> DeployTarget:
+    """Resolve resident fields over a snapshot of configured installation defaults."""
+    defaults = settings if settings is not None else DeploymentSettings.from_env()
     deploy = manifest.deploy
     container = deploy.container or f"{CONTAINER_PREFIX}{manifest.id}"
     return DeployTarget(
         resident_id=manifest.id,
-        host=deploy.host or DEFAULT_HOST,
-        user=deploy.user or DEFAULT_USER,
+        host=defaults.resolve_host(deploy.host),
+        user=defaults.resolve_user(deploy.user),
         path=deploy.path or f"{DEFAULT_RESIDENTS_ROOT}/{manifest.id}",
         container=container,
         image=deploy.image or DEFAULT_IMAGE,
@@ -422,7 +419,7 @@ def emitter_env(source: Mapping[str, str]) -> dict[str, str]:
         raise TransportError(
             f"{CHRONICLE_URL_ENV} is unset in steward's environment, so the resident would "
             f"be deployed with nowhere to emit and would never appear in the village; "
-            f"export {CHRONICLE_URL_ENV}=http://{DEFAULT_HOST}:8737 and run this again"
+            f"set {CHRONICLE_URL_ENV} to this installation's Chronicle URL and run this again"
         )
     values = {CHRONICLE_URL_ENV: url}
     steward_url = (source.get(STEWARD_URL_ENV) or "").strip()
@@ -611,8 +608,8 @@ class SshTransport:
     as ``command`` so this class can be exercised against a fake without an ssh anywhere.
     """
 
-    host: str = DEFAULT_HOST
-    user: str = DEFAULT_USER
+    host: str = field(default_factory=lambda: DeploymentSettings.from_env().resolve_host())
+    user: str = field(default_factory=lambda: DeploymentSettings.from_env().resolve_user())
     ssh: str = "ssh"
     command: PipedRun = run_argv
     kind: str = "ssh"
@@ -778,7 +775,7 @@ class BurrowTransport:
     """
 
     burrow: str
-    user: str = DEFAULT_USER
+    user: str = field(default_factory=lambda: DeploymentSettings.from_env().resolve_user())
     home: str = ""
     command: PipedRun = run_argv
     kind: str = "burrow"

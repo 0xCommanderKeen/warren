@@ -80,6 +80,9 @@ x-steward-environment: &steward-environment
   # main: nothing lands there without a pull request, and a push to any other branch
   # deploys nothing, so a charter edit cannot loop into a rollout of the fleet it edited.
   STEWARD_PUSH_BRANCH: burrow/residents
+  # Installation defaults; library code has no personal host/user fallback.
+  STEWARD_DEPLOY_HOST: ${STEWARD_DEPLOY_HOST:-dxp2800}
+  STEWARD_DEPLOY_USER: ${STEWARD_DEPLOY_USER:-Miha}
   # The credential directory, at the path every container mounts it on below.
   STEWARD_SECRETS_DIR: /secrets
   # Bot tokens stay in the .env beside this compose file. Empty defaults let a fresh

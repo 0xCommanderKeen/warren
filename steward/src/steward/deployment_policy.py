@@ -2,7 +2,13 @@
 
 from pathlib import Path
 
-from steward.deployment_rules import ZoneDisagreementError, _path_provides, container_zone
+from steward.deployment_rules import (
+    DeploymentSettings,
+    DeploymentSettingsError,
+    ZoneDisagreementError,
+    _path_provides,
+    container_zone,
+)
 from steward.diagnostics import Diagnostic
 from steward.manifest_models import ResidentManifest
 from steward.manifest_policy import UNBOUNDABLE_RUNNER_KINDS
@@ -163,6 +169,24 @@ def _check_placement(manifest: ResidentManifest, source: Path) -> list[Diagnosti
                     "sessions run in; steward will not exec into a defaulted name"
                 ),
                 example="deploy: {container: steward-" + manifest.id + "}",
+            )
+        ]
+    return []
+
+
+def _check_deployment_settings(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
+    """Report missing placement before any target is rendered or provisioning begins."""
+    defaults = DeploymentSettings.from_env()
+    try:
+        defaults.resolve_host(manifest.deploy.host)
+        defaults.resolve_user(manifest.deploy.user)
+    except DeploymentSettingsError as exc:
+        return [
+            Diagnostic(
+                file=source,
+                field_path="deploy",
+                problem=str(exc),
+                example="configure STEWARD_DEPLOY_HOST and STEWARD_DEPLOY_USER",
             )
         ]
     return []

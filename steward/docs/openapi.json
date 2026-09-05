@@ -379,7 +379,7 @@
       },
       "Deploy": {
         "additionalProperties": false,
-        "description": "Where this resident runs: the address the nursery ships it to and the watchdog probes.\n\nEvery field is optional and every one has a documented default for the dxp2800 layout\n(see :mod:`steward.deploy`), so an ordinary resident declares nothing here and still\ndeploys. What the block is for is the resident that does *not* live where everything\nelse lives \u2014 a second NAS, a different compose root, a container someone named by hand\nbefore steward existed.\n\nAn absent ``deploy`` block is still what the watchdog calls **unsupervised**: the\ndefault container name is what the nursery *would* create, and a resident nobody has\nprovisioned has no container under that name to speak for.\n\nThe patterns on ``host``, ``user``, ``path`` and ``image`` are a safety boundary, not\na style guide \u2014 see :data:`HOST_PATTERN`.",
+        "description": "Where this resident runs: the address the nursery ships it to and the watchdog probes.\n\nExplicit host/user fields override STEWARD_DEPLOY_HOST and STEWARD_DEPLOY_USER.\nValidation requires those fields or installation settings; other fields retain their\ndocumented defaults (see :mod:`steward.deploy`). This block also selects a different\ncompose root or a container named before steward existed.\n\nAn absent ``deploy`` block is still what the watchdog calls **unsupervised**: the\ndefault container name is what the nursery *would* create, and a resident nobody has\nprovisioned has no container under that name to speak for.\n\nThe patterns on ``host``, ``user``, ``path`` and ``image`` are a safety boundary, not\na style guide \u2014 see :data:`HOST_PATTERN`.",
         "properties": {
           "command": {
             "description": "argv the container runs. Default: ['sleep', 'infinity'].",
@@ -412,7 +412,7 @@
                 "type": "null"
               }
             ],
-            "description": "Host the container runs on. Default: dxp2800.",
+            "description": "Host the container runs on. Falls back to STEWARD_DEPLOY_HOST.",
             "title": "Host"
           },
           "image": {
@@ -471,7 +471,7 @@
                 "type": "null"
               }
             ],
-            "description": "SSH user steward reaches that host as. Default: Miha.",
+            "description": "SSH user steward reaches that host as. Falls back to STEWARD_DEPLOY_USER.",
             "title": "User"
           }
         },

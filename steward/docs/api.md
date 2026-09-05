@@ -1526,3 +1526,19 @@ body, header or bearer value is persisted. The first failure is recorded immedia
 subsequent failures trigger at most one aggregate write per minute across the whole worker.
 Graceful shutdown flushes the last aggregate; abrupt termination can lose that last window.
 Existing request-history retention applies. A summary may contain failures from many sources.
+
+### Deployment configuration
+
+Before validating or declaring residents with omitted deploy host/user, set
+`STEWARD_DEPLOY_HOST` and `STEWARD_DEPLOY_USER` for that installation. Manifest fields
+win over these settings individually. Missing, blank or syntactically unsafe values
+produce a validation refusal before provisioning. No host or SSH user is inferred from
+the process's account or machine. Environment values are read when resolving settings,
+not frozen when the Python module imports. Embedded callers can pass a
+`DeploymentSettings` snapshot to `target_for` to keep installations independent.
+
+The NAS `deploy/compose.yaml` explicitly supplies `dxp2800` / `Miha` through its shared
+service environment (overridable via `.env`). The shipped Hob and Pip manifests already
+name that same host/user. For laptop CLI use against declarations omitting placement,
+export the intended installation settings first. The API bind address stays `127.0.0.1`;
+these are resident deployment settings, not listener configuration.
