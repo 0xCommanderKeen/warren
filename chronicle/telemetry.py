@@ -97,13 +97,7 @@ class TelemetryStore:
             records = previous.get("presence", {})
             for item in wire["presence"]:
                 identity = json.dumps([item["agent_id"], item["session_id"]])
-                prior = records.get(identity)
-                if prior and (
-                    prior["state"] == "ended" or item["sequence"] <= prior["sequence"]
-                ):
-                    continue
-                # Sequence and epoch belong to the runner session, not the sender process.
-                if prior and item["epoch"] != prior["epoch"]:
+                if not presence.admit(state, item, wire["health"]["producer"]):
                     continue
                 records[identity] = item
             records = dict(
@@ -138,6 +132,7 @@ class TelemetryStore:
                 if report["queue_depth"] >= 1024
                 or report["overflow"]
                 or report["presence_overflow"]
+                or state.get("presence_overflow", 0)
                 else "delayed"
                 if report["error"]
                 or (
@@ -149,6 +144,7 @@ class TelemetryStore:
             health.append(
                 dict(
                     report,
+                    presence_overflow=report["presence_overflow"] + state.get("presence_overflow", 0),
                     status=status,
                     expires_at=expires,
                     received_at=entry["received_at"],
@@ -213,6 +209,16 @@ class TelemetryStore:
                 event.get("telemetry_managed") for event in row["history"]
             ):
                 row["state"] = "stale"
+        # Even when its replaceable observation is evicted, retained terminal
+        # evidence fences historical events from making that session visible again.
+        latest_sessions = {}
+        for fence in state.get("sessions", {}).values():
+            agent = fence["agent_id"]
+            if fence["epoch"] >= latest_sessions.get(agent, {}).get("epoch", -1):
+                latest_sessions[agent] = fence
+        for agent, fence in latest_sessions.items():
+            if fence["state"] == "ended":
+                villagers.pop(agent, None)
         snapshot["villagers"] = list(villagers.values())[
             -snapshot["capacity"]["villagers"] :
         ]

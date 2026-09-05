@@ -19,6 +19,7 @@ except ImportError:
     import durable
 
 MAX_PRESENCE = 128
+MAX_SESSIONS = 4096
 PRESENCE_SECONDS = 60
 HEALTH_SECONDS = 30
 DELAY_SECONDS = 10
@@ -49,6 +50,36 @@ def transaction(path):
         durable.publish_staged(((durable.stage_json(path, state), path),))
 
 
+def session_key(agent, session, producer=""):
+    return hashlib.sha256(json.dumps([producer, agent, session]).encode()).hexdigest()
+
+
+def admit(state, observation, producer=""):
+    """Fence sessions independently of replaceable slots; reject when capacity is full.
+
+    Fences never expire or get evicted implicitly. A saturated store sacrifices
+    new presence, explicitly, rather than forgetting that a session has ended.
+    """
+    sessions = state.setdefault("sessions", {})
+    key = session_key(observation["agent_id"], observation["session_id"], producer)
+    prior = sessions.get(key)
+    if prior and (
+        prior["state"] == "ended"
+        or observation["epoch"] != prior["epoch"]
+        or observation["sequence"] <= prior["sequence"]
+        or observation["observed_at"] < prior["observed_at"]
+    ):
+        return False
+    if prior is None and len(sessions) >= MAX_SESSIONS:
+        state["presence_overflow"] = state.get("presence_overflow", 0) + 1
+        return False
+    sessions[key] = {
+        name: observation[name]
+        for name in ("agent_id", "state", "epoch", "sequence", "observed_at")
+    }
+    return True
+
+
 def observe(path, event, session_id):
     kind = event["type"]
     if kind not in ACTIVE and kind not in STATES:
@@ -61,7 +92,9 @@ def observe(path, event, session_id):
         session_id = hashlib.sha256(session_id.encode()).hexdigest()
         records = state.setdefault("presence", {})
         key = json.dumps([event["agent_id"], session_id])
-        previous = records.get(key, {})
+        previous = state.get("sessions", {}).get(
+            session_key(event["agent_id"], session_id), {}
+        )
         # A session cannot become active again after its terminal observation.
         if previous.get("state") == "ended":
             return
@@ -69,7 +102,7 @@ def observe(path, event, session_id):
             event["ts"].replace("Z", "+00:00")
         ).timestamp()
         sequence = max(time.time_ns(), previous.get("sequence", 0) + 1)
-        records[key] = dict(
+        observation = dict(
             agent_id=event["agent_id"],
             session_id=session_id,
             sequence=sequence,
@@ -77,8 +110,18 @@ def observe(path, event, session_id):
             epoch=previous.get("epoch", sequence),
             source=event["source"],
             project=event["project"][:256],
-            state="working" if kind in ACTIVE else STATES[kind],
+            state=(
+                "resting"
+                if kind == "heartbeat"
+                and event.get("payload", {}).get("phase") == "stop"
+                else "working"
+                if kind in ACTIVE
+                else STATES[kind]
+            ),
         )
+        if not admit(state, observation):
+            return
+        records[key] = observation
         while len(records) > MAX_PRESENCE:
             del records[min(records, key=lambda key: records[key]["sequence"])]
             state["presence_overflow"] = state.get("presence_overflow", 0) + 1

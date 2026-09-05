@@ -111,14 +111,16 @@ class DeliveryWorkerTests(unittest.TestCase):
         worker = self.worker()
         for index in range(200):
             delivery.enqueue(self.event(index), session_id="session")
-        for tick in range(30):
-            for index in range(5):
-                delivery.enqueue(
-                    self.event(200 + tick * 5 + index), session_id="session"
-                )
+        started = self.now
+        arrivals = 0
+        for _ in range(30):
+            due = int((self.now - started) * 5)
+            while arrivals < due:
+                delivery.enqueue(self.event(200 + arrivals), session_id="session")
+                arrivals += 1
             worker.tick()
-            self.now += 0.25
-        self.assertEqual(350, len(self.accepted))
+            self.now += .25
+        self.assertEqual(200 + arrivals, len(self.accepted))
         self.assertEqual([], emit._read_durable_outbox_snapshot())
 
     def test_ambiguous_acceptance_and_restart_reuse_delivery_ids(self):
@@ -194,6 +196,30 @@ class DeliveryWorkerTests(unittest.TestCase):
         for error, expected in cases:
             with self.subTest(expected=expected), patch.object(delivery.urllib.request, "urlopen", side_effect=error):
                 self.assertEqual(expected, delivery.post_json("http://synthetic", "/events/batch", {}, "secret token"))
+
+    def test_codex_stop_is_observed_as_resting_not_a_working_heartbeat(self):
+        kind, payload = emit.codex_events({"hook_event_name": "Stop"})[0]
+        delivery.enqueue(dict(self.event(1), type=kind, payload=payload), session_id="session")
+        report = delivery.presence.report(os.path.join(emit.LOG_DIR, "latest-presence.json"))
+        self.assertEqual("resting", next(iter(report["presence"].values()))["state"])
+
+    def test_evicted_terminal_presence_keeps_its_session_fence(self):
+        with patch.object(delivery.presence, "MAX_PRESENCE", 1):
+            delivery.enqueue(dict(self.event(1), type="session_ended"), session_id="ended")
+            delivery.enqueue(dict(self.event(2), agent_id="codex:other"), session_id="other")
+            delivery.enqueue(self.event(3), session_id="ended")
+        report = delivery.presence.report(os.path.join(emit.LOG_DIR, "latest-presence.json"))
+        self.assertFalse(any(row["agent_id"] == "codex:session" and row["state"] == "working" for row in report["presence"].values()))
+
+    def test_full_session_fences_reject_new_presence_without_losing_history(self):
+        with patch.object(delivery.presence, "MAX_SESSIONS", 1):
+            delivery.enqueue(dict(self.event(1), type="session_ended"), session_id="ended")
+            delivery.enqueue(dict(self.event(2), agent_id="codex:other"), session_id="other")
+        report = delivery.presence.report(os.path.join(emit.LOG_DIR, "latest-presence.json"))
+        self.assertEqual(1, report["presence_overflow"])
+        self.assertEqual(["ended"], [row["state"] for row in report["presence"].values()])
+        self.worker().tick()
+        self.assertEqual(2, len(self.accepted))
 
 
 if __name__ == "__main__":

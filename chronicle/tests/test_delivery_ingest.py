@@ -4,6 +4,8 @@ import datetime as dt
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+from hooks import presence
 
 from fastapi.testclient import TestClient
 
@@ -154,7 +156,13 @@ class DeliveryIngestTests(unittest.TestCase):
                         "/telemetry", json=dict(health=health, presence=[observation])
                     ).status_code,
                 )
-            with TestClient(serve.create_app(config)) as client:
+            with TestClient(serve.create_app(config)) as client, patch.object(presence, "MAX_PRESENCE", 1):
+                other = dict(observation, agent_id="codex:other", session_id="other", epoch=3, sequence=3, state="working")
+                self.assertEqual(204, client.post("/telemetry", json=dict(health=health, presence=[other])).status_code)
+                old_history = dict(v=0, ts=dt.datetime.fromtimestamp(now, dt.UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                    source="codex", agent_id="codex:test", project="test", type="heartbeat", payload={}, telemetry_managed=True)
+                self.assertEqual(204, client.post("/events", json=old_history).status_code)
+                self.assertNotIn("codex:test", [row["id"] for row in client.get("/state").json()["snapshot"]["villagers"]])
                 for sequence in (1, 3):
                     replay = dict(observation, sequence=sequence, state="working")
                     self.assertEqual(
@@ -163,9 +171,7 @@ class DeliveryIngestTests(unittest.TestCase):
                             "/telemetry", json=dict(health=health, presence=[replay])
                         ).status_code,
                     )
-                    self.assertEqual(
-                        [], client.get("/state").json()["snapshot"]["villagers"]
-                    )
+                    self.assertNotIn("codex:test", [row["id"] for row in client.get("/state").json()["snapshot"]["villagers"]])
                 new_session = dict(
                     observation,
                     session_id="new-session",

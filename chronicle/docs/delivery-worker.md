@@ -21,7 +21,7 @@ credentials or invalid events retains its queue for repair; restarting is not a 
 Supported sustained arrival rate: **five events/second per primary target**, events
 small enough to fit 32 in a 60 KiB batch, at 450 ms successful HTTP response latency.
 A turn transports 32 records in about 1.15 seconds including presence and polling.
-The controlled 200-record backlog plus 150 new events test demonstrates return to zero.
+The controlled 200-record backlog plus clock-scheduled five-per-second arrivals test demonstrates return to zero.
 The 1,024-record test fills the production record capacity and recovers without new
 input. Network and filesystem overhead consume additional headroom in real installations.
 
@@ -48,10 +48,19 @@ Producer health is unknown **30 seconds after the last observation** even if the
 cannot report its failure. A queue older than **10 seconds** is delayed despite successful
 acknowledgements. Capacity/loss counters remain visible after recovery; they are cumulative
 and require investigation, not automatic clearing. Chronicle stores at most 64 producer/
-target reports, each with 128 session fences. Expired, evicted sessions cannot establish
+target reports, each with 128 latest observations. Expired, evicted sessions cannot establish
 freshness by replay: observations retain their original times. Managed history without a
 retained presence fence is projected stale. Chronicle recomputes expiry on snapshot/SSE
 reads; clients replace complete snapshots on reconnect.
+
+Session fences are independent of these replaceable slots: each producer keeps at most
+4,096 session fences, and Chronicle keeps 4,096 across its producer reports. Fences are
+never automatically evicted. At capacity, previously unseen sessions are refused presence
+and overflow is reported; semantic history continues to drain. Reinitializing a fence
+store is an operator action only after every old runner has stopped and queues have drained.
+This bounded, conservative limit prevents capacity pressure from resurrecting an ended
+session. Codex `Stop` is resting evidence even though its historical v0 record is a
+heartbeat; replay and worker liveness cannot turn it back into working.
 
 ## Installation and lifecycle
 
