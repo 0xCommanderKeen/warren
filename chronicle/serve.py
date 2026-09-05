@@ -26,11 +26,11 @@ pressure for the browser's live transport status.
 """
 
 import collections
-import contextvars
 import dataclasses
 import datetime
 import email.header
 import fcntl
+import functools
 import hmac
 import json
 import os
@@ -47,7 +47,7 @@ from typing import Any, Literal
 
 import anyio
 import uvicorn
-from fastapi import FastAPI, Header, Query, Request
+from fastapi import APIRouter, FastAPI, Header, Query, Request
 from fastapi.openapi.utils import get_openapi
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
@@ -66,95 +66,16 @@ from typed_json import thaw_json
 from protocol import validate_event
 from config import Config
 
-# The module-level ``app`` — what ``uvicorn serve:app`` serves — takes its settings
-# from the environment at import, exactly as ``python serve.py`` does at ``__main__``.
-# It used to be built from ``Config()`` defaults, and the NAS ran it that way for six
-# days with every setting silently ignored: the log went into the container layer,
-# knocks stopped, the token never applied (warren#313). The aliases below are seeded
-# from it for direct function callers and the tests that still monkeypatch them
-# during the notification-store extraction; runtime HTTP traffic uses ``Runtime.config``.
-_ENVIRONMENT_CONFIG = Config.from_env(os.environ)
-PORT = _ENVIRONMENT_CONFIG.port
-HOST = _ENVIRONMENT_CONFIG.host
 ROOT = os.path.dirname(os.path.abspath(__file__))
-EVENTS = str(_ENVIRONMENT_CONFIG.events)
-
-MAX_EVENT_BYTES = 64 * 1024
-VILLAGERS_DIR = str(_ENVIRONMENT_CONFIG.villagers_dir)
-TOKEN = _ENVIRONMENT_CONFIG.token
-ARCHIVE_DIR = str(_ENVIRONMENT_CONFIG.archive_dir or "")
-MAX_LOG_BYTES = _ENVIRONMENT_CONFIG.max_log_bytes
-
-NOTIFY_URL = _ENVIRONMENT_CONFIG.notify_url
-NOTIFY_TOKEN = _ENVIRONMENT_CONFIG.notify_token
-NOTIFY_TIMEOUT = _ENVIRONMENT_CONFIG.notify_timeout
-NOTIFY_MEMORY = 512  # how many knocks we remember, to not knock twice
-NOTIFY_WORKERS = 2
-NOTIFY_QUEUE = 64
-KNOCK_RECORDS = _ENVIRONMENT_CONFIG.knock_records
-KNOCK_BYTES = _ENVIRONMENT_CONFIG.knock_bytes
-LEDGER_RECORDS = KNOCK_RECORDS
-LEDGER_BYTES = KNOCK_BYTES
-KNOCK_LOCK_SHARDS = 32
-LEDGER_DELIVERY_IDS = notification_persistence.DELIVERY_IDS
-LEDGER_KNOCKS = notification_persistence.KNOCKS
 LEDGER_NOTIFIED = notification_persistence.NOTIFIED
 LEDGER_NOTIFY_DROPPED = notification_persistence.DROPPED
-LEDGER_KINDS = notification_persistence.KINDS
-DROP_SECONDS = 12 * 60 * 60
-_active_runtime = contextvars.ContextVar("chronicle_runtime", default=None)
-
-
-def _setting(name, fallback):
-    runtime = _active_runtime.get()
-    return getattr(runtime.config, name) if runtime is not None else fallback
-
-
-def _events_path():
-    return str(_setting("events", EVENTS))
-
-
-def _villagers_path():
-    return str(_setting("villagers_dir", VILLAGERS_DIR))
-
-
-def _store():
-    runtime = _active_runtime.get()
-    return runtime.notification_store if runtime is not None else _notification_store
-
-
-def _legacy_config():
-    """The module-level app's settings: the environment, under any alias a caller
-    overrode. Compatibility adapter pending notification-store #72."""
-    return dataclasses.replace(
-        _ENVIRONMENT_CONFIG,
-        host=HOST,
-        port=PORT,
-        events=os.path.abspath(EVENTS),
-        villagers_dir=os.path.abspath(VILLAGERS_DIR),
-        token=TOKEN,
-        archive_dir=os.path.abspath(ARCHIVE_DIR) if ARCHIVE_DIR else None,
-        max_event_bytes=MAX_EVENT_BYTES,
-        max_log_bytes=MAX_LOG_BYTES,
-        notify_url=NOTIFY_URL,
-        notify_token=NOTIFY_TOKEN,
-        notify_timeout=NOTIFY_TIMEOUT,
-        notify_workers=NOTIFY_WORKERS,
-        notify_queue=NOTIFY_QUEUE,
-        knock_records=KNOCK_RECORDS,
-        knock_bytes=KNOCK_BYTES,
-        ledger_records=LEDGER_RECORDS,
-        ledger_bytes=LEDGER_BYTES,
-        knock_lock_shards=KNOCK_LOCK_SHARDS,
-        drop_seconds=DROP_SECONDS,
-    )
 
 
 def read_villagers(villagers_dir=None):
     """Validated residents plus legacy soul files for v0 client compatibility."""
     out = read_residents(villagers_dir)["residents"]
     villagers_dir = (
-        str(villagers_dir) if villagers_dir is not None else _villagers_path()
+        str(villagers_dir) if villagers_dir is not None else Config().villagers_dir
     )
     if not os.path.isdir(villagers_dir):
         return out
@@ -181,7 +102,7 @@ def read_villagers(villagers_dir=None):
 
 def read_residents(villagers_dir=None):
     """Load valid resident declarations and actionable validation diagnostics."""
-    path = str(villagers_dir) if villagers_dir is not None else _villagers_path()
+    path = str(villagers_dir) if villagers_dir is not None else Config().villagers_dir
     return resident_manifests.load_resident_manifests(path)
 
 
@@ -193,27 +114,6 @@ def read_residents(villagers_dir=None):
 # accepts a POST works. It happens on a daemon thread and swallows every
 # error: a knock we fail to forward must never slow down or fail the ingest.
 
-_transport_lock = threading.Lock()
-_transport_counters = {
-    "ingest_duplicates": 0,
-    "notify_delivered": 0,
-    "notify_failed": 0,
-    "notify_retried": 0,
-    "notify_saturated": 0,
-    "notify_dropped": 0,
-}
-_notification_store = notification_persistence.NotificationPersistence(
-    _events_path,
-    lambda: (
-        _setting("knock_records", KNOCK_RECORDS),
-        _setting("knock_bytes", KNOCK_BYTES),
-    ),
-    KNOCK_LOCK_SHARDS,
-    ledger_limits=lambda: (
-        _setting("ledger_records", LEDGER_RECORDS),
-        _setting("ledger_bytes", LEDGER_BYTES),
-    ),
-)
 _delivery_id_pattern = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 
 
@@ -574,22 +474,6 @@ def transport_status(runtime):
     }
 
 
-def _count_ingest_duplicate():
-    with _transport_lock:
-        _transport_counters["ingest_duplicates"] += 1
-
-
-def _event_log():
-    runtime = _active_runtime.get()
-    if runtime is not None:
-        return runtime.event_log
-    return event_log.EventLog(_legacy_config(), _store(), _count_ingest_duplicate)
-
-
-def append_event(event):
-    return _event_log().append(event)
-
-
 EventCursor = event_log.EventCursor
 
 
@@ -863,7 +747,7 @@ class Runtime:
         )
         self.state_coordinator = StateCoordinator(
             self.projection_inputs,
-            read_residents,
+            functools.partial(read_residents, config.villagers_dir),
             capabilities={
                 "ingest": True,
                 "approvals": True,
@@ -887,22 +771,16 @@ class Runtime:
 def lifespan(config):
     @asynccontextmanager
     async def application_lifespan(application):
-        resolved = config() if callable(config) else config
-        runtime = Runtime(resolved)
+        runtime = Runtime(config)
         application.state.runtime = runtime
-        application.state.config = resolved
-        token = _active_runtime.set(runtime)
+        await anyio.to_thread.run_sync(runtime.state_coordinator.evaluate)
         try:
-            await anyio.to_thread.run_sync(runtime.state_coordinator.evaluate)
-            if resolved.notify_url:
+            if config.notify_url:
                 await anyio.to_thread.run_sync(ensure_knock_workers, runtime)
-            try:
-                yield
-            finally:
-                if resolved.notify_url:
-                    await anyio.to_thread.run_sync(stop_knock_workers, runtime)
+            yield
         finally:
-            _active_runtime.reset(token)
+            if config.notify_url:
+                await anyio.to_thread.run_sync(stop_knock_workers, runtime)
 
     return application_lifespan
 
@@ -911,29 +789,9 @@ with open(os.path.join(ROOT, "pyproject.toml"), "rb") as _project_file:
     PROJECT_VERSION = tomllib.load(_project_file)["project"]["version"]
 
 
-app = FastAPI(
-    title="Chronicle Village API",
-    version=PROJECT_VERSION,
-    lifespan=lifespan(_legacy_config),
-)
-app.state.config = _ENVIRONMENT_CONFIG
+router = APIRouter()
 
 
-def _openapi():
-    if app.openapi_schema:
-        return app.openapi_schema
-    schema = get_openapi(title=app.title, version=app.version, routes=app.routes)
-    schema.setdefault("components", {}).setdefault("schemas", {})["ErrorResponse"] = (
-        ErrorResponse.model_json_schema(ref_template="#/components/schemas/{model}")
-    )
-    app.openapi_schema = schema
-    return schema
-
-
-app.openapi = _openapi
-
-
-@app.exception_handler(RequestValidationError)
 async def request_validation_error(_request, _error):
     return PlainTextResponse("not a protocol event", status_code=400)
 
@@ -964,7 +822,6 @@ PLAIN_ERROR_RESPONSES = {
 }
 
 
-@app.middleware("http")
 async def guard_event_ingest(request: Request, call_next):
     """Reject framing and auth before FastAPI consumes the JSON body."""
     if request.method != "POST" or request.url.path != "/events":
@@ -991,16 +848,7 @@ async def guard_event_ingest(request: Request, call_next):
     return await call_next(request)
 
 
-@app.middleware("http")
-async def bind_runtime(request: Request, call_next):
-    token = _active_runtime.set(request.app.state.runtime)
-    try:
-        return await call_next(request)
-    finally:
-        _active_runtime.reset(token)
-
-
-@app.post(
+@router.post(
     "/events",
     status_code=204,
     responses={
@@ -1023,8 +871,8 @@ async def ingest_event(
         if not _delivery_id_pattern.fullmatch(delivery_id):
             return _error(400, "invalid delivery id")
         event["delivery_id"] = delivery_id
-    await anyio.to_thread.run_sync(append_event, event)
     runtime = _runtime(request)
+    await anyio.to_thread.run_sync(runtime.event_log.append, event)
     if not await anyio.to_thread.run_sync(persist_knock, event, runtime):
         return _error(503, "notification queue unavailable")
     if await anyio.to_thread.run_sync(claim_knock, event, runtime):
@@ -1033,7 +881,7 @@ async def ingest_event(
     return Response(status_code=204)
 
 
-@app.get(
+@router.get(
     "/state",
     response_model=StateEnvelope,
     responses={204: {"description": "Snapshot unchanged"}},
@@ -1058,7 +906,7 @@ async def get_state(
     return delivery
 
 
-@app.get("/artifacts/preview")
+@router.get("/artifacts/preview")
 async def get_artifact_preview(
     request: Request,
     agent_id: str = Query(..., min_length=1, max_length=1024),
@@ -1085,7 +933,7 @@ async def get_artifact_preview(
     })
 
 
-@app.get(
+@router.get(
     "/state/stream",
     response_class=EventSourceResponse,
     responses={
@@ -1130,22 +978,26 @@ async def stream_state(
     )
 
 
-@app.get("/transport/status", response_model=TransportStatus)
+@router.get("/transport/status", response_model=TransportStatus)
 async def get_transport_status(request: Request):
     return await anyio.to_thread.run_sync(transport_status, _runtime(request))
 
 
-@app.get("/villagers", response_model=VillagerList)
-async def get_villagers():
-    return await anyio.to_thread.run_sync(read_villagers)
+@router.get("/villagers", response_model=VillagerList)
+async def get_villagers(request: Request):
+    return await anyio.to_thread.run_sync(
+        read_villagers, _runtime(request).config.villagers_dir
+    )
 
 
-@app.get("/residents", response_model=ResidentReport)
-async def get_residents():
-    return await anyio.to_thread.run_sync(read_residents)
+@router.get("/residents", response_model=ResidentReport)
+async def get_residents(request: Request):
+    return await anyio.to_thread.run_sync(
+        read_residents, _runtime(request).config.villagers_dir
+    )
 
 
-@app.get("/events", include_in_schema=False)
+@router.get("/events", include_in_schema=False)
 async def get_events(request: Request, since: str | None = Query(None)):
     try:
         cursor = (
@@ -1166,7 +1018,7 @@ async def get_events(request: Request, since: str | None = Query(None)):
     )
 
 
-@app.get("/retention-policy.json", include_in_schema=False)
+@router.get("/retention-policy.json", include_in_schema=False)
 async def retention_policy_file():
     return FileResponse(
         os.path.join(ROOT, "retention-policy.json"), media_type="application/json"
@@ -1176,16 +1028,13 @@ async def retention_policy_file():
 def create_app(config: Config) -> FastAPI:
     """Construct an isolated HTTP application and its runtime wiring."""
     application = FastAPI(
-        title=app.title,
-        version=app.version,
+        title="Chronicle Village API",
+        version=PROJECT_VERSION,
         lifespan=lifespan(config),
     )
     application.state.config = config
-    application.router.routes.extend(app.router.routes)
-    for middleware in reversed(app.user_middleware):
-        application.add_middleware(
-            middleware.cls, *middleware.args, **middleware.kwargs
-        )
+    application.include_router(router)
+    application.middleware("http")(guard_event_ingest)
     application.add_exception_handler(RequestValidationError, request_validation_error)
 
     def application_openapi():
@@ -1204,6 +1053,10 @@ def create_app(config: Config) -> FastAPI:
 
     application.openapi = application_openapi
     return application
+
+
+# Both supported process entry points use the same factory and runtime lifecycle.
+app = create_app(Config.from_env(os.environ))
 
 
 def serve_forever(config: Config) -> None:

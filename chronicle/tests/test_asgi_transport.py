@@ -667,16 +667,15 @@ class ASGITransportContractTests(unittest.TestCase):
             }
             request_thread = threading.get_ident()
             append_threads = []
-            original = serve.append_event
+            original = serve.event_log.EventLog.append
 
-            def observed_append(item):
+            def observed_append(log, item):
                 append_threads.append(threading.get_ident())
-                return original(item)
+                return original(log, item)
 
             with (
-                mock.patch.object(serve, "EVENTS", path),
-                mock.patch.object(serve, "append_event", side_effect=observed_append),
-                TestClient(serve.app) as client,
+                mock.patch.object(serve.event_log.EventLog, "append", observed_append),
+                TestClient(serve.create_app(Config(events=Path(path)))) as client,
             ):
                 self.assertEqual(client.post("/events", json={"v": 0}).status_code, 400)
                 self.assertEqual(client.post("/events", json=event).status_code, 204)
