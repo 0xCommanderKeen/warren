@@ -87,6 +87,31 @@
         "title": "ApprovalDecision",
         "type": "object"
       },
+      "BlockerState": {
+        "additionalProperties": false,
+        "description": "A referenced number, including a dependency the tracker could not identify.",
+        "properties": {
+          "number": {
+            "title": "Number",
+            "type": "integer"
+          },
+          "state": {
+            "enum": [
+              "open",
+              "closed",
+              "unknown"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "number",
+          "state"
+        ],
+        "title": "BlockerState",
+        "type": "object"
+      },
       "Board": {
         "additionalProperties": false,
         "description": "Whether this resident takes work off the job board, and on what terms.\n\nOpting in is one boolean, and it defaults to *off*. A resident that has never heard\nof the board never claims from it, however well its skills happen to match, because\nsilence in a manifest is not consent \u2014 the whole point of a declaration is that you\ncan read what a resident will do before it does it.\n\nThe rest is the terms of the claim, all with honest defaults: one task per wake-up,\na thirty-minute lease, and a fifteen-minute session. ``lease_s`` should comfortably\nexceed ``timeout_s``; a lease that dies while the session is still running hands the\nsame task to somebody else, which is the one thing claiming exists to prevent.",
@@ -521,6 +546,30 @@
         "title": "Escalation",
         "type": "object"
       },
+      "Evidence": {
+        "additionalProperties": false,
+        "description": "A command receipt or a file-at-commit excerpt the reader can inspect.",
+        "properties": {
+          "quote": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Quote",
+            "type": "string"
+          },
+          "source": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "quote"
+        ],
+        "title": "Evidence",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -786,6 +835,361 @@
           }
         },
         "title": "ProvisionPost",
+        "type": "object"
+      },
+      "QueueIssue": {
+        "additionalProperties": false,
+        "description": "One issue's mechanical facts, without a recommendation rank.",
+        "properties": {
+          "blockers": {
+            "items": {
+              "$ref": "#/components/schemas/BlockerState"
+            },
+            "title": "Blockers",
+            "type": "array"
+          },
+          "chains": {
+            "items": {
+              "items": {
+                "type": "integer"
+              },
+              "type": "array"
+            },
+            "title": "Chains",
+            "type": "array"
+          },
+          "chains_truncated": {
+            "title": "Chains Truncated",
+            "type": "boolean"
+          },
+          "closed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closed At"
+          },
+          "labels": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Labels",
+            "type": "array"
+          },
+          "number": {
+            "title": "Number",
+            "type": "integer"
+          },
+          "priorities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Priorities",
+            "type": "array"
+          },
+          "stale_blocked": {
+            "title": "Stale Blocked",
+            "type": "boolean"
+          },
+          "state": {
+            "enum": [
+              "open",
+              "closed"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "unknown_blockers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unknown Blockers",
+            "type": "array"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "number",
+          "title",
+          "url",
+          "state",
+          "labels",
+          "priorities",
+          "updated_at",
+          "closed_at",
+          "blockers",
+          "unknown_blockers",
+          "chains",
+          "chains_truncated",
+          "stale_blocked"
+        ],
+        "title": "QueueIssue",
+        "type": "object"
+      },
+      "QueueNote": {
+        "additionalProperties": false,
+        "description": "The sole note schema; the order is the resident's recommendation.",
+        "properties": {
+          "commit": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Commit",
+            "type": "string"
+          },
+          "recommendations": {
+            "items": {
+              "$ref": "#/components/schemas/Recommendation"
+            },
+            "maxItems": 30,
+            "title": "Recommendations",
+            "type": "array"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "run_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "repository",
+          "commit",
+          "recommendations"
+        ],
+        "title": "QueueNote",
+        "type": "object"
+      },
+      "QueuePullRequest": {
+        "additionalProperties": false,
+        "description": "A PR's nullable mergeability, distinct from CI and branch protection.",
+        "properties": {
+          "mergeability": {
+            "enum": [
+              "MERGEABLE",
+              "CONFLICTING",
+              "UNKNOWN"
+            ],
+            "title": "Mergeability",
+            "type": "string"
+          },
+          "number": {
+            "title": "Number",
+            "type": "integer"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "number",
+          "title",
+          "url",
+          "mergeability"
+        ],
+        "title": "QueuePullRequest",
+        "type": "object"
+      },
+      "QueueReport": {
+        "additionalProperties": false,
+        "description": "The note if provenance agrees, or an explicit absence/failure.",
+        "properties": {
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/QueueNote"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/QueueReviewRun"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "note",
+          "message"
+        ],
+        "title": "QueueReport",
+        "type": "object"
+      },
+      "QueueResponse": {
+        "additionalProperties": false,
+        "description": "A complete issue inventory with the observation's time and resident attribution.",
+        "properties": {
+          "issues": {
+            "items": {
+              "$ref": "#/components/schemas/QueueIssue"
+            },
+            "title": "Issues",
+            "type": "array"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "pull_requests": {
+            "items": {
+              "$ref": "#/components/schemas/QueuePullRequest"
+            },
+            "title": "Pull Requests",
+            "type": "array"
+          },
+          "ranked_items": {
+            "items": {
+              "$ref": "#/components/schemas/BlockerState"
+            },
+            "title": "Ranked Items",
+            "type": "array"
+          },
+          "recently_closed": {
+            "items": {
+              "$ref": "#/components/schemas/QueueIssue"
+            },
+            "title": "Recently Closed",
+            "type": "array"
+          },
+          "report": {
+            "$ref": "#/components/schemas/QueueReport"
+          },
+          "reporter": {
+            "title": "Reporter",
+            "type": "string"
+          },
+          "repository": {
+            "title": "Repository",
+            "type": "string"
+          },
+          "since": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Since"
+          }
+        },
+        "required": [
+          "repository",
+          "observed_at",
+          "since",
+          "issues",
+          "recently_closed",
+          "pull_requests",
+          "ranked_items",
+          "reporter",
+          "report"
+        ],
+        "title": "QueueResponse",
+        "type": "object"
+      },
+      "QueueReviewRun": {
+        "additionalProperties": false,
+        "description": "A run receipt taken from Steward's ledger, never from the note.",
+        "properties": {
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "recorded_at": {
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "resident": {
+            "title": "Resident",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "outcome",
+          "recorded_at",
+          "resident"
+        ],
+        "title": "QueueReviewRun",
+        "type": "object"
+      },
+      "Recommendation": {
+        "additionalProperties": false,
+        "description": "Judgement attached to an issue number, never a copied issue state.",
+        "properties": {
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/Evidence"
+            },
+            "maxItems": 12,
+            "minItems": 1,
+            "title": "Evidence",
+            "type": "array"
+          },
+          "number": {
+            "exclusiveMinimum": 0.0,
+            "title": "Number",
+            "type": "integer"
+          },
+          "reason": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "number",
+          "reason",
+          "evidence"
+        ],
+        "title": "Recommendation",
         "type": "object"
       },
       "RefusalDetail": {
@@ -2484,6 +2888,65 @@
           }
         ],
         "summary": "Get Org"
+      }
+    },
+    "/queue": {
+      "get": {
+        "description": "Read tracker facts; failed or missing resident reports remain explicit.",
+        "operationId": "get_queue_queue_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "since",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Since"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueueResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "429": {
+            "description": "Too many authentication failures; retry after Retry-After seconds."
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Queue"
       }
     },
     "/reload": {

@@ -77,6 +77,7 @@ export function matchRoute(route) {
     if (parts.length === 2 && parts[1] === "new") return { page: "skillNew", params: {} };
     if (parts.length === 2) return { page: "skill", params: { name: parts[1] } };
   }
+  if (parts[0] === "queue" && parts.length === 1) return { page: "queue", params: {} };
   if (parts[0] === "org" && parts.length === 1) return { page: "org", params: {} };
   if (parts[0] === "routines" && parts.length === 1) return { page: "routines", params: {} };
   if (parts[0] === "approvals" && parts.length === 1) return { page: "approvals", params: {} };
@@ -116,6 +117,7 @@ export const routeTo = {
   skill: (name) => `/skills/${encodeURIComponent(name)}`,
   skillNew: () => "/skills/new",
   org: () => "/org",
+  queue: () => "/queue",
   routines: () => "/routines",
   approvals: () => "/approvals",
   board: () => "/board",
@@ -136,10 +138,11 @@ export const NAV = [
   { index: "06", label: "Board", nav: "board", route: routeTo.board(), pages: ["board"] },
   { index: "07", label: "Skills", nav: "skills", route: routeTo.skills(), pages: ["skills", "skill", "skillNew"] },
   { index: "08", label: "Budgets", nav: "budgets", route: routeTo.budgets(), pages: ["budgets"] },
+  { index: "09", label: "Queue", nav: "queue", route: routeTo.queue(), pages: ["queue"] },
   // Last, because it is the only entry that is not a thing you go and do — but in the rail
   // rather than folded into the fleet, because a knock at a resident's bot is an outsider's
   // doing and the fleet page is about what the fleet itself is up to (warren#279).
-  { index: "09", label: "Diagnostics", nav: "diagnostics", route: routeTo.diagnostics(), pages: ["diagnostics"] },
+  { index: "10", label: "Diagnostics", nav: "diagnostics", route: routeTo.diagnostics(), pages: ["diagnostics"] },
 ];
 
 /** Which sidebar entry owns a page, or null when none does (the 404). */

@@ -99,7 +99,7 @@ describe("route matching", () => {
       for (const page of entry.pages) expect(navFor(page)).toBe(entry.nav);
     }
     expect(NAV.map((entry) => entry.label)).toEqual([
-      "Fleet", "Residents", "Org", "Routines", "Approvals", "Board", "Skills", "Budgets",
+      "Fleet", "Residents", "Org", "Routines", "Approvals", "Board", "Skills", "Budgets", "Queue",
       "Diagnostics",
     ]);
   });
