@@ -11,22 +11,22 @@ function response(status, body) {
 describe("Steward client", () => {
   it("supplies changeable credentials from memory on every write", async () => {
     const fetch = vi.fn().mockResolvedValue(response(202, {
-      status: "accepted",
+      status: "recorded",
       request_id: "request-1",
-      task_id: "task-1",
+      approval_request_id: "a-1", decision: "approve",
     }));
     const client = createStewardClient({ baseUrl: "https://steward.test", fetch });
 
     client.setCredentials({ token: "first" });
-    await client.postJob({ title: "Map the woods" });
+    await client.decideApproval("a-1", { decision: "approve" });
     client.setCredentials({ token: "second" });
-    client.confirm({ tasks: [{ id: "task-1" }] });
-    await client.postJob({ title: "Repair the bridge" });
+    client.confirm({ approvals: [{ request_id: "a-1", state: "resolved", decision: "approve" }] });
+    await client.decideApproval("a-1", { decision: "approve" });
 
-    expect(fetch).toHaveBeenNthCalledWith(1, "https://steward.test/jobs", expect.objectContaining({
+    expect(fetch).toHaveBeenNthCalledWith(1, "https://steward.test/approvals/a-1", expect.objectContaining({
       headers: expect.objectContaining({ Authorization: "Bearer first" }),
     }));
-    expect(fetch).toHaveBeenNthCalledWith(2, "https://steward.test/jobs", expect.objectContaining({
+    expect(fetch).toHaveBeenNthCalledWith(2, "https://steward.test/approvals/a-1", expect.objectContaining({
       headers: expect.objectContaining({ Authorization: "Bearer second" }),
     }));
   });
@@ -35,16 +35,16 @@ describe("Steward client", () => {
     const fetch = vi.fn()
       .mockResolvedValueOnce(response(status, { detail: { message: "Refused" } }))
       .mockResolvedValueOnce(response(202, {
-        status: "accepted", request_id: "request-2", task_id: "task-2",
+        status: "recorded", request_id: "request-2", approval_request_id: "a-1", decision: "approve",
       }));
     const client = createStewardClient({ fetch });
     client.setCredentials({ token: "secret" });
 
-    await expect(client.postJob({ title: "Map the woods" })).rejects.toMatchObject({
+    await expect(client.decideApproval("a-1", { decision: "approve" })).rejects.toMatchObject({
       status, retryable: true, ambiguous: false,
     });
     if (status === 401) client.setCredentials({ token: "corrected" });
-    await expect(client.postJob({ title: "Map the woods" })).resolves.toMatchObject({
+    await expect(client.decideApproval("a-1", { decision: "approve" })).resolves.toMatchObject({
       state: "awaiting_confirmation",
     });
   });
@@ -57,10 +57,10 @@ describe("Steward client", () => {
     const client = createStewardClient({ fetch });
     client.setCredentials({ token: "secret" });
 
-    await expect(client.postJob({ title: "Map the woods" })).rejects.toMatchObject({
+    await expect(client.decideApproval("a-1", { decision: "approve" })).rejects.toMatchObject({
       retryable: false, ambiguous: true,
     });
-    await expect(client.postJob({ title: "Map the woods" })).rejects.toMatchObject({
+    await expect(client.decideApproval("a-1", { decision: "approve" })).rejects.toMatchObject({
       code: "write_blocked",
     });
     expect(fetch).toHaveBeenCalledTimes(1);
@@ -72,21 +72,47 @@ describe("Steward client", () => {
     const client = createStewardClient({ fetch });
     client.setCredentials({ token: "secret" });
 
-    const first = client.postJob({ title: "Map the woods" });
-    await expect(client.runRoutine("keeper", "daily")).rejects.toMatchObject({
+    const first = client.decideApproval("a-1", { decision: "approve" });
+    await expect(client.decideApproval("a-2", { decision: "deny" })).rejects.toMatchObject({
       code: "write_blocked",
     });
     resolveFetch(response(202, {
-      status: "accepted", request_id: "request-1", task_id: "task-1",
+      status: "recorded", request_id: "request-1", approval_request_id: "a-1", decision: "approve",
     }));
     await first;
 
-    expect(client.confirm({ tasks: [{ id: "other" }] })).toBe(false);
-    await expect(client.postJob({ title: "Map the woods" })).rejects.toMatchObject({
+    expect(client.confirm({ approvals: [{ request_id: "other", state: "resolved", decision: "approve" }] })).toBe(false);
+    await expect(client.decideApproval("a-1", { decision: "approve" })).rejects.toMatchObject({
       code: "write_blocked",
     });
-    expect(client.confirm({ tasks: [{ id: "task-1" }] })).toBe(true);
+    expect(client.confirm({ approvals: [{ request_id: "a-1", state: "resolved", decision: "approve" }] })).toBe(true);
   });
+
+  it("reconciles an ambiguous receipt using the requested approval identity", async () => {
+    const fetch = vi.fn().mockResolvedValue(response(202, {
+      status: "unexpected", approval_request_id: "a-1", decision: "approve",
+    }));
+    const client = createStewardClient({ fetch });
+    client.setCredentials({ token: "secret" });
+
+    await expect(client.decideApproval("a-1", { decision: "approve" })).rejects.toMatchObject({ ambiguous: true });
+
+    expect(client.confirm({ approvals: [{ request_id: "a-1", state: "resolved", decision: "approve" }] })).toBe(true);
+  });
+
+  it("surfaces a network failure as ambiguous", async () => {
+    const fetch = vi.fn().mockRejectedValue(new Error("offline"));
+    const client = createStewardClient({ fetch });
+    client.setCredentials({ token: "secret" });
+
+    await expect(client.decideApproval("a-1", { decision: "approve" })).rejects.toMatchObject({
+      retryable: false, ambiguous: true,
+    });
+    await expect(client.decideApproval("a-2", { decision: "deny" })).rejects.toMatchObject({ code: "write_blocked" });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(client.confirm({ approvals: [{ request_id: "a-1", state: "resolved", decision: "approve" }] })).toBe(true);
+  });
+
 
   it("does not confuse a historical routine run with confirmation of a new write", async () => {
     const fetch = vi.fn().mockResolvedValue(response(202, {
@@ -101,27 +127,6 @@ describe("Steward client", () => {
 
     expect(client.confirm({ generation: "g", cursor: 5, routines: [oldRun] })).toBe(false);
     expect(client.confirm({ generation: "g", cursor: 6, routines: [oldRun, { ...oldRun, run_id: "new" }] })).toBe(true);
-  });
-
-  it("reconciles an ambiguous receipt when it retained an exact identity", async () => {
-    const fetch = vi.fn().mockResolvedValue(response(202, {
-      status: "unexpected", task_id: "task-1",
-    }));
-    const client = createStewardClient({ fetch });
-    client.setCredentials({ token: "secret" });
-
-    await expect(client.postJob({ title: "Map the woods" })).rejects.toMatchObject({ ambiguous: true });
-
-    expect(client.confirm({ tasks: [{ id: "task-1" }] })).toBe(true);
-  });
-
-  it("surfaces a network failure as ambiguous", async () => {
-    const client = createStewardClient({ fetch: vi.fn().mockRejectedValue(new Error("offline")) });
-    client.setCredentials({ token: "secret" });
-
-    await expect(client.postJob({ title: "Map the woods" })).rejects.toMatchObject({
-      retryable: false, ambiguous: true,
-    });
   });
 
   it("owns resident, routine, and approval writes without changing village state", async () => {
@@ -199,7 +204,7 @@ describe("the credential never leaves this origin", () => {
     const client = createStewardClient({ baseUrl: "https://evil.tld", fetch });
     client.setCredentials({ token: "secret" });
 
-    await expect(client.postJob({ title: "Map the woods" })).rejects.toMatchObject({
+    await expect(client.decideApproval("a-1", { decision: "approve" })).rejects.toMatchObject({
       code: "cross_origin_base", ambiguous: false, retryable: false,
     });
     expect(fetch).not.toHaveBeenCalled();
@@ -211,10 +216,12 @@ describe("the credential never leaves this origin", () => {
     for (const baseUrl of ["https://evil.tld", "//evil.tld", "http://127.0.0.1:8802"]) {
       const client = createStewardClient({ baseUrl, fetch });
       client.setCredentials({ token: "secret" });
-      await client.postJob({ title: "x" }).catch(() => {});
-      await client.runRoutine("keeper", "daily").catch(() => {});
-      await client.decideApproval("a-1", { decision: "approve" }).catch(() => {});
-      await client.createResident({ id: "keeper" }).catch(() => {});
+      for (const requestId of ["a-1", "a-2"]) {
+        await expect(client.decideApproval(requestId, { decision: "approve" })).rejects.toMatchObject({
+          code: "cross_origin_base",
+        });
+        expect(fetch).not.toHaveBeenCalled();
+      }
     }
 
     expect(fetch).not.toHaveBeenCalled();
@@ -229,26 +236,26 @@ describe("the credential never leaves this origin", () => {
     const client = createStewardClient({ baseUrl: "https://evil.tld", fetch });
     client.setCredentials({ token: "secret" });
 
-    await expect(client.postJob({ title: "one" })).rejects.toMatchObject({ code: "cross_origin_base" });
-    await expect(client.postJob({ title: "two" })).rejects.toMatchObject({ code: "cross_origin_base" });
+    await expect(client.decideApproval("a-1", { decision: "approve" })).rejects.toMatchObject({ code: "cross_origin_base" });
+    await expect(client.decideApproval("a-1", { decision: "approve" })).rejects.toMatchObject({ code: "cross_origin_base" });
   });
 
   it("still writes to this origin, by empty base or bare path", async () => {
     shipped();
     const fetch = vi.fn().mockResolvedValue(response(202, {
-      status: "accepted", request_id: "request-1", task_id: "task-1",
+      status: "recorded", request_id: "request-1", approval_request_id: "a-1", decision: "approve",
     }));
 
     const here = createStewardClient({ fetch });
     here.setCredentials({ token: "secret" });
-    await here.postJob({ title: "Map the woods" });
+    await here.decideApproval("a-1", { decision: "approve" });
 
     const prefixed = createStewardClient({ baseUrl: `${window.location.origin}/arcadia`, fetch });
     prefixed.setCredentials({ token: "secret" });
-    await prefixed.postJob({ title: "Map the woods" });
+    await prefixed.decideApproval("a-1", { decision: "approve" });
 
     expect(fetch.mock.calls.map(([url]) => url)).toEqual([
-      "/jobs", `${window.location.origin}/arcadia/jobs`,
+      "/approvals/a-1", `${window.location.origin}/arcadia/approvals/a-1`,
     ]);
     expect(fetch.mock.calls[0][1].headers.Authorization).toBe("Bearer secret");
   });
