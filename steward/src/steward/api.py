@@ -88,7 +88,7 @@ from steward.routes.deps import Deps
 from steward.routes.residents import (
     ResidentPost,
 )
-from steward.routes.routines import last_run_view, latest_run_requests
+from steward.routes.routines import last_run_view
 from steward.run_lifecycle import RUN_LEASE_GRACE_S
 from steward.runners import build_runner
 from steward.runs import AlreadyRunningError
@@ -123,7 +123,6 @@ __all__ = [
     "RetirePipeline",
     "create_app",
     "last_run_view",
-    "latest_run_requests",
     "run_server",
 ]
 

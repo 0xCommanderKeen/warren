@@ -1137,12 +1137,12 @@ def test_the_request_log_records_what_became_of_a_request(store: Store) -> None:
     assert logged.outcome == "ran"
     assert logged.detail == {"run_id": "abc"}
     assert logged.to_dict()["path"] == "/jobs"
-    assert [record.request_id for record in store.requests()] == ["r1"]
+    assert [record.request_id for record in store.export_request_history()] == ["r1"]
 
 
 def test_updating_an_unknown_request_is_ignored(store: Store) -> None:
     store.set_request_outcome("never-logged", "ran")
-    assert store.requests() == []
+    assert store.export_request_history() == []
 
 
 def test_outcome_can_be_updated_without_touching_the_detail(store: Store) -> None:
@@ -1817,3 +1817,102 @@ def test_losing_the_add_column_race_to_a_neighbour_is_nothing(store: Store) -> N
     store._add_column("open_runs", "delivery", "TEXT")
     with pytest.raises(sqlite3.OperationalError, match="no such table"):
         store._add_column("no_such_table", "delivery", "TEXT")
+
+
+def test_recent_requests_are_bounded_newest_first_with_stable_ties(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("steward.store.utc_now_iso", lambda: EARLY)
+    for key in ("z", "a", "m"):
+        store.log_request(request_id=key, method="POST", path="/jobs", outcome="queued")
+    assert [r.request_id for r in store.recent_requests(limit=2)] == ["m", "a"]
+    assert [r.request_id for r in store.export_request_history()] == ["z", "a", "m"]
+    with pytest.raises(ValueError, match="positive"):
+        store.recent_requests(limit=0)
+
+
+def test_recent_requests_filter_exact_resident_before_limit(store: Store) -> None:
+    for key, path, detail in (
+        ("created", "/residents", {"resident": "hob"}),
+        ("nested", "/residents/hob/routines/inbox/run", {"routine": "hob/inbox"}),
+        ("prefix", "/residents/hobbit/pause", {}),
+        ("other", "/jobs", {}),
+    ):
+        store.log_request(request_id=key, method="POST", path=path, outcome="ran", detail=detail)
+    assert [r.request_id for r in store.recent_requests(limit=1, resident="hob")] == ["nested"]
+    assert [r.request_id for r in store.recent_requests(limit=10, resident="hob")] == [
+        "nested",
+        "created",
+    ]
+    assert store.recent_requests(limit=10, resident="missing") == []
+
+
+def test_latest_routine_requests_select_only_requested_keys_with_stable_ties(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("steward.store.utc_now_iso", lambda: EARLY)
+    for key, routine in (("z", "hob/inbox"), ("a", "hob/inbox"), ("x", 7), ("y", "ada/check")):
+        store.log_request(
+            request_id=key,
+            method="POST",
+            path="/jobs",
+            outcome="queued",
+            detail={"routine": routine},
+        )
+    latest = store.latest_routine_requests(["hob/inbox", "absent", "7"])
+    assert {key: row.request_id for key, row in latest.items()} == {"hob/inbox": "a"}
+    store.set_request_outcome("a", "ran", {"routine": "ada/check"})
+    assert {
+        key: row.request_id for key, row in store.latest_routine_requests(["hob/inbox"]).items()
+    } == {"hob/inbox": "z"}
+
+
+def test_large_request_ledger_uses_bounded_index_scans(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Exercise the actual public queries, then EXPLAIN their traced SQL. This is
+    # deliberate query-plan instrumentation, not a developer-machine timing budget.
+    monkeypatch.setattr("steward.store.utc_now_iso", lambda: EARLY)
+    for index in range(20_000):
+        resident = "hob" if index % 2 == 0 else "ada"
+        store.log_request(
+            request_id=str(index),
+            method="POST",
+            path=f"/residents/{resident}/pause",
+            outcome="ran",
+            detail={"routine": f"{resident}/daily"},
+        )
+    # A late insertion with an older timestamp must not displace a newer request.
+    monkeypatch.setattr("steward.store.utc_now_iso", lambda: "2020-01-01T00:00:00Z")
+    store.log_request(
+        request_id="older",
+        method="POST",
+        path="/residents/hob/pause",
+        outcome="ran",
+        detail={"routine": "hob/daily"},
+    )
+    statements: list[str] = []
+    store._conn.set_trace_callback(statements.append)
+    assert [r.request_id for r in store.recent_requests(limit=2)] == ["19999", "19998"]
+    assert [r.request_id for r in store.recent_requests(limit=1, resident="hob")] == ["19998"]
+    assert {
+        key: row.request_id
+        for key, row in store.latest_routine_requests(["hob/daily", "ada/daily"]).items()
+    } == {"hob/daily": "19998", "ada/daily": "19999"}
+    store._conn.set_trace_callback(None)
+    assert len(statements) == 4
+    for sql, index in zip(
+        statements,
+        (
+            "requests_received",
+            "requests_resident_received",
+            "requests_routine_received",
+            "requests_routine_received",
+        ),
+        strict=True,
+    ):
+        assert "LIMIT " in sql
+        plan = " ".join(row[3] for row in store._conn.execute("EXPLAIN QUERY PLAN " + sql))
+        assert index in plan
+        assert "TEMP B-TREE" not in plan
+    assert len(store.export_request_history()) == 20_001

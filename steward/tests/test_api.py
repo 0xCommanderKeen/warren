@@ -261,7 +261,7 @@ def test_a_wrong_token_is_401_and_queues_nothing(api: ApiFactory) -> None:
     )
     assert response.status_code == 401
     assert harness.store.jobs() == []
-    assert harness.store.requests() == []
+    assert harness.store.export_request_history() == []
     assert harness.events() == []
 
 
@@ -388,7 +388,7 @@ def test_run_now_against_an_unknown_resident_is_404(api: ApiFactory) -> None:
     response = harness.client.post("/residents/nobody/routines/daily-summary/run")
     assert response.status_code == 404
     assert response.json()["detail"]["error"] == "unknown_resident"
-    assert harness.store.requests() == []
+    assert harness.store.export_request_history() == []
 
 
 def test_run_now_against_an_unknown_routine_is_404(api: ApiFactory) -> None:
@@ -442,7 +442,7 @@ def test_an_overlapping_run_is_refused_rather_than_queued(api: ApiFactory) -> No
     harness.settle()
     assert len(harness.events("routine_started")) == 1
 
-    refused = [r for r in harness.store.requests() if r.outcome.startswith("refused")]
+    refused = [r for r in harness.store.export_request_history() if r.outcome.startswith("refused")]
     assert len(refused) == 1
 
 
@@ -506,7 +506,7 @@ def test_a_run_now_is_refused_while_another_process_runs_the_resident(
     assert "daily-summary" in detail["message"]
     assert "held-run" in detail["message"]
     assert harness.events("routine_started") == []
-    refused = [r for r in harness.store.requests() if r.outcome.startswith("refused")]
+    refused = [r for r in harness.store.export_request_history() if r.outcome.startswith("refused")]
     assert len(refused) == 1, "a run somebody asked for and did not get is still a fact"
 
 
@@ -628,7 +628,7 @@ def test_job_text_bounds_are_exact_and_rejections_have_no_effect(
     assert response.status_code == 422
     assert response.json()["detail"][0]["type"] == "string_too_long"
     assert refused.store.jobs() == []
-    assert refused.store.requests() == []
+    assert refused.store.export_request_history() == []
     assert refused.events() == []
 
     accepted = api()
@@ -644,7 +644,7 @@ def test_required_skill_bounds_are_exact_and_side_effect_free(api: ApiFactory) -
         response = refused.client.post("/jobs", json={"title": "work", "required_skills": invalid})
         assert response.status_code == 422
         assert refused.store.jobs() == []
-        assert refused.store.requests() == []
+        assert refused.store.export_request_history() == []
         assert refused.events() == []
     accepted = api()
     assert (
@@ -728,7 +728,7 @@ def test_a_decision_is_recorded_and_emits_needs_human_resolved(api: ApiFactory) 
     # Emitted as the villager who knocked, so burrow walks the right one from the door.
     assert resolved[0]["agent_id"] == "claude-code:test-agent"
     assert harness.client.get("/approvals").json()["approvals"] == []
-    assert [row.outcome for row in harness.store.requests()] == ["recorded"]
+    assert [row.outcome for row in harness.store.export_request_history()] == ["recorded"]
 
 
 def test_lifespan_surfaces_an_outbox_worker_that_cannot_stop(api: ApiFactory) -> None:
@@ -899,7 +899,7 @@ def test_invalid_edits_are_422_before_write_event_or_prompt(
     assert record_after is not None
     assert record_after.pending
     assert record_after.edit is None
-    assert harness.store.requests() == []
+    assert harness.store.export_request_history() == []
     assert harness.events() == []
     harness.client.post("/residents/test-agent/routines/daily-summary/run")
     harness.settle()
@@ -1011,7 +1011,7 @@ def test_approval_wire_body_boundary_and_oversize_inputs_have_no_effect(api: Api
         assert response.status_code == 413
         assert response.json()["detail"]["error"] == "approval_body_too_large"
     assert harness.store.approval(request_id).pending  # ty: ignore[unresolved-attribute]
-    assert harness.store.requests() == []
+    assert harness.store.export_request_history() == []
     assert harness.events() == []
 
 
@@ -1167,7 +1167,7 @@ def test_deep_raw_approval_json_is_422_before_materialization(api: ApiFactory) -
     assert response.status_code == 422
     assert response.json()["detail"][0]["loc"] == ["body", "edit"]
     assert harness.store.approval(request_id).pending  # ty: ignore[unresolved-attribute]
-    assert harness.store.requests() == []
+    assert harness.store.export_request_history() == []
     assert harness.events() == []
     harness.client.post("/residents/test-agent/routines/daily-summary/run")
     harness.settle()
@@ -2358,7 +2358,7 @@ def test_run_now_on_a_paused_resident_is_409(api: ApiFactory) -> None:
     assert detail["message"].startswith("paused: budget exceeded")
     assert "daily_cost_usd" in detail["message"]
     # Refused before anything is written: no request row, no routine_started.
-    assert harness.store.requests() == []
+    assert harness.store.export_request_history() == []
     assert harness.events("routine_started") == []
 
 
@@ -2609,7 +2609,7 @@ def test_handoff_fields_have_exact_422_bounds(
     response = refused.client.post("/delegate", json={**HANDOFF, field: "x" * (limit + 1)})
     assert response.status_code == 422
     assert refused.store.jobs() == []
-    assert refused.store.requests() == []
+    assert refused.store.export_request_history() == []
     assert refused.events() == []
 
     at_limit = with_receiver(api, write_resident)
@@ -2769,7 +2769,7 @@ def test_a_session_cannot_decide_its_own_approval(api: ApiFactory) -> None:
     assert detail["error"] == "session_credential_forbidden"
     assert "answering its own knock" in detail["message"]
     assert harness.store.approval(request_id).pending  # ty: ignore[unresolved-attribute]
-    assert harness.store.requests() == [], "and nothing was logged as accepted"
+    assert harness.store.export_request_history() == [], "and nothing was logged as accepted"
     assert harness.events("needs_human_resolved") == []
 
 
@@ -2788,7 +2788,7 @@ def test_a_session_may_not_declare_a_resident_or_fire_a_routine(api: ApiFactory)
     assert fired.status_code == 403
     assert "arrives through the board" in fired.json()["detail"]["message"]
     assert not (harness.residents_dir / "note-keeper").exists()
-    assert harness.store.requests() == []
+    assert harness.store.export_request_history() == []
 
 
 def test_every_other_write_path_is_refused_too(api: ApiFactory) -> None:
@@ -3358,7 +3358,7 @@ def test_a_provision_is_recorded_as_a_request_somebody_made(
 
     response = harness.client.post("/residents/test-agent/provision")
 
-    logged = harness.store.requests()
+    logged = harness.store.export_request_history()
     assert [record.outcome for record in logged] == ["provisioned"]
     assert response.json()["request_id"] == logged[0].request_id
 
@@ -3711,7 +3711,7 @@ def test_a_retirement_is_recorded_as_a_request_somebody_made(
         "/residents/test-agent/retire", json={"revision": rehearsal["revision"]}
     )
 
-    logged = harness.store.requests()
+    logged = harness.store.export_request_history()
     assert [record.outcome for record in logged] == ["rehearsed", "retired"]
     assert response.json()["request_id"] == logged[-1].request_id
 
@@ -3729,7 +3729,7 @@ def test_a_refused_retirement_says_so_in_the_request_log(api: ApiFactory, tmp_pa
     rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
     harness.client.post("/residents/test-agent/retire", json={"revision": rehearsal["revision"]})
 
-    logged = harness.store.requests()
+    logged = harness.store.export_request_history()
     assert [record.outcome for record in logged] == [
         "rehearsed",
         "refused: worktree_refused",
@@ -3754,7 +3754,7 @@ def test_a_retirement_that_stopped_part_way_is_not_logged_as_refused(
     rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
     harness.client.post("/residents/test-agent/retire", json={"revision": rehearsal["revision"]})
 
-    outcomes = [record.outcome for record in harness.store.requests()]
+    outcomes = [record.outcome for record in harness.store.export_request_history()]
     assert outcomes[-1] == "stopped part-way: retire_failed"
 
 
@@ -3795,7 +3795,7 @@ def test_a_retirement_whose_commit_git_refused_says_which_side_it_stopped_on(
     # than refused.
     assert validate_tree(harness.residents_dir).residents[0].retired
     assert not host.touched
-    assert harness.store.requests()[-1].outcome == "stopped part-way: commit_failed"
+    assert harness.store.export_request_history()[-1].outcome == "stopped part-way: commit_failed"
 
 
 @pytest.mark.usefixtures("village")
@@ -4100,7 +4100,9 @@ def test_a_refused_edit_commits_nothing_and_logs_the_refusal(
     harness.client.put("/residents/test-agent/declaration", json={"manifest": body["manifest"]})
 
     assert declaration(harness)["text"] == before
-    assert [r.outcome for r in harness.store.requests()] == ["refused: manifest_invalid"]
+    assert [r.outcome for r in harness.store.export_request_history()] == [
+        "refused: manifest_invalid"
+    ]
 
 
 def test_two_editors_are_told_rather_than_one_silently_winning(
@@ -4471,7 +4473,7 @@ def test_a_session_may_not_write_anything_the_fleet_is_declared_by(
         assert response.status_code == 403, route
         assert response.json()["detail"]["error"] == "session_credential_forbidden", route
     assert declaration(harness)["text"] == before
-    assert harness.store.requests() == [], "and nothing was logged as accepted"
+    assert harness.store.export_request_history() == [], "and nothing was logged as accepted"
 
 
 def test_a_granted_session_can_create_and_update_an_ungranted_skill(
@@ -4518,7 +4520,7 @@ def test_a_granted_session_cannot_grant_everyone_or_rewrite_a_granted_skill(
     assert "grant" in defaulted.json()["detail"]["message"]
     assert granted.status_code == 403
     assert "rewriting" in granted.json()["detail"]["message"]
-    assert harness.store.requests() == []
+    assert harness.store.export_request_history() == []
 
     assert harness.client.post("/skills", json=NEW_SKILL | {"defaults": True}).status_code == 201
     default_skill = harness.client.put(
@@ -4805,7 +4807,7 @@ def test_rehearsing_is_refused_without_the_rehearse_grant(
     assert "spends the caller's budget" in message
     assert "residents.rehearse" in message
     assert seen == []
-    assert harness.store.requests() == []
+    assert harness.store.export_request_history() == []
     assert harness.store.ledger() == []
 
 
@@ -4876,7 +4878,7 @@ def test_resident_session_grants_never_open_declaration_edits_or_retirement(
 
     assert declaration_edit.status_code == 403
     assert retirement.status_code == 403
-    assert harness.store.requests() == []
+    assert harness.store.export_request_history() == []
 
 
 # -- the one door an approval opens (warren#437) ----------------------------------------
@@ -5036,7 +5038,7 @@ def test_a_decision_that_is_not_a_live_yes_about_this_edit_writes_nothing(
     assert response.json()["detail"]["error"] == "edit_not_approved"
     assert expected in response.json()["detail"]["message"]
     assert declaration(harness)["text"] == before
-    assert harness.store.requests() == [], "a refusal at the door records nothing"
+    assert harness.store.export_request_history() == [], "a refusal at the door records nothing"
 
 
 def test_a_yes_that_has_run_out_writes_nothing(grantor: Callable[..., Harness]) -> None:
@@ -5194,7 +5196,9 @@ def test_losing_the_claim_between_the_match_and_the_write_writes_nothing(
     assert response.json()["detail"]["error"] == "edit_not_approved"
     assert "spent on another write" in response.json()["detail"]["message"]
     assert declaration(harness)["text"] == before
-    assert [row.outcome for row in harness.store.requests()] == ["refused: edit_not_approved"]
+    assert [row.outcome for row in harness.store.export_request_history()] == [
+        "refused: edit_not_approved"
+    ]
 
 
 def test_a_write_that_dies_on_something_unnamed_gives_the_decision_back_too(
@@ -5235,7 +5239,7 @@ def test_the_grant_alone_writes_nothing(grantor: Callable[..., Harness]) -> None
     assert response.json()["detail"]["error"] == "session_credential_forbidden"
     assert "named no approved request" in response.json()["detail"]["message"]
     assert declaration(harness)["text"] == before
-    assert harness.store.requests() == []
+    assert harness.store.export_request_history() == []
 
 
 def test_an_approval_does_not_help_a_session_that_holds_no_grant(

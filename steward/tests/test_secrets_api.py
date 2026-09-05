@@ -158,7 +158,7 @@ def test_a_put_records_the_name_and_never_the_value(vault: VaultFactory):
     [event] = harness.events("secret_written")
     assert event["payload"] == {"secret": "STEWARD_CHAT_TOKEN_TESTY"}
     assert FAKE_BOT_TOKEN not in harness.events_path.read_text(encoding="utf-8")
-    [logged] = harness.store.requests()
+    [logged] = harness.store.export_request_history()
     assert logged.outcome == "secret_written"
     assert logged.path == "/secrets/STEWARD_CHAT_TOKEN_TESTY"
     assert logged.detail == {"secret": "STEWARD_CHAT_TOKEN_TESTY"}
@@ -199,7 +199,7 @@ def test_a_traversal_in_the_name_never_reaches_the_filesystem(vault: VaultFactor
     assert escaped.status_code in {404, 422}
     assert dotted.status_code in {404, 422}
     assert not (harness.secrets_dir.parent / "escaped").exists()
-    assert harness.store.requests() == []
+    assert harness.store.export_request_history() == []
 
 
 @pytest.mark.parametrize(
@@ -240,7 +240,7 @@ def test_a_refusal_never_quotes_the_value_it_refused(vault: VaultFactory):
 
     assert response.status_code == 422
     assert FAKE_BOT_TOKEN not in response.text
-    assert harness.store.requests() == []
+    assert harness.store.export_request_history() == []
 
 
 def test_an_unknown_body_key_is_refused_rather_than_ignored(vault: VaultFactory):
@@ -399,7 +399,7 @@ def test_a_refusal_never_quotes_a_mistyped_body_either(vault: VaultFactory):
         assert response.status_code == 422
         assert FAKE_BOT_TOKEN not in response.text
         assert response.json()["detail"]["error"] == "invalid_secret_body"
-    assert harness.store.requests() == []
+    assert harness.store.export_request_history() == []
 
 
 def test_a_name_that_is_a_token_is_not_echoed_back(vault: VaultFactory):
@@ -427,4 +427,4 @@ def test_a_resident_session_may_not_write_a_secret(vault: VaultFactory):
     assert response.json()["detail"]["error"] == "session_credential_forbidden"
     assert "identity" in response.json()["detail"]["message"]
     assert not (harness.secrets_dir / "STEWARD_CHAT_TOKEN_TESTY").exists()
-    assert harness.store.requests() == [], "and nothing was logged as accepted"
+    assert harness.store.export_request_history() == [], "and nothing was logged as accepted"
