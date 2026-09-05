@@ -39,7 +39,7 @@ runs:
     # An ephemeral node: it exists for this job and is removed from the tailnet when the
     # runner goes away. The tag is what the ACL grants access to (deploy/README.md).
     # `ping` makes the action verify it can reach the NAS before handing back.
-    - uses: tailscale/github-action@v4
+    - uses: tailscale/github-action@306e68a486fd2350f2bfc3b19fcd143891a4a2d8 # v4
       with:
         authkey: ${{ inputs.authkey }}
         oauth-client-id: ${{ inputs.authkey == '' && inputs.oauth-client-id || '' }}
