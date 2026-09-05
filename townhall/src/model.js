@@ -33,11 +33,8 @@ export function viewModel(snapshot, stewardResidents = []) {
   for (const item of snapshot.residents || []) {
     if (item.match?.agent_id && !byAgent.has(item.match.agent_id)) byAgent.set(item.match.agent_id, item);
   }
-  const people = snapshot.villagers.map((villager, index) => {
+  const people = snapshot.villagers.map((villager) => {
     const manifest = byFile.get(villager.resident_file) || byAgent.get(villager.id);
-    const angle =
-      (index / Math.max(snapshot.villagers.length, 1)) * Math.PI * 2 - Math.PI / 2;
-    const radius = 31 + (index % 3) * 7;
     return {
       ...villager,
       manifest,
@@ -45,8 +42,6 @@ export function viewModel(snapshot, stewardResidents = []) {
       role: manifest?.meta?.role,
       capabilities: manifest?.capabilities,
       body: manifest?.body,
-      x: 50 + Math.cos(angle) * radius,
-      y: 50 + Math.sin(angle) * radius,
     };
   });
   return {

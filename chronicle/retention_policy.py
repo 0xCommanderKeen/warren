@@ -39,24 +39,6 @@ BOARD_ONLY_TYPES = frozenset(
     {"task_posted", "task_claimed", "task_done", "task_failed"}
 )
 PROJECTION_ACTION_TYPES = {"task_started", "tool_called", "artifact_produced"}
-MOOD_TERMINAL_TYPES = {
-    "tool_failed",
-    "routine_failed",
-    "task_failed",
-    "heartbeat",
-    "routine_finished",
-    "task_done",
-}
-MOOD_FAILURE_TYPES = {"tool_failed", "routine_failed", "task_failed"}
-MOOD_WORK_WEIGHTS = {
-    "task_started": 3,
-    "task_claimed": 3,
-    "routine_started": 3,
-    "artifact_produced": 2,
-    "journal_written": 2,
-    "tool_called": 1,
-    "heartbeat": 1,
-}
 MOOD_ORDINARY_SUPERSEDERS = {
     "task_started",
     "tool_called",
