@@ -66,50 +66,11 @@ function remoteMessage(body, fallback) {
   return nonEmpty(body?.detail?.message) ? body.detail.message : fallback;
 }
 
-const operations = {
-  job: (body) => ({
-    path: "/jobs", body, status: 202,
-    reconcilesAmbiguous: (receipt) => nonEmpty(receipt?.task_id),
-    accepts: (receipt) => receipt?.status === "accepted" && nonEmpty(receipt.request_id) && nonEmpty(receipt.task_id),
-    confirms: (receipt, snapshot) => nonEmpty(receipt?.task_id) && snapshot?.tasks?.some((task) => task.id === receipt.task_id),
-  }),
-  routine: (residentId, routineId) => ({
-    path: `/residents/${encodeURIComponent(residentId)}/routines/${encodeURIComponent(routineId)}/run`,
-    status: 202,
-    reconcilesAmbiguous: () => false,
-    accepts: (receipt) => receipt?.status === "accepted" && nonEmpty(receipt.request_id) && receipt.resident === residentId && receipt.routine === routineId,
-    confirms: (_receipt, snapshot, baseline) => {
-      const oldIds = new Set(baseline?.routines?.map((run) => run.run_id));
-      return snapshot?.routines?.some((run) => !oldIds.has(run.run_id) &&
-        run.routine === routineId && run.trigger === "manual" && run.agent_id?.endsWith(`:${residentId}`));
-    },
-  }),
-  approval: (requestId, body) => ({
-    path: `/approvals/${encodeURIComponent(requestId)}`, body, status: 202,
-    reconcilesAmbiguous: () => true,
-    accepts: (receipt) => receipt?.status === "recorded" && nonEmpty(receipt.request_id) && receipt.approval_request_id === requestId && receipt.decision === body.decision,
-    confirms: (_receipt, snapshot) => snapshot?.approvals?.some((approval) =>
-      approval.request_id === requestId && approval.state === "resolved" && approval.decision === body.decision),
-  }),
-  resident: (body) => ({
-    path: "/residents", body, status: 201,
-    reconcilesAmbiguous: () => true,
-    accepts: (receipt) => receipt?.status === "accepted" && nonEmpty(receipt.request_id) &&
-      receipt.id === body.id && typeof receipt.changed === "boolean",
-    confirms: (receipt, snapshot, baseline) => {
-      const oldIds = new Set(baseline?.villagers?.map((villager) => villager.id));
-      return receipt?.changed === false || snapshot?.villagers?.some((villager) =>
-        !oldIds.has(villager.id) && villager.id?.endsWith(`:${body.id}`));
-    },
-  }),
-};
-
 export function createStewardClient({ baseUrl = "", fetch: fetchImpl = fetch } = {}) {
   let credentials = null;
   let writeState = null;
-  let latestSnapshot = null;
 
-  async function write(operation) {
+  async function decideApproval(requestId, body) {
     // Defence in depth for warren#256, and deliberately the first thing here: refusing
     // before `writeState` is touched means a refused base cannot park an unresolved write
     // and block every later one. `import.meta.env.DEV` is `false` in every built bundle, so
@@ -124,16 +85,16 @@ export function createStewardClient({ baseUrl = "", fetch: fetchImpl = fetch } =
     if (!credentials) throw new StewardWriteError("Steward credentials are required", { code: "credentials_required" });
     if (writeState) throw new StewardWriteError("A Steward write is already unresolved", { code: "write_blocked" });
 
-    writeState = { state: "sending", operation, baseline: latestSnapshot };
+    writeState = { state: "sending", requestId, decision: body.decision };
     let response;
     try {
-      response = await fetchImpl(`${normalizedBaseUrl(baseUrl)}${operation.path}`, {
+      response = await fetchImpl(`${normalizedBaseUrl(baseUrl)}/approvals/${encodeURIComponent(requestId)}`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${credentials.token}`,
-          ...(operation.body === undefined ? {} : { "Content-Type": "application/json" }),
+          "Content-Type": "application/json",
         },
-        ...(operation.body === undefined ? {} : { body: JSON.stringify(operation.body) }),
+        body: JSON.stringify(body),
       });
     } catch {
       writeState = { ...writeState, state: "ambiguous" };
@@ -150,31 +111,27 @@ export function createStewardClient({ baseUrl = "", fetch: fetchImpl = fetch } =
         status: response.status, retryable: true,
       });
     }
-    if (response.status !== operation.status || !operation.accepts(receipt)) {
-      writeState = { ...writeState, state: "ambiguous", receipt };
+    if (response.status !== 202 || receipt?.status !== "recorded" || !nonEmpty(receipt.request_id) ||
+      receipt.approval_request_id !== requestId || receipt.decision !== body.decision) {
+      writeState = { ...writeState, state: "ambiguous" };
       throw new StewardWriteError(remoteMessage(receipt, "Steward returned an ambiguous write outcome"), {
         status: response.status, ambiguous: true,
       });
     }
 
-    writeState = { ...writeState, state: "awaiting_confirmation", receipt };
+    writeState = { ...writeState, state: "awaiting_confirmation" };
     return { state: "awaiting_confirmation", receipt };
   }
 
   return {
     setCredentials(next) { credentials = nonEmpty(next?.token) ? { token: next.token } : null; },
     clearCredentials() { credentials = null; },
-    postJob: (body) => write(operations.job(body)),
-    runRoutine: (residentId, routineId) => write(operations.routine(residentId, routineId)),
-    decideApproval: (requestId, body) => write(operations.approval(requestId, body)),
-    createResident: (body) => write(operations.resident(body)),
+    decideApproval,
     confirm(snapshot) {
-      const confirmable = writeState?.state === "awaiting_confirmation" ||
-        (writeState?.state === "ambiguous" &&
-          writeState.operation.reconcilesAmbiguous(writeState.receipt));
-      const resolved = confirmable &&
-        writeState.operation.confirms(writeState.receipt, snapshot, writeState.baseline);
-      latestSnapshot = snapshot;
+      const confirmable = writeState?.state === "awaiting_confirmation" || writeState?.state === "ambiguous";
+      const resolved = confirmable && snapshot?.approvals?.some((approval) =>
+        approval.request_id === writeState.requestId && approval.state === "resolved" &&
+        approval.decision === writeState.decision);
       if (resolved) writeState = null;
       return Boolean(resolved);
     },

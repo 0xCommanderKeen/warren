@@ -31,6 +31,15 @@ describe("Steward client", () => {
     }));
   });
 
+  it("requires credentials after they are cleared", async () => {
+    const fetch = vi.fn();
+    const client = createStewardClient({ fetch });
+    client.setCredentials({ token: "secret" });
+    client.clearCredentials();
+    await expect(client.decideApproval("a-1", { decision: "approve" })).rejects.toMatchObject({ code: "credentials_required" });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it.each([401, 422])("allows retry after a pre-mutation %s refusal", async (status) => {
     const fetch = vi.fn()
       .mockResolvedValueOnce(response(status, { detail: { message: "Refused" } }))
@@ -43,7 +52,11 @@ describe("Steward client", () => {
     await expect(client.decideApproval("a-1", { decision: "approve" })).rejects.toMatchObject({
       status, retryable: true, ambiguous: false,
     });
-    if (status === 401) client.setCredentials({ token: "corrected" });
+    if (status === 401) {
+      await expect(client.decideApproval("a-1", { decision: "approve" })).rejects.toMatchObject({ code: "credentials_required" });
+      expect(fetch).toHaveBeenCalledTimes(1);
+      client.setCredentials({ token: "corrected" });
+    }
     await expect(client.decideApproval("a-1", { decision: "approve" })).resolves.toMatchObject({
       state: "awaiting_confirmation",
     });
@@ -51,7 +64,8 @@ describe("Steward client", () => {
 
   it.each([
     ["a server failure", () => response(500, { detail: { message: "Oops" } })],
-    ["a malformed acceptance", () => response(202, { status: "accepted" })],
+    ["a malformed acceptance", () => response(202, { status: "recorded" })],
+    ["an unreadable receipt", () => ({ status: 202, json: async () => { throw new Error("invalid JSON"); } })],
   ])("blocks retries after %s", async (_name, result) => {
     const fetch = vi.fn().mockResolvedValue(result());
     const client = createStewardClient({ fetch });
@@ -79,7 +93,12 @@ describe("Steward client", () => {
     resolveFetch(response(202, {
       status: "recorded", request_id: "request-1", approval_request_id: "a-1", decision: "approve",
     }));
-    await first;
+    const snapshot = { approvals: [{ request_id: "a-1", state: "pending" }] };
+    expect(client.confirm(snapshot)).toBe(false);
+    await expect(first).resolves.toMatchObject({ state: "awaiting_confirmation" });
+    expect(snapshot.approvals).toEqual([{ request_id: "a-1", state: "pending" }]);
+    expect(client.confirm(snapshot)).toBe(false);
+    expect(client.confirm({ approvals: [{ request_id: "a-1", state: "resolved", decision: "deny" }] })).toBe(false);
 
     expect(client.confirm({ approvals: [{ request_id: "other", state: "resolved", decision: "approve" }] })).toBe(false);
     await expect(client.decideApproval("a-1", { decision: "approve" })).rejects.toMatchObject({
@@ -112,48 +131,6 @@ describe("Steward client", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(client.confirm({ approvals: [{ request_id: "a-1", state: "resolved", decision: "approve" }] })).toBe(true);
   });
-
-
-  it("does not confuse a historical routine run with confirmation of a new write", async () => {
-    const fetch = vi.fn().mockResolvedValue(response(202, {
-      status: "accepted", request_id: "request-1", resident: "keeper", routine: "daily",
-    }));
-    const client = createStewardClient({ fetch });
-    client.setCredentials({ token: "secret" });
-    const oldRun = { run_id: "old", routine: "daily", trigger: "manual", agent_id: "claude:keeper" };
-    client.confirm({ generation: "g", cursor: 4, routines: [oldRun] });
-
-    await client.runRoutine("keeper", "daily");
-
-    expect(client.confirm({ generation: "g", cursor: 5, routines: [oldRun] })).toBe(false);
-    expect(client.confirm({ generation: "g", cursor: 6, routines: [oldRun, { ...oldRun, run_id: "new" }] })).toBe(true);
-  });
-
-  it("owns resident, routine, and approval writes without changing village state", async () => {
-    const fetch = vi.fn()
-      .mockResolvedValueOnce(response(201, { status: "accepted", request_id: "n-1", id: "keeper", changed: true }))
-      .mockResolvedValueOnce(response(202, { status: "accepted", request_id: "r-1", resident: "keeper", routine: "daily" }))
-      .mockResolvedValueOnce(response(202, { status: "recorded", request_id: "a-2", approval_request_id: "a-1", decision: "approve" }));
-    const client = createStewardClient({ fetch });
-    client.setCredentials({ token: "secret" });
-
-    const snapshot = { villagers: [], routines: [], approvals: [] };
-    await client.createResident({ id: "keeper", name: "Keeper" });
-    expect(snapshot.villagers).toEqual([]);
-    expect(client.confirm({ villagers: [{ id: "claude:keeper" }] })).toBe(true);
-    await client.runRoutine("keeper", "daily");
-    expect(snapshot.routines).toEqual([]);
-    expect(client.confirm({ routines: [{ routine: "daily", trigger: "manual", agent_id: "claude:keeper" }] })).toBe(true);
-    await client.decideApproval("a-1", { decision: "approve" });
-    expect(snapshot.approvals).toEqual([]);
-    expect(client.confirm({ approvals: [{ request_id: "a-1", state: "resolved", decision: "approve" }] })).toBe(true);
-
-    expect(fetch.mock.calls.map(([url]) => url)).toEqual([
-      "/residents",
-      "/residents/keeper/routines/daily/run",
-      "/approvals/a-1",
-    ]);
-  });
 });
 
 /* -- the origin guard (warren#256) ----------------------------------------------------- */
@@ -181,8 +158,7 @@ describe("where Steward lives", () => {
   });
 
   it("is whatever a developer running vite points it at", () => {
-    // Arcadia's dev server proxies Chronicle but not Steward, so this override is the only way
-    // to reach a Steward at all in development.
+    // Developers may override the same-origin development proxy.
     vi.stubEnv("DEV", true);
     expect(stewardBaseFromLocation("?steward=http://127.0.0.1:8802")).toBe("http://127.0.0.1:8802");
     vi.stubEnv("VITE_STEWARD_URL", "http://127.0.0.1:8802");
