@@ -36,7 +36,7 @@ from steward.nursery import (
 from steward.prompt import MESSAGE_MAX_CHARS
 from steward.rehearsal import Rehearsal, RehearsalError, rehearse
 from steward.routes.auth import session_of
-from steward.routes.deps import DOCUMENT_MAX_CHARS, Deps, _Body, _refuse
+from steward.routes.deps import DOCUMENT_MAX_CHARS, Deps, RetirementSettings, _Body, _refuse
 from steward.skills import SkillLibrary, effective_skills, library_for
 
 
@@ -639,7 +639,6 @@ def router(deps: Deps) -> APIRouter:  # noqa: C901, PLR0915 — route factory is
             if path.is_file()
         ]
         knobs = deps.write_settings(request)
-        push = knobs.pop("push")  # commit_write takes no push; it is recorded after
         try:
             commit = au.commit_write(
                 residents_dir,
@@ -647,12 +646,13 @@ def router(deps: Deps) -> APIRouter:  # noqa: C901, PLR0915 — route factory is
                 au.DECLARE_SUBJECT.format(id=body.id),
                 request_id=request_id,
                 principal=deps.acting_principal(request),
-                **knobs,
+                identity=knobs["identity"],
+                allow_uncommitted=knobs["allow_uncommitted"],
             )
         except au.AuthoringError as exc:
             db.set_request_outcome(request_id, f"refused: {exc.reason}")
             deps.refuse_write(exc)
-        commit = au.record_push(commit, au.repo_toplevel(residents_dir), push)
+        commit = au.record_push(commit, au.repo_toplevel(residents_dir), knobs["push"])
         recorded = commit.note
         deployed = (
             _deployed_message(report)
@@ -876,7 +876,7 @@ def router(deps: Deps) -> APIRouter:  # noqa: C901, PLR0915 — route factory is
             record_refusal(request_id, reason)
             _refuse(409, reason, "rehearse retirement before confirming the current plan")
         try:
-            common = {
+            common: RetirementSettings = {
                 "residents_dir": residents_dir,
                 "skills_dir": settings.skills_dir,
                 "transport": transport,

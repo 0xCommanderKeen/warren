@@ -31,7 +31,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Unpack
 
 import pytest
 from fastapi.testclient import TestClient
@@ -42,10 +42,15 @@ from steward.api import ApiConfig, create_app
 from steward.deploy import DeployTarget
 from steward.nursery import (
     DeclareStage,
+    NewResident,
     NurseryReport,
     ProvisionStage,
     RegisterStage,
     raise_resident,
+)
+from steward.routes.deps import (
+    NurseryOptions,
+    NurseryPipeline,
 )
 from steward.runners import MockRunner
 from steward.scheduler import STALE_TICK_AFTER_S, SchedulerState, load_scheduled
@@ -76,7 +81,7 @@ def panel(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[PanelFacto
         *,
         manifest: dict[str, Any] | None = None,
         residents: bool = True,
-        nursery: Any = raise_resident,  # noqa: ANN401 — the pipeline seam, injected
+        nursery: NurseryPipeline = raise_resident,
     ) -> Panel:
         residents_dir = tmp_path / "residents"
         residents_dir.mkdir(exist_ok=True)
@@ -477,10 +482,10 @@ NEW_RESIDENT: dict[str, Any] = {
 }
 
 
-def canned_pipeline(*, problems: tuple[str, ...] = ()) -> Any:  # noqa: ANN401 — a seam
+def canned_pipeline(*, problems: tuple[str, ...] = ()) -> NurseryPipeline:
     """Return a nursery that reaches no host, so a UI test can look at the answer's shape."""
 
-    def pipeline(spec: Any, **kwargs: Any) -> NurseryReport:  # noqa: ANN401
+    def pipeline(spec: NewResident, **kwargs: Unpack[NurseryOptions]) -> NurseryReport:
         directory = Path("/srv/steward/residents") / spec.id
         target = DeployTarget(
             resident_id=spec.id,
