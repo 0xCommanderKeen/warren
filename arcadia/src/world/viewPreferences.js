@@ -13,13 +13,13 @@ function write(key, value) {
 
 export function readDisplayPreferences() {
   const value = read(DISPLAY_KEY);
-  if (value?.version !== 1 || !["high", "low"].includes(value.quality) ||
+  if (value?.version !== 1 || !["high", "low", "auto"].includes(value.quality) ||
     (value.paused !== undefined && typeof value.paused !== "boolean")) return { quality: "high" };
   return { quality: value.quality, ...(value.paused === undefined ? {} : { paused: value.paused }) };
 }
 
 export function saveDisplayPreferences({ quality, paused }) {
-  if (!["high", "low"].includes(quality) || (paused !== undefined && typeof paused !== "boolean")) return;
+  if (!["high", "low", "auto"].includes(quality) || (paused !== undefined && typeof paused !== "boolean")) return;
   write(DISPLAY_KEY, { version: 1, quality, ...(paused === undefined ? {} : { paused }) });
 }
 

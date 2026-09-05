@@ -1,3 +1,4 @@
+import { ArtifactPreview } from "./ArtifactPreview.jsx";
 import { useMemo, useState } from "react";
 import "./village-archive.css";
 
@@ -42,7 +43,7 @@ function ArchiveRecord({ record, names, onSelectAgent }) {
       <dl><dt>{record.kind === "task" ? "Last updated" : "Observed"}</dt><dd><RecordedTime value={record.ts} /></dd>
         {record.kind === "task" ? <><dt>Task ID</dt><dd>{record.source.id}</dd><dt>Required skills</dt><dd>{record.source.required_skills.join(", ") || "None recorded"}</dd><dt>Posted by</dt><dd>{names.get(record.source.posted_by) || record.source.posted_by}</dd><dt>Outputs</dt><dd>No outputs linked in this record.</dd></> : <><dt>Full path</dt><dd className="va-path">{record.path}</dd><dt>Project</dt><dd>{record.project || "Not recorded"}</dd>{record.kind === "journal" && <><dt>Routine</dt><dd>{record.source.routine || "Not recorded"}</dd><dt>Source</dt><dd>{record.source.source || "Not recorded"}</dd></>}</>}
       </dl>
-      {record.path && <><p className="va-metadata-note">This archive contains the recorded path and metadata. File contents are not included.</p><PathActions path={record.path} canOpen={record.kind === "artifact"} /></>}
+      {record.path && <><p className="va-metadata-note">This archive contains the recorded path and metadata. Preview availability depends on the archive server.</p><PathActions path={record.path} canOpen={record.kind === "artifact"} />{record.kind === "artifact" && <ArtifactPreview artifact={record.source} />}</>}
     </details>
   </article>;
 }

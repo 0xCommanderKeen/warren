@@ -386,3 +386,85 @@ test("zoomed overview map and keyboard shortcuts navigate without stealing searc
   await expect(page.getByRole("region", { name: "Village archive" })).toBeVisible();
   clean(observed);
 });
+
+test("village plots move, undo, persist across reload and reset without moving other homes", async ({ page }) => {
+  const observed = await load(page, population(5));
+  const canvas = await ready(page, 5);
+  const saved = () => page.evaluate(() => JSON.parse(localStorage.getItem("arcadia:village-layout:v1")));
+  await expect.poll(async () => Boolean(await saved())).toBe(true);
+  const initial = await saved();
+  const plot = async id => (await saved()).allocated.find(entry => entry[0] === id)[1];
+  await page.getByRole("button", { name: "Edit layout", exact: true }).click();
+  const editor = page.getByRole("region", { name: "Edit village layout" });
+  await editor.getByRole("combobox", { name: "Building" }).selectOption("square");
+  await editor.getByRole("button", { name: "Move north" }).click();
+  await expect(editor.getByRole("status")).toContainText("occupied");
+  expect(await plot("square")).toEqual([0, 0]);
+  await editor.getByRole("button", { name: "Move Village square to -30, -30", exact: true }).click();
+  await expect.poll(() => plot("square")).toEqual([-30, -30]);
+  await expect(canvas).toHaveAttribute("data-outside-agents", "0");
+  await editor.getByRole("button", { name: "Undo last move" }).click();
+  await expect.poll(() => plot("square")).toEqual([0, 0]);
+  await editor.getByRole("button", { name: "Move Village square to -30, -30", exact: true }).click();
+  await expect.poll(() => plot("square")).toEqual([-30, -30]);
+  await page.reload();
+  await ready(page, 5);
+  expect(await plot("square")).toEqual([-30, -30]);
+  for (const [id, position] of initial.allocated.filter(([id]) => id.startsWith("home:"))) expect(await plot(id)).toEqual(position);
+  await page.getByRole("button", { name: "Edit layout", exact: true }).click();
+  await expect(editor.getByRole("button", { name: "Village square at -30, -30", exact: true })).toBeVisible();
+  await editor.getByRole("button", { name: "Reset layout" }).click();
+  await expect.poll(() => plot("square")).toEqual([0, 0]);
+  expect((await saved()).allocated).toEqual(initial.allocated);
+  clean(observed);
+});
+
+test("adaptive detail responds to sustained slow rendering and remains the saved preference", async ({ page }) => {
+  // Exercise real rendering at a constrained frame cadence, not fabricated FPS data.
+  await page.addInitScript(() => {
+    window.requestAnimationFrame = callback => window.setTimeout(() => callback(performance.now()), 55);
+    window.cancelAnimationFrame = id => clearTimeout(id);
+  });
+  const observed = await load(page, population(5));
+  const canvas = await ready(page, 5);
+  await page.getByRole("combobox", { name: "Rendering quality" }).selectOption("auto");
+  await expect(canvas).toHaveAttribute("data-quality", "low", { timeout: 15000 });
+  await expect(page.getByRole("combobox", { name: "Rendering quality" })).toHaveValue("auto");
+  expect(await page.evaluate(() => JSON.parse(localStorage.getItem("arcadia:display:v1")).quality)).toBe("auto");
+  await page.reload();
+  await ready(page, 5);
+  await expect(page.getByRole("combobox", { name: "Rendering quality" })).toHaveValue("auto");
+  await page.getByRole("combobox", { name: "Rendering quality" }).selectOption("high");
+  await expect(canvas).toHaveAttribute("data-quality", "high");
+  clean(observed);
+});
+
+test("lodge commons regroup by recorded project without moving personal beds", async ({ page }) => {
+  const envelope = population(4);
+  envelope.snapshot.villagers.forEach((agent, i) => { agent.residency = "visitor"; agent.state = "resting"; agent.project = i % 2 ? "letters" : "garden"; });
+  const observed = await load(page, envelope);
+  await ready(page, 4);
+  await page.getByRole("button", { name: "Visitor lodge", exact: true }).click();
+  const room = page.getByTestId("interior-canvas");
+  await expect(room).toHaveAttribute("data-common-groups", "2");
+  await page.getByRole("button", { name: "Focus next resident" }).click();
+  await expect(room).toHaveAttribute("data-focus-agent", "claude:resident-0");
+  await page.getByRole("button", { name: "Focus next resident" }).click();
+  await expect(room).toHaveAttribute("data-focus-agent", "claude:resident-1");
+  await expect(page.getByRole("region", { name: "Selected villager" })).toContainText("Villager 001");
+  const stations = JSON.parse(await room.getAttribute("data-stations"));
+  envelope.snapshot.generation += 1;
+  envelope.snapshot.villagers[0].project = "new project";
+  await page.evaluate(next => window.villageStream.listeners.snapshot({ data: JSON.stringify(next) }), envelope);
+  await expect(room).toHaveAttribute("data-common-groups", "3");
+  expect(JSON.parse(await room.getAttribute("data-stations"))).toEqual(stations);
+  envelope.snapshot.generation += 1;
+  envelope.snapshot.villagers.shift();
+  await page.evaluate(next => window.villageStream.listeners.snapshot({ data: JSON.stringify(next) }), envelope);
+  await expect(room).toHaveAttribute("data-agents", "3");
+  await expect(room).toHaveAttribute("data-common-groups", "2");
+  const after = JSON.parse(await room.getAttribute("data-stations"));
+  for (const station of stations) expect(after.find(item => item.id === station.id).position).toEqual(station.position);
+  expect(after.find(item => item.id === stations[0].id).present).toBe(false);
+  clean(observed);
+});

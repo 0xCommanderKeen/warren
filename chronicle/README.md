@@ -202,6 +202,9 @@ deploy is pushed from a machine that has the repo checked out.
   `uv sync --frozen --no-dev` and runs `uv run --no-dev python serve.py 8737` — the `__main__` entry point, which reads
   `CHRONICLE_HOST=0.0.0.0`, `CHRONICLE_EVENTS=/data/events.jsonl`, `CHRONICLE_ARCHIVE`,
   `CHRONICLE_VILLAGERS` and `CHRONICLE_TOKEN=<shared secret>` from the environment.
+  Optional artifact previews use `CHRONICLE_ARTIFACT_PREVIEW_ROOTS` and dedicated
+  read-only output mounts; they remain disabled unless configured. See
+  [published artifact previews](docs/artifact-previews.md).
   `uvicorn serve:app` reads the same settings at import (only the bind address is
   uvicorn's own `--host`/`--port`); it did not until warren#313, and the NAS ran it
   for six days with every setting silently ignored. `tests/test_deployment_bundle.py`
@@ -209,7 +212,7 @@ deploy is pushed from a machine that has the repo checked out.
   at `CHRONICLE_EVENTS`. The compose file is
   [`deploy/compose.yaml`](deploy/compose.yaml), published by the repo's `deploy/deploy.sh`. Deploy code
   and all runtime support and resident manifests with the authoritative
-  tar-over-ssh recipe (UGOS scp is broken): `tar -cf - pyproject.toml uv.lock serve.py config.py event_log.py delivery_id_index.py state_coordinator.py village_state.py identity.py retention.py
+  tar-over-ssh recipe (UGOS scp is broken): `tar -cf - pyproject.toml uv.lock serve.py config.py artifact_preview.py event_log.py delivery_id_index.py state_coordinator.py village_state.py identity.py retention.py
   retention_policy.py retention_ledger.py retention_approvals.py retention_mood.py
   retention_projection.py retention-policy.json
   approval_protocol.py journal_observations.py notification_persistence.py protocol.py

@@ -54,7 +54,7 @@ A return briefing compares bounded ID/state metadata from the previous visit wit
 
 Follow mode previews the next view briefly before opening the selected agent’s destination (immediately with motion paused or reduced motion). Building shortcuts and Alt+0–3 navigate to overview, workshop, lodge, and archive; shortcuts leave text inputs alone. When zoomed in, an interactive small map shows actual building positions without shifting the page. The location breadcrumb and overview button make navigation explicit. Camera position, rendering quality, and motion preferences persist locally after validation.
 
-Enter the archive to search completed tasks, artifacts, and journals by recorded project and agent. Inspect metadata, copy paths, or open recorded HTTP(S) artifact links. File contents and task-to-artifact associations are not supplied by the current contract, so the archive does not invent previews or associations.
+Enter the archive to search completed tasks, artifacts, and journals by recorded project and agent. Inspect metadata, copy paths, or open recorded HTTP(S) artifact links. The explicit Preview file action supports text, Markdown, and bounded raster images through Chronicle’s opt-in published artifact directories; see [backend configuration](../chronicle/docs/artifact-previews.md). Previews show the current file, not a historical copy. Task-to-artifact associations are not inferred.
 
 Agent dossiers show exact pending questions and approval options beside recorded failure context. Contextual and global approval views share one authentication/submission state and the existing non-optimistic Steward boundary. Recovery links lead to recorded context; presentation does not invent retry endpoints or change authority.
 
@@ -74,3 +74,5 @@ pnpm test:browser
 `pnpm test` parses Chronicle's complete fixture and checks that an unsupported contract version produces a visible error instead of a partially rendered village.
 
 The production Compose/nginx shape, cutover, smoke check, and rollback procedure are in [docs/deployment.md](docs/deployment.md).
+
+Use **Edit layout** to move buildings between plots with automatically reconnected streets, undo, and reset. Layout changes stay in this browser. The workshop includes recorded delegation history. Lodge interiors add project common tables while preserving personal beds; room controls cycle residents and add name/project search in crowded rooms. **Adaptive detail** starts with full rendering and selects the light profile after sustained slow frames.

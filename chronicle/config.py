@@ -86,6 +86,7 @@ class Config:
     ledger_bytes: int = 5 * 1024 * 1024
     knock_lock_shards: int = 32
     drop_seconds: int = 12 * 60 * 60
+    artifact_preview_roots: tuple[Path, ...] = ()
 
     @classmethod
     def from_env(
@@ -116,6 +117,11 @@ class Config:
             ).expanduser(),
             token=(read("TOKEN") or "").strip(),
             archive_dir=Path(archive).expanduser() if archive else None,
+            artifact_preview_roots=tuple(
+                Path(item.strip()).expanduser()
+                for item in (read("ARTIFACT_PREVIEW_ROOTS") or "").split(os.pathsep)
+                if item.strip()
+            ),
             max_log_bytes=_integer(read("MAX_LOG"), defaults.max_log_bytes),
             notify_url=(read("NOTIFY_URL") or "").strip(),
             notify_token=(read("NOTIFY_TOKEN") or "").strip(),

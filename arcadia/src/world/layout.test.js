@@ -35,7 +35,7 @@ describe("expandable village layout", () => {
   });
 
   it.each([
-    state => { state.version = 2; },
+    state => { state.version = 3; },
     state => { state.allocated[0][1] = [NaN, 0]; },
     state => { state.allocated[0][1] = [1, 0]; },
     state => { state.allocated.push(["other", [...state.allocated[0][1]]]); },
@@ -60,7 +60,7 @@ describe("expandable village layout", () => {
     const layout = createVillageLayout();
     layout.update(snapshot([person("agent", { name: "PRIVATE NAME", history: [{ message: "PRIVATE HISTORY" }] })]));
     const state = layout.serialize();
-    expect(Object.keys(state)).toEqual(["version", "allocated", "groups", "bounds"]);
+    expect(Object.keys(state)).toEqual(["version", "allocated", "defaults", "groups", "bounds"]);
     expect(JSON.stringify(state)).not.toContain("PRIVATE");
     expect(JSON.stringify(state).length).toBeLessThan(1000);
     state.allocated[0][1][0] = 999;
@@ -221,6 +221,8 @@ describe("expandable village layout", () => {
     const before = layout.update(snapshot([person("resident")]));
     const saved = layout.serialize();
     // A prior UI version reserved project workshops; keep their plots retired.
+    saved.version = 1;
+    delete saved.defaults;
     const allocation = saved.allocated.find(entry => entry[0] === "workshop");
     allocation[0] = "workshop:legacy-project:0";
     saved.groups.push(["project:legacy-project", [["resident", 0]]]);
@@ -228,6 +230,73 @@ describe("expandable village layout", () => {
     expect(restored.buildings.filter(building => building.kind === "workshop")).toHaveLength(1);
     expect(byId(restored.buildings).get("home:resident").position).toEqual(byId(before.buildings).get("home:resident").position);
     expect(byId(restored.buildings).get("workshop").position).not.toEqual(allocation[1]);
+  });
+
+  it("moves buildings reversibly while keeping identities, connected streets and clear routes", () => {
+    const layout = createVillageLayout();
+    const input = snapshot([person("hob", { state: "working" }), person("pip")]);
+    const initial = layout.update(input);
+    const oldHome = byId(initial.buildings).get("home:hob").position;
+    expect(layout.moveBuilding("home:hob", [30, 20])).toEqual({ ok: true, changed: true });
+    const moved = layout.update(input);
+    expect(moved.layoutRevision).toBe(1);
+    expect(moved.canUndoLayoutMove).toBe(true);
+    expect(byId(moved.buildings).get("home:hob").agentIds).toEqual(["hob"]);
+    expect(byId(moved.buildings).get("home:hob").position).toEqual([30, 20]);
+    expect(moved.roads.some(road => String(road.to) === "30,25")).toBe(true);
+    for (const agent of moved.agents) for (let index = 1; index < agent.route.length; index += 1) {
+      for (const building of moved.buildings) expect(intersectsInterior(agent.route[index - 1], agent.route[index], building)).toBe(false);
+    }
+    expect(layout.undoMove()).toEqual({ ok: true, changed: true });
+    const undone = layout.update(input);
+    expect(byId(undone.buildings).get("home:hob").position).toEqual(oldHome);
+    expect(undone.layoutRevision).toBe(2);
+    expect(undone.canUndoLayoutMove).toBe(false);
+  });
+
+  it("rejects collisions, unbounded/off-grid plots and missing buildings without a revision", () => {
+    const layout = createVillageLayout();
+    const input = snapshot([person("hob")]);
+    layout.update(input);
+    for (const point of [[0, 0], [0, -10], [1, 0], [1000000, 0], [NaN, 0], [0]]) expect(layout.moveBuilding("home:hob", point).ok).toBe(false);
+    expect(layout.moveBuilding("missing", [20, 20]).ok).toBe(false);
+    expect(layout.update(input).layoutRevision).toBe(0);
+  });
+
+  it("migrates v1 homes, persists civic moves in v2 and resets all known buildings to defaults", () => {
+    const original = createVillageLayout();
+    const input = snapshot([person("hob")]);
+    const first = original.update(input);
+    const v1 = original.serialize();
+    v1.version = 1; delete v1.defaults;
+    const layout = createVillageLayout(v1);
+    layout.update(input);
+    expect(layout.moveBuilding("square", [30, 30]).ok).toBe(true);
+    const persisted = layout.serialize();
+    expect(persisted.version).toBe(2);
+    const restored = createVillageLayout(JSON.parse(JSON.stringify(persisted)));
+    const moved = restored.update(input);
+    expect(byId(moved.buildings).get("square").position).toEqual([30, 30]);
+    expect(byId(moved.buildings).get("home:hob").position).toEqual(byId(first.buildings).get("home:hob").position);
+    restored.update(snapshot([...input.villagers, person("newcomer")]));
+    expect(restored.resetLayout()).toEqual({ ok: true, changed: true });
+    const reset = restored.update(input);
+    for (const building of first.buildings) expect(byId(reset.buildings).get(building.id).position).toEqual(building.position);
+    expect(reset.layoutRevision).toBe(1);
+    expect(restored.serialize()).not.toBeNull();
+  });
+
+  it("keeps default assignments collision-free when new arrivals take a moved building's old plot", () => {
+    const layout = createVillageLayout();
+    const input = snapshot([person("hob")]);
+    const initial = layout.update(input);
+    layout.moveBuilding("square", [30, 30]);
+    const expanded = snapshot([...input.villagers, ...Array.from({ length: 12 }, (_, i) => person(`new-${i}`))]);
+    layout.update(expanded);
+    layout.resetLayout();
+    const reset = layout.update(expanded);
+    expect(new Set(reset.buildings.map(building => String(building.position))).size).toBe(reset.buildings.length);
+    expect(byId(reset.buildings).get("home:hob").position).toEqual(byId(initial.buildings).get("home:hob").position);
   });
 
   it("is deterministic for the same population and does not mutate a snapshot", () => {

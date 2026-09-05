@@ -43,13 +43,13 @@ describe("village archive", () => {
     expect(screen.getAllByRole("article")).toHaveLength(4);
   });
 
-  it("previews metadata only and copies exact local paths with visible feedback", async () => {
+  it("shows metadata before explicit preview and copies exact local paths with visible feedback", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal("navigator", { clipboard: { writeText } });
     openArchive();
     const record = screen.getByRole("article", { name: "report.md" });
     fireEvent.click(within(record).getByText("Inspect artifact"));
-    expect(record).toHaveTextContent("File contents are not included.");
+    expect(record).toHaveTextContent("Preview availability depends on the archive server.");
     expect(within(record).queryByRole("link", { name: /Open artifact/ })).not.toBeInTheDocument();
     fireEvent.click(within(record).getByRole("button", { name: "Copy path" }));
     await waitFor(() => expect(within(record).getByRole("status")).toHaveTextContent("Path copied."));

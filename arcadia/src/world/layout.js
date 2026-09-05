@@ -52,7 +52,7 @@ function route(from, source, to, target) {
 }
 
 function validSavedState(value) {
-  if (!value || value.version !== 1 || !Array.isArray(value.allocated) || !Array.isArray(value.groups)) return false;
+  if (!value || ![1, 2].includes(value.version) || !Array.isArray(value.allocated) || !Array.isArray(value.groups)) return false;
   if (value.allocated.length < CIVIC_PLOTS.length || value.allocated.length > MAX_SAVED_ENTRIES || value.groups.length > MAX_SAVED_ENTRIES) return false;
   const id = item => typeof item === "string" && item.length > 0 && item.length <= 1024;
   const coordinate = item => Number.isFinite(item) && Math.abs(item) <= 100000;
@@ -66,7 +66,18 @@ function validSavedState(value) {
     if (!Array.isArray(point) || point.length !== 2 || !point.every(item => coordinate(item) && Math.abs(item) <= maxReach && item % SPACING === 0) || positions.has(String(point))) return false;
     plots.set(entry[0], point); positions.add(String(point));
   }
-  for (const [key, point] of CIVIC_PLOTS) if (String(plots.get(key)) !== String(point)) return false;
+  for (const [key, point] of CIVIC_PLOTS) if (!plots.has(key) || (value.version === 1 && String(plots.get(key)) !== String(point))) return false;
+  if (value.version === 2) {
+    if (!Array.isArray(value.defaults) || value.defaults.length !== value.allocated.length) return false;
+    const defaultIds = new Set(), defaultPoints = new Set();
+    for (const entry of value.defaults) {
+      if (!Array.isArray(entry) || entry.length !== 2 || !plots.has(entry[0]) || defaultIds.has(entry[0]) ||
+        !Array.isArray(entry[1]) || entry[1].length !== 2 || !entry[1].every(n => coordinate(n) && Math.abs(n) <= maxReach && n % SPACING === 0) || defaultPoints.has(String(entry[1]))) return false;
+      defaultIds.add(entry[0]); defaultPoints.add(String(entry[1]));
+    }
+    const defaults = new Map(value.defaults);
+    for (const [key, point] of CIVIC_PLOTS) if (String(defaults.get(key)) !== String(point)) return false;
+  }
   const groupNames = new Set();
   let total = 0;
   for (const entry of value.groups) {
@@ -86,6 +97,9 @@ function validSavedState(value) {
   const bounds = value.bounds;
   if (!bounds || ![bounds.minX, bounds.maxX, bounds.minZ, bounds.maxZ].every(coordinate) || bounds.minX >= bounds.maxX || bounds.minZ >= bounds.maxZ) return false;
   const points = [...plots.values()];
+  if (value.version === 2) return Object.values(bounds).length === 4 &&
+    [bounds.minX + 8, bounds.maxX - 8, bounds.minZ + 8, bounds.maxZ - 8].every(n => n % SPACING === 0 && Math.abs(n) <= maxReach) &&
+    points.every(([x, z]) => x - 8 >= bounds.minX && x + 8 <= bounds.maxX && z - 8 >= bounds.minZ && z + 8 <= bounds.maxZ);
   return bounds.minX === Math.min(...points.map(point => point[0])) - 8 &&
     bounds.maxX === Math.max(...points.map(point => point[0])) + 8 &&
     bounds.minZ === Math.min(...points.map(point => point[1])) - 8 &&
@@ -96,16 +110,41 @@ function validSavedState(value) {
 export function createVillageLayout(savedState = null) {
   const saved = validSavedState(savedState) ? savedState : null;
   const allocated = new Map((saved?.allocated ?? CIVIC_PLOTS).map(([id, point]) => [id, [...point]]));
+  const defaults = new Map((saved?.defaults ?? saved?.allocated ?? CIVIC_PLOTS).map(([id, point]) => [id, [...point]]));
   const occupied = new Set([...allocated.values()].map(String));
   const available = plots();
+  const defaultAvailable = plots();
   const groups = new Map((saved?.groups ?? []).map(([id, members]) => [id, new Map(members)]));
   const previousDestinations = new Map();
   let landscapeBounds = saved?.bounds ? { ...saved.bounds } : null;
+  let layoutRevision = 0;
+  let activeIds = new Set();
+  const undoStack = [];
+  const editLimit = () => SPACING * (Math.ceil(Math.sqrt(allocated.size)) + 1);
+
+  function revised() { previousDestinations.clear(); layoutRevision += 1; }
+  function moveBuilding(id, point, remember = true) {
+    if (!activeIds.has(id)) return { ok: false, error: "Choose a building currently in the village." };
+    if (!Array.isArray(point) || point.length !== 2 || !point.every(n => Number.isFinite(n) && n % SPACING === 0 && Math.abs(n) <= editLimit())) return { ok: false, error: "Choose a plot inside the village editing area." };
+    const old = allocated.get(id);
+    if (String(old) === String(point)) return { ok: true, changed: false };
+    if (occupied.has(String(point))) return { ok: false, error: "That plot is occupied or reserved for a returning building." };
+    if (remember) { undoStack.push({ id, position: [...old] }); if (undoStack.length > 50) undoStack.shift(); }
+    occupied.delete(String(old)); allocated.set(id, [...point]); occupied.add(String(point)); revised();
+    landscapeBounds = { minX: Math.min(landscapeBounds.minX, point[0] - 8), maxX: Math.max(landscapeBounds.maxX, point[0] + 8),
+      minZ: Math.min(landscapeBounds.minZ, point[1] - 8), maxZ: Math.max(landscapeBounds.maxZ, point[1] + 8) };
+    return { ok: true, changed: true };
+  }
 
   function position(id) {
     if (!allocated.has(id)) {
+      const defaultOccupied = new Set([...defaults.values()].map(String));
+      let preferred;
+      do { preferred = defaultAvailable.next().value; } while (defaultOccupied.has(String(preferred)));
+      defaults.set(id, preferred);
       let next;
-      do { next = available.next().value; } while (occupied.has(String(next)));
+      if (!occupied.has(String(preferred))) next = preferred;
+      else do { next = available.next().value; } while (occupied.has(String(next)));
       allocated.set(id, next);
       occupied.add(String(next));
     }
@@ -121,10 +160,28 @@ export function createVillageLayout(savedState = null) {
   }
 
   return {
+    moveBuilding,
+    undoMove() {
+      const previous = undoStack.at(-1);
+      if (!previous) return { ok: false, error: "There is no move to undo." };
+      const result = moveBuilding(previous.id, previous.position, false);
+      if (result.ok) undoStack.pop();
+      return result;
+    },
+    resetLayout() {
+      allocated.clear(); occupied.clear();
+      for (const [id, point] of defaults) { allocated.set(id, [...point]); occupied.add(String(point)); }
+      const points = [...allocated.values()];
+      landscapeBounds = { minX: Math.min(...points.map(p => p[0])) - 8, maxX: Math.max(...points.map(p => p[0])) + 8,
+        minZ: Math.min(...points.map(p => p[1])) - 8, maxZ: Math.max(...points.map(p => p[1])) + 8 };
+      undoStack.length = 0; revised();
+      return { ok: true, changed: true };
+    },
     serialize() {
       // Presentation identity only: never store snapshots, history or agent messages.
-      const state = { version: 1,
+      const state = { version: 2,
         allocated: [...allocated].map(([id, point]) => [id, [...point]]),
+        defaults: [...defaults].map(([id, point]) => [id, [...point]]),
         groups: [...groups].map(([id, members]) => [id, [...members].map(entry => [...entry])]),
         bounds: landscapeBounds ? { ...landscapeBounds } : null };
       return validSavedState(state) ? state : null;
@@ -181,6 +238,7 @@ export function createVillageLayout(savedState = null) {
           buildingId: destinationBuilding.id, appearance: appearance(agent) };
       });
       const list = [...buildings.values()];
+      activeIds = new Set(buildings.keys());
       // Retain roads and terrain beneath journeys queued by the renderer, even after
       // their destination building disappears. Plot reservations already persist.
       const bounds = {
@@ -198,9 +256,9 @@ export function createVillageLayout(savedState = null) {
       for (let z = Math.ceil((bounds.minZ + 3) / 10) * 10 - 5; z < bounds.maxZ; z += 10) {
         roads.push({ from: [bounds.minX + 3, z], to: [bounds.maxX - 3, z], width: 1.25 });
       }
-      for (const item of list) roads.push({ from: [item.position[0], item.position[1] + 2],
+      for (const item of list) roads.push({ from: [item.position[0], item.position[1] + item.depth / 2],
         to: [item.position[0], item.position[1] + 5], width: 0.9 });
-      return { buildings: list, agents, roads, bounds };
+      return { buildings: list, agents, roads, bounds, layoutRevision, canUndoLayoutMove: undoStack.length > 0, editLimit: editLimit() };
     },
   };
 }

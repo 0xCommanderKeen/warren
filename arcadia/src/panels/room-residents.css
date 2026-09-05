@@ -1,0 +1,138 @@
+.room-residents {
+  padding: 12px 18px;
+  background: #f5f1e6;
+  border-top: 1px solid #ded8c7;
+  color: #6d7b5d;
+  font-family: "Avenir Next", "Trebuchet MS", sans-serif;
+}
+.room-residents-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.room-residents-toolbar > p {
+  margin: 0;
+  font-size: 10px;
+  letter-spacing: 0.025em;
+}
+.room-residents-toolbar > p > span {
+  margin-left: 8px;
+  background: #e6ebdb;
+  border-radius: 4px;
+  padding: 2px 5px;
+  font-size: 9px;
+}
+.room-resident-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.room-resident-step button {
+  width: 27px;
+  height: 25px;
+  border: 1px solid #dce1cd;
+  border-radius: 6px;
+  background: #fcfbf1;
+  color: #6a8059;
+  cursor: pointer;
+}
+.room-resident-step span {
+  font-size: 9px;
+  color: #929a82;
+  white-space: nowrap;
+}
+.room-resident-find {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 10px;
+  align-items: end;
+}
+.room-resident-find > label:first-child > span {
+  display: block;
+  font-size: 9px;
+  margin-bottom: 5px;
+  color: #939b85;
+}
+.room-resident-find input,
+.room-resident-find select {
+  font:
+    10px "Avenir Next",
+    "Trebuchet MS",
+    sans-serif;
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #dce0cf;
+  background: #fcfbf2;
+  padding: 8px;
+  border-radius: 6px;
+  color: #667e54;
+}
+.room-project-groups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 10px;
+  max-height: 170px;
+  overflow: auto;
+  scrollbar-width: thin;
+}
+.room-project-groups > details {
+  border: 1px solid #dce1cd;
+  border-radius: 7px;
+  background: #faf8ed;
+  padding: 6px 9px;
+  max-width: 100%;
+}
+.room-project-groups summary {
+  cursor: pointer;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+}
+.room-project-groups summary small {
+  color: #9aa28b;
+  font-size: 9px;
+  margin-left: 9px;
+}
+.room-project-groups details > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 8px 0 1px;
+  max-width: 360px;
+}
+.room-project-groups button {
+  border: 0;
+  border-radius: 4px;
+  background: #eaf0df;
+  color: #6b8359;
+  font-size: 10px;
+  padding: 5px 7px;
+  overflow-wrap: anywhere;
+  text-align: left;
+  cursor: pointer;
+}
+.room-project-groups button[aria-pressed="true"] {
+  background: #55784a;
+  color: #fbf9ed;
+}
+.room-residents button:focus-visible,
+.room-residents input:focus-visible,
+.room-residents select:focus-visible,
+.room-residents summary:focus-visible {
+  outline: 2px solid #b98c59;
+  outline-offset: 2px;
+}
+@media (max-width: 540px) {
+  .room-residents {
+    padding: 10px 12px;
+  }
+  .room-resident-find {
+    grid-template-columns: 1fr;
+  }
+  .room-project-groups {
+    max-height: 130px;
+  }
+}

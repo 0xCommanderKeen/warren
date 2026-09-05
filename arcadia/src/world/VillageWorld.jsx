@@ -13,11 +13,12 @@ export function VillageWorld({
   onReady,
   onError,
   onCameraChange,
+  onQualityChange,
 }) {
   const host = useRef(null);
   const renderer = useRef(null);
-  const callbacks = useRef({ onSelect, onReady, onError, onCameraChange });
-  callbacks.current = { onSelect, onReady, onError, onCameraChange };
+  const callbacks = useRef({ onSelect, onReady, onError, onCameraChange, onQualityChange });
+  callbacks.current = { onSelect, onReady, onError, onCameraChange, onQualityChange };
   const state = useRef(null);
   state.current = { world, selection, paused, quality, follow, cameraCommand };
   useEffect(() => {
@@ -26,6 +27,7 @@ export function VillageWorld({
       instance = createVillageRenderer(host.current, {
         onSelect: (value) => callbacks.current.onSelect?.(value),
         onError: (error) => callbacks.current.onError?.(error),
+        onQualityChange: level => callbacks.current.onQualityChange?.(level),
         onCameraChange: (pose) => callbacks.current.onCameraChange?.(pose),
       });
       renderer.current = instance;

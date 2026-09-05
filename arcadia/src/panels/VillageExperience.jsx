@@ -1,3 +1,6 @@
+import { RoomResidents } from "./RoomResidents.jsx";
+import { VillageLayoutEditor } from "./VillageLayoutEditor.jsx";
+import { AgentHandoffs } from "./AgentHandoffs.jsx";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { WorkshopBoard } from "./WorkshopBoard.jsx";
 import { VisitBriefing } from "./VisitBriefing.jsx";
@@ -309,7 +312,14 @@ export function VillageExperience({ snapshot, stewardClient }) {
     }
     layout.current = createVillageLayout(savedLayout);
   }
-  const world = useMemo(() => layout.current.update(snapshot), [snapshot]);
+  const [layoutRevision, setLayoutRevision] = useState(0);
+  const [editingLayout, setEditingLayout] = useState(false);
+  const world = useMemo(() => layout.current.update(snapshot), [snapshot, layoutRevision]);
+  const changeLayout = (action) => {
+    const result = action();
+    if (result.ok && result.changed) setLayoutRevision(value => value + 1);
+    return result;
+  };
   useEffect(() => {
     try {
       const saved = layout.current.serialize();
@@ -364,6 +374,7 @@ export function VillageExperience({ snapshot, stewardClient }) {
   const [paused, setPaused] = useState(() => preferences.paused ??
     (globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false));
   const [quality, setQuality] = useState(preferences.quality);
+  const [adaptiveDetail, setAdaptiveDetail] = useState("high");
   useEffect(() => saveDisplayPreferences({ quality, paused }), [quality, paused]);
   const [follow, setFollow] = useState(false);
   const [followDestination, setFollowDestination] = useState(null);
@@ -628,9 +639,9 @@ export function VillageExperience({ snapshot, stewardClient }) {
                   key={room.id}
                   building={room}
                   agents={roomAgents}
-                  focusAgentId={follow ? selectedAgent?.id : room.kind === "workshop" ? taskFocusAgentId : null}
+                  focusAgentId={follow ? selectedAgent?.id : taskFocusAgentId}
                   paused={paused}
-                  quality={quality}
+                  quality={quality === "auto" ? adaptiveDetail : quality}
                   onSelect={select}
                   onError={onRoomError}
                   cameraCommand={
@@ -679,6 +690,8 @@ export function VillageExperience({ snapshot, stewardClient }) {
                 )}
               </div>
               {room.kind === "workshop" && <WorkshopBoard snapshot={snapshot} onSelectAgent={select} taskRequest={taskRequest} onHighlightAgent={highlightTaskAgent} />}
+              {room.kind === "workshop" && <AgentHandoffs snapshot={snapshot} onSelectAgent={id => select({ kind: "agent", id })} />}
+              <RoomResidents agents={roomAgents} selectedAgentId={selectedAgent?.id} kind={room.kind} onFocusAgent={id => highlightTaskAgent({ kind: "agent", id })} />
               <div className="ve-room-roster" aria-label="People inside">
                 {roomAgents.length ? (
                   roomAgents.map((agent) => (
@@ -708,6 +721,7 @@ export function VillageExperience({ snapshot, stewardClient }) {
               cameraCommand={cameraCommand}
               onReady={onReady}
               onCameraChange={setCameraView}
+              onQualityChange={setAdaptiveDetail}
               onError={onError}
             />
             {!ready && !error && (
@@ -809,6 +823,7 @@ export function VillageExperience({ snapshot, stewardClient }) {
               <button aria-pressed={paused} onClick={() => setPaused(!paused)}>
                 {paused ? "Resume motion" : "Pause motion"}
               </button>
+              <button aria-pressed={editingLayout} onClick={() => { setEditingLayout(value => !value); setRoomId(null); setFollow(false); }}>Edit layout</button>
               <label className="ve-quality">
                 <span className="sr-only">Rendering quality</span>
                 <select
@@ -818,10 +833,13 @@ export function VillageExperience({ snapshot, stewardClient }) {
                 >
                   <option value="high">Full detail</option>
                   <option value="low">Light detail</option>
+                  <option value="auto">Adaptive detail</option>
                 </select>
               </label>
             </div>
           </footer>
+          {quality === "auto" && <p className="ve-navigation-hint">Adaptive rendering · {adaptiveDetail === "low" ? "light" : "full"} detail</p>}
+          {editingLayout && <VillageLayoutEditor world={world} onMoveBuilding={(id, position) => changeLayout(() => layout.current.moveBuilding(id, position))} onUndoMove={() => changeLayout(() => layout.current.undoMove())} onReset={() => changeLayout(() => layout.current.resetLayout())} />}
         </section>
         <aside className="ve-sidebar" aria-label="Villagers">
           <header className="ve-directory-heading">

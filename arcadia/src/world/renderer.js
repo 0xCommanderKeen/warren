@@ -3,6 +3,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
 import { createArtKit } from "./art.js";
 import { createMotion, retargetMotion, advanceMotion, isOutside } from "./motion.js";
+import { createAdaptiveQuality } from "./adaptiveQuality.js";
 import { buildingOccupancy } from "./occupancy.js";
 import { daylightAt } from "./daylight.js";
 import { readCameraPreferences, saveCameraPreferences } from "./viewPreferences.js";
@@ -10,7 +11,7 @@ import { readCameraPreferences, saveCameraPreferences } from "./viewPreferences.
 const keyOf = selection => selection ? `${selection.kind}:${selection.id}` : "";
 
 // One scene owns rendering and motion; React supplies complete presentation state.
-export function createVillageRenderer(host, { onSelect, onError, onCameraChange }) {
+export function createVillageRenderer(host, { onSelect, onError, onCameraChange, onQualityChange }) {
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "default" });
   renderer.setClearColor(0xece9dd, 1);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -63,6 +64,16 @@ export function createVillageRenderer(host, { onSelect, onError, onCameraChange 
   let fittedExtent = { width: 40, height: 40 };
   let first = true, frameCount = 0, frameSampleAt = performance.now(), colorsDirty = true;
   let saveTimer = null, savePending = false;
+  const adaptive = createAdaptiveQuality();
+  let effectiveQuality = "high";
+  function applyQuality(level) {
+    effectiveQuality = level;
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, level === "low" ? 1 : 1.75));
+    renderer.shadowMap.enabled = level !== "low";
+    canvas.dataset.quality = level;
+    onQualityChange?.(level);
+    resize();
+  }
   const cameraPose = () => ({ position: camera.position.toArray(), target: controls.target.toArray(), zoom: camera.zoom });
   let cameraNotifyTimer = null, pendingCameraPose = null, lastCameraNotice = -Infinity, lastNotifiedCamera = "";
   function notifyCamera() {
@@ -381,16 +392,15 @@ export function createVillageRenderer(host, { onSelect, onError, onCameraChange 
         entry.group.add(dot); rosterChanged = true;
       }
       // Hidden exterior views reconcile immediately instead of replaying old travel on return.
-      retargetMotion(entry.motion, model, next.paused || !host.clientWidth || !host.clientHeight);
+      retargetMotion(entry.motion, model, next.paused || previous.world?.layoutRevision !== world.layoutRevision || !host.clientWidth || !host.clientHeight);
       entry.group.position.set(entry.motion.position[0], .07, entry.motion.position[1]);
       entry.model = model;
     }
     if (rosterChanged) rebuildAgentBatches();
     updateAgentBatches();
     if (previous.quality !== next.quality) {
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, next.quality === "low" ? 1 : 1.75));
-      renderer.shadowMap.enabled = next.quality !== "low";
-      resize();
+      adaptive.reset();
+      applyQuality(next.quality === "low" ? "low" : "high");
     }
     const selectionKey = keyOf(next.selection);
     if (selectionKey !== lastSelection) { lastSelection = selectionKey; focusSelection(); }
@@ -468,7 +478,7 @@ export function createVillageRenderer(host, { onSelect, onError, onCameraChange 
     if (disposed) return;
     frame = requestAnimationFrame(animate);
     const elapsed = time - lastTime;
-    if (document.hidden || !host.clientWidth || !host.clientHeight || elapsed < (state.quality === "low" ? 32 : 15)) return;
+    if (document.hidden || !host.clientWidth || !host.clientHeight || elapsed < (effectiveQuality === "low" ? 32 : 15)) return;
     const dt = Math.min(.08, elapsed / 1000); lastTime = time;
     try {
       if (time - lastLighting > 60000) {
@@ -533,7 +543,12 @@ export function createVillageRenderer(host, { onSelect, onError, onCameraChange 
       renderer.render(scene, camera);
       frameCount++;
       if (time - frameSampleAt > 1000) {
-        canvas.dataset.fps = String(Math.round(frameCount * 1000 / (time - frameSampleAt)));
+        const fps = Math.round(frameCount * 1000 / (time - frameSampleAt));
+        canvas.dataset.fps = String(fps);
+        if (state.quality === "auto") {
+          const level = adaptive.observe(fps);
+          if (level !== effectiveQuality) applyQuality(level);
+        }
         canvas.dataset.drawCalls = String(renderer.info.render.calls);
         canvas.dataset.outsideAgents = String([...agents.values()].filter(entry => isOutside(entry.model, entry.motion)).length);
         frameSampleAt = time; frameCount = 0;

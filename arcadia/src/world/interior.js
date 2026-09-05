@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { lodgeCommons } from "./lodgeCommons.js";
 import { createArtKit } from "./art.js";
 import { createRoomLayout } from "./roomLayout.js";
 
@@ -53,6 +54,7 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
   const knownNames = new Map();
   let disposed = false, frame = 0, needsRender = true, signature = "", buildingId = null;
   let extent = { width: 16, depth: 13 }, state = null, lastCommand = null;
+  let roomCenterZ = 0;
   let lastFocusAgentId = null;
   const projected = new THREE.Vector3();
   const colors = {
@@ -149,9 +151,13 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
     const workshop = building.kind === "workshop";
     const sleeping = building.kind === "home" || building.kind === "lodge";
     const count = occupants.length;
-    const { width, depth } = layout;
+    const { width } = layout;
+    const commons = building.kind === "lodge" ? lodgeCommons(occupants, width, layout.depth) : null;
+    const depth = layout.depth + (commons?.extension || 0);
+    roomCenterZ = (commons?.extension || 0) / 2;
     extent = { width, depth };
     const room = new THREE.Group();
+    room.position.z = roomCenterZ;
     const objects = [room];
     part(room, "floorEdge", [0, -0.25, 0], [width + 0.2, 0.5, depth + 0.2]);
     part(room, "floor", [0, 0.008, 0], [width, 0.06, depth]);
@@ -183,7 +189,7 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
     plant(room, -width / 2 + 0.9, depth / 2 - 0.85);
     part(room, workshop ? "navy" : "rust", [0, 0.07, 0.3], [width - 2.8, 0.035, depth - 3.0]);
     part(room, workshop ? "teal" : "cream", [0, 0.093, 0.3], [width - 3.15, 0.015, depth - 3.35]);
-    label(building.name || "Inside the village", [0, 3.7, -depth / 2], true);
+    label(building.name || "Inside the village", [0, 3.7, -depth / 2 + roomCenterZ], true);
     // Empty rooms remain furnished, without inventing occupants or activity.
     const stations = layout.stations.length ? layout.stations : [{ id: null, slot: 0, position: [0, 0], agent: null }];
     for (const station of stations) {
@@ -218,7 +224,25 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
       const status = occupant.pendingApproval ? "#e4a151" : ({ working: "#578b61", resting: "#8fbaa4", stale: "#929690", failed: "#c16449", knocking: "#e4a151" }[occupant.state] || "#929690");
       part(furniture, status, [x + 0.48, 1.08, z + (sleeping ? -1.1 : 0.92)], [0.16, 0.16, 0.16], "sphere");
     }
-    if (sleeping && layout.stations.length < 3) {
+    if (commons) {
+      const lounge = new THREE.Group();
+      objects.push(lounge);
+      part(lounge, "rust", [0, .13, layout.depth / 2 + commons.extension / 2], [width - 1.6, .04, commons.extension - .5]);
+      for (const table of commons.tables) {
+        const [x, z] = table.position;
+        part(lounge, "timber", [x, .52, z], [1.5, .14, 1.5], "cylinder");
+        part(lounge, "brass", [x, .27, z], [.35, .5, .35], "cylinder");
+        part(lounge, "paper", [x - .2, .61, z], [.42, .04, .3]);
+        for (const side of [-1, 1]) {
+          part(lounge, "teal", [x + side * 1.05, .3, z], [.7, .32, 1.3]);
+          part(lounge, "teal", [x + side * 1.32, .68, z], [.16, .65, 1.3]);
+          part(lounge, "cream", [x + side * 1.05, .51, z + .32], [.45, .12, .4]);
+        }
+        label(`${table.project} · ${table.agentIds.length} guests`, [x, 1.25, z], false, table.project);
+      }
+      canvas.dataset.commonGroups = String(commons.tables.filter(table => table.agentIds.length).length);
+    } else canvas.dataset.commonGroups = "0";
+    if (sleeping && !commons && layout.stations.length < 3) {
       part(room, "timber", [width / 2 - 2, 0.6, depth / 2 - 2], [1.55, 0.14, 1.0]);
       part(room, "trim", [width / 2 - 2, 0.3, depth / 2 - 2], [0.6, 0.6, 0.6]);
       lamp(room, width / 2 - 1.7, depth / 2 - 2, 0.69);
@@ -241,8 +265,8 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
     if (reset) {
       camera.zoom = 1;
       const distance = Math.max(extent.width, extent.depth);
-      camera.position.set(distance * 0.8, distance * 0.95, distance * 1.1);
-      controls.target.set(0, 0.7, 0);
+      camera.position.set(distance * 0.8, distance * 0.95, distance * 1.1 + roomCenterZ);
+      controls.target.set(0, 0.7, roomCenterZ);
     }
     camera.updateProjectionMatrix(); controls.update(); needsRender = true;
   }
@@ -251,7 +275,7 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
     state = next;
     const occupants = next.agents || [];
     const room = next.room || fallbackLayout.update(next.building.id, occupants);
-    const nextSignature = JSON.stringify([next.building.id, next.building.kind, next.building.name, room.stations.map(s => [s.id, s.slot]), occupants.map(a => [a.id, a.name, a.appearance, a.state, a.pendingApproval])]);
+    const nextSignature = JSON.stringify([next.building.id, next.building.kind, next.building.name, room.stations.map(s => [s.id, s.slot]), occupants.map(a => [a.id, a.name, a.appearance, a.state, a.pendingApproval, a.project])]);
     const changedBuilding = buildingId !== next.building.id;
     if (signature !== nextSignature) { signature = nextSignature; rebuild(next.building, occupants, room); fit(changedBuilding, !changedBuilding); }
     buildingId = next.building.id;

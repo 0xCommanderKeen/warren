@@ -36,3 +36,15 @@ Unit tests cover layout growth, persistence validation, state destinations, inte
 On 2026-09-05, a local production benchmark in desktop Chrome at 1440×1000 held 60 fps for 5, 25, and 100 agents (five projects). Dynamic instancing reduced the 100-agent scene from 2,062 draw calls to approximately 100. These measurements establish behavior on the development machine; physical low-end phones and larger populations have not been benchmarked. Browser mobile viewport checks verify layout, not mobile GPU performance.
 
 Static scenery is batched by geometry/material; agent meshes share dynamic instance batches with individual colors and picking IDs. Snapshot changes retain motion and selections. Hidden tabs skip rendering, and disposal releases renderer and scene resources.
+
+## Editable plots, shared rooms and recorded handoffs
+
+The layout editor saves version-2 layout data under the existing browser key and migrates version-1 allocations. Moves are bounded, reject occupied/reserved plots, reconnect streets and snap travel to the new destination. Undo applies within the current page session; reset restores original allocations. Personal interior allocations remain independent of outdoor plots.
+
+`lodgeCommons.js` extends the floor in front of the bed area with project tables for current guests. Beds keep their original coordinates. Tables group recorded project membership and do not imply conversations or collaboration. `RoomResidents.jsx` offers resident cycling, search for rooms with more than twelve occupants, and expandable lodge project groups.
+
+`AgentHandoffs.jsx` displays explicit delegation, task outcome, blocked-request and session-lineage records. Exact identities link events; ambiguous/missing identities remain unlinked. Recorded completion does not imply reply delivery, which the stream does not publish.
+
+`ArtifactPreview.jsx` fetches only after an explicit request. The backend verifies a retained artifact identity and reads bounded supported files from dedicated published directories, with no URL fetching or symlink traversal. See [artifact preview configuration](../../chronicle/docs/artifact-previews.md). Existing servers continue to provide metadata; file preview requires the new backend and configured roots.
+
+Adaptive detail is an optional persisted preference. After two warm-up FPS samples and three consecutive samples below 40 FPS, it disables shadows, reduces pixel density, and caps rendering at roughly 30 FPS. It stays light until the preference changes or the page reloads, avoiding oscillation caused by its own frame cap. Manual full/light choices remain available.
