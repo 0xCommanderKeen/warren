@@ -998,10 +998,15 @@ The grammar a session writes, the guardrails, and the lineage model are in
 ```yaml
 notifications:
   transport: discord         # ntfy | discord; absent means this resident taps nobody
-  on: [needs_human]          # needs_human | task_done
+  "on": [needs_human]        # needs_human | task_done — quoted, see below
   status: active             # active | pending | disabled
   note: Miha's phone         # a label, never an address
 ```
+
+**Quote the `on` key.** YAML 1.1 resolves a bare `on` (like `yes`, `no` and `off`) to the
+*boolean* `true`, so `on: [needs_human]` declares a mapping keyed by `True` and the manifest
+is refused with `notifications[1]: Keys should be strings` — a message that says nothing
+about the real cause. `"on"` is the whole fix.
 
 **A notification is not a route, and not a chat.** `routes` answers *how work reaches this
 resident*: every kind in it is a doorway something arrives through, and two of them
