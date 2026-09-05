@@ -1,4 +1,4 @@
-"""Accepted-request ledger HTTP routes."""
+"""Accepted requests and bounded authentication summaries over HTTP."""
 
 from typing import Any
 
@@ -19,7 +19,7 @@ def router(deps: Deps) -> APIRouter:
     def list_requests(
         limit: int = REQUESTS_DEFAULT_LIMIT, resident: str | None = None
     ) -> dict[str, Any]:
-        """Return accepted requests and what became of them, newest first.
+        """Return requests and AUTH failure summaries, newest first.
 
         The endpoint that makes "accepted" survivable as an answer. Every mutating call
         here returns a ``request_id`` and refuses to claim an effect; this is where the
@@ -37,14 +37,14 @@ def router(deps: Deps) -> APIRouter:
         responses={404: {"model": RefusalResponse}},
     )
     def get_request(request_id: str) -> dict[str, Any]:
-        """Return one accepted request and its outcome. ``404`` for an id nobody logged."""
+        """Return one request or AUTH summary. ``404`` for an id nobody logged."""
         record = deps.db.request(request_id)
         if record is None:
             _refuse(
                 404,
                 "unknown_request",
-                f"no request {request_id!r}; only accepted mutating requests are logged, "
-                "so a refused one has no id to look up",
+                f"no request {request_id!r}; refused calls have no individual receipt, "
+                "but authentication failures appear in aggregate AUTH summaries",
             )
         return record.to_dict()
 

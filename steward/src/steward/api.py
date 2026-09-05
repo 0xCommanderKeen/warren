@@ -34,10 +34,15 @@ import asyncio
 import logging
 import os
 import threading
+import time
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_for_futures
-from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
+from contextlib import (
+    AbstractAsyncContextManager,
+    asynccontextmanager,
+    suppress,
+)
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from hmac import compare_digest
@@ -53,6 +58,7 @@ from fastapi.security import HTTPBearer
 
 from steward import authoring as au
 from steward import events as ev
+from steward.auth_failures import AuthFailures, FailurePolicy
 from steward.board import Dispatcher
 from steward.budgets import BudgetGuard
 from steward.chat import RoutineDelivery
@@ -197,6 +203,7 @@ class ApiConfig:
     #: its own branch so the history it is authoritative for exists somewhere that is not
     #: one disk on a NAS. The push is best effort and never fails a write.
     push: au.PushTarget | None = None
+    auth_failure_policy: FailurePolicy = field(default_factory=FailurePolicy)
     token_previous: str | None = None
     token_previous_until: str | None = None
     approval_poll_interval_s: float = 1.0
@@ -519,6 +526,23 @@ def _lifespan_for(
     return lifespan
 
 
+def _auth_lifespan(
+    lifecycle: Callable[[FastAPI], AbstractAsyncContextManager[None]],
+    failures: AuthFailures,
+) -> Callable[[FastAPI], AbstractAsyncContextManager[None]]:
+    """Flush failure summaries before the existing API shutdown closes collaborators."""
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        async with lifecycle(app):
+            try:
+                yield
+            finally:
+                failures.flush()
+
+    return lifespan
+
+
 def create_app(  # noqa: PLR0913 — injectable collaborators are the public test seams
     config: ApiConfig | None = None,
     *,
@@ -531,6 +555,7 @@ def create_app(  # noqa: PLR0913 — injectable collaborators are the public tes
     transport: Transport | None = None,
     approval_expiry_interval_s: float = APPROVAL_EXPIRY_INTERVAL_S,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> FastAPI:
     """Build the API. Raises :class:`ApiError` rather than serving without a token.
 
@@ -549,6 +574,7 @@ def create_app(  # noqa: PLR0913 — injectable collaborators are the public tes
     library = library_for(residents_dir, settings.skills_dir)
 
     db = store if store is not None else Store(settings.db_path or default_db_path())
+    failures = AuthFailures(db, settings.auth_failure_policy, monotonic)
     sink: ev.Emitter = emitter if emitter is not None else ev.EventEmitter.from_env()
 
     tasks = TaskTransitions(store=db, emitter=sink)
@@ -608,7 +634,9 @@ def create_app(  # noqa: PLR0913 — injectable collaborators are the public tes
             return ()
         return tuple(result.residents[0].manifest.session_grants)
 
-    lifespan = _lifespan_for(outbox, approvals, now, approval_expiry_interval_s)
+    lifespan = _auth_lifespan(
+        _lifespan_for(outbox, approvals, now, approval_expiry_interval_s), failures
+    )
     app = FastAPI(
         title="steward",
         summary="The token-gated write path into the agent fleet burrow watches.",
@@ -626,13 +654,17 @@ def create_app(  # noqa: PLR0913 — injectable collaborators are the public tes
                     session_grants,
                     compare_digest,
                     master_tokens=master_tokens,
+                    failures=failures,
                 )
             ),
         ],
         responses={
             401: {
                 "description": "No credential was presented, or steward refused the one that was."
-            }
+            },
+            429: {
+                "description": "Too many authentication failures; retry after Retry-After seconds."
+            },
         },
         lifespan=lifespan,
     )

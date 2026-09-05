@@ -55,7 +55,10 @@ def test_a_wrong_token_is_401_and_queues_nothing(api: ApiFactory) -> None:
     )
     assert response.status_code == 401
     assert harness.store.jobs() == []
-    assert harness.store.export_request_history() == []
+    history = harness.store.export_request_history()
+    assert len(history) == 1
+    assert history[0].outcome == "auth_failures"
+    assert history[0].detail["failed"] == 1
     assert harness.events() == []
 
 
