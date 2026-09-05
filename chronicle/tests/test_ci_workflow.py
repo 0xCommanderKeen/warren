@@ -15,6 +15,40 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "chronicle.yml"
 
 
+def join_shell_continuations(script):
+    """shlex retains escaped newlines; POSIX shells remove them before splitting.
+
+    Preserve quoted literals and escaped backslashes. This only joins physical
+    lines, leaving command recognition to shlex and the direct-step policy.
+    """
+    result = []
+    quote = None
+    index = 0
+    while index < len(script):
+        char = script[index]
+        if char == "\\" and quote != "'" and index + 1 < len(script):
+            following = script[index + 1]
+            if following != "\n":
+                result.extend((char, following))
+            index += 2
+            continue
+        if char == "#" and quote is None:
+            # shlex's comments=True ignores the rest of this physical line.
+            end = script.find("\n", index)
+            if end == -1:
+                end = len(script)
+            result.append(script[index:end])
+            index = end
+            continue
+        if char == quote:
+            quote = None
+        elif quote is None and char in ("'", '"'):
+            quote = char
+        result.append(char)
+        index += 1
+    return "".join(result)
+
+
 def invokes_runner(workflow):
     config = yaml.safe_load(workflow)
     job = config.get("jobs", {}).get("test", {})
@@ -29,7 +63,7 @@ def invokes_runner(workflow):
     for step in job.get("steps", []):
         if "if" in step or step.get("working-directory", directory) != "chronicle":
             continue
-        command = shlex.split(step.get("run", ""), comments=True)
+        command = shlex.split(join_shell_continuations(step.get("run", "")), comments=True)
         if command[:2] == ["uv", "run"]:
             command = command[2:]
             if command[:1] == ["--frozen"]:
@@ -59,6 +93,22 @@ jobs:
       - run: |
           {command} # run the suite
 """))
+
+    def test_shell_line_continuations_preserve_runner_arguments(self):
+        continuation = "\\\n"
+        for command, expected in (
+            ("sh " + continuation + "  tests/run.sh", True),
+            ('uv run sh "tests/' + continuation + 'run.sh"', True),
+            ("sh 'tests/" + continuation + "run.sh'", False),
+            ("sh tests/\\" + continuation + "run.sh", False),
+        ):
+            with self.subTest(command=command):
+                workflow = (
+                    "defaults: {run: {working-directory: chronicle}}\n"
+                    "jobs:\n  test:\n    steps:\n      - run: |\n          "
+                    + command.replace("\n", "\n          ") + "\n"
+                )
+                self.assertEqual(invokes_runner(workflow), expected)
 
     def test_missing_runner_cannot_be_supplied_by_comments_or_another_job(self):
         for step in (
