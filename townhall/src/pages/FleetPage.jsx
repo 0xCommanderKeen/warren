@@ -4,12 +4,34 @@ import { Link, useNavigation } from "../navigation.jsx";
 import { agentUuid, payloadSummary, related } from "../model.js";
 import { routeTo } from "../routes.js";
 import {
-  Badge, Badges, Button, DetailHead, Empty, Facts, Label, Loading, PageHead, Panel,
+  Badge, Badges, Button, Check, DetailHead, Empty, Facts, Label, Loading, PageHead, Panel,
   Row, Rows, Section, Select, Stack, Who,
 } from "../console/ui.jsx";
 
 const fallback = (value, alternative = "—") => value || alternative;
 const terminal = new Set(["done", "cancelled", "failed"]);
+// Chronicle owns liveness; unfamiliar states stay visible until classified here.
+const inactive = new Set(["stale", "resting", "failed"]);
+
+function currentPeople(model) {
+  const needed = new Set();
+  for (const approval of model.approvals) {
+    if (approval.state === "pending") needed.add(approval.agent_id);
+  }
+  for (const task of model.tasks) {
+    if (!terminal.has(task.state)) {
+      needed.add(task.claimant);
+      needed.add(task.posted_by);
+    }
+  }
+  for (const routine of model.routines) {
+    if (routine.state === "running") needed.add(routine.agent_id);
+  }
+  return model.people.filter((person) =>
+    person.residency === "resident" || person.hasResidentRecord ||
+    !inactive.has(person.state) || needed.has(person.id)
+  );
+}
 const stamp = (value) => {
   const date = new Date(value);
   return Number.isFinite(date.valueOf()) ? date.toLocaleString() : "—";
@@ -21,9 +43,9 @@ const stateTone = (state) => {
   return "";
 };
 
-function Summary({ model }) {
+function Summary({ model, people }) {
   const values = [
-    ["observed", model.people.length],
+    ["shown", people.length],
     ["active", model.active],
     ["open work", model.tasks.filter((task) => !terminal.has(task.state)).length],
     ["human attention", model.approvals.filter((item) => item.state === "pending").length],
@@ -40,8 +62,8 @@ function agentAddress(person) {
   return routeTo.agent(person.hasResidentRecord ? agentUuid(person.id) : person.id);
 }
 
-function People({ people }) {
-  if (!people.length) return <Empty title="No observed agents.">Chronicle's current snapshot contains no resident or transient session.</Empty>;
+function People({ people, hiddenCount }) {
+  if (!people.length) return <Empty title="No agents to show.">{hiddenCount ? "Enable Show inactive to include retained inactive sessions." : "Chronicle's current snapshot contains no resident or transient session."}</Empty>;
   return <Rows><Row head columns="1.5fr .8fr 1fr 1.1fr"><span>agent</span><span>state</span><span>kind</span><span>last signal</span></Row>
     {people.map((person) => {
       const content = <><Who accent={person.accent} name={fallback(person.name, person.id)} id={person.id} role={person.role || person.project} /><Badge tone={stateTone(person.state)}>{fallback(person.state)}</Badge><Stack sub={person.project}>{person.hasResidentRecord ? "resident" : "transient"}</Stack><span className="text-[11px] text-dim">{stamp(person.last_ts)}</span></>;
@@ -69,11 +91,19 @@ function Activity({ events }) {
 
 function FleetOverview({ model }) {
   const [filter, setFilter] = useState("all");
+  const [showInactive, setShowInactive] = useState(false);
+  const current = currentPeople(model);
+  const people = showInactive ? model.people : current;
+  const inactiveCount = model.people.length - current.length;
   const events = model.events.filter((event) => filter === "all" || event.agent_id === filter);
   return <>
     <PageHead title="Fleet">Chronicle's read-only view of who is present, what is moving, and where a human decision is waiting. Writes live on the other Townhall pages.</PageHead>
-    <Summary model={model} />
-    <Section count={model.people.length}>Observed agents</Section><People people={model.people} />
+    <Summary model={model} people={people} />
+    <div className="flex flex-wrap items-end justify-between gap-4">
+      <Section count={people.length}>Observed agents</Section>
+      <Check name="Show inactive" description={`${inactiveCount} inactive session${inactiveCount === 1 ? "" : "s"}${showInactive ? " included" : " hidden"}`} checked={showInactive} onChange={(event) => setShowInactive(event.target.checked)} />
+    </div>
+    <People people={people} hiddenCount={showInactive ? 0 : inactiveCount} />
     <div className="grid gap-7 lg:grid-cols-2"><div><Section count={model.tasks.length}>Work in motion</Section><Work tasks={model.tasks} /></div><div><Section count={model.approvals.length}>Human attention</Section><Attention approvals={model.approvals} /></div></div>
     <div className="mt-9 flex flex-wrap items-end justify-between gap-4"><Section count={events.length}>Retained activity</Section><label className="mb-[14px] min-w-[190px]"><Label className="mb-1.5 block">show signals from</Label><Select value={filter} onChange={(event) => setFilter(event.target.value)}><option value="all">all agents</option>{model.people.map((person) => <option value={person.id} key={person.id}>{person.name}</option>)}</Select></label></div>
     <Activity events={events} />
