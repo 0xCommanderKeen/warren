@@ -40,7 +40,7 @@ reads for the nullable mergeability field:
 ## Activate the reporting routine
 
 Karen is managed on the burrow's declarations branch, not among main's seed residents.
-After #415 provisions her, grant the non-default `queue-review` skill through the existing
+After #415 completes her runtime and model-login setup, grant the non-default `queue-review` skill through the existing
 operator approval/declaration flow. Add the routine from `queue-review-routine.yaml` to
 her declaration; review her model budget and runtime access, then enable it. This routine
 needs a writable memory directory, git/HTTPS to the configured repository and access to
@@ -57,6 +57,6 @@ of the recommended numbers come from the tracker observation, even if the note i
 
 ## Acceptance still requiring a live resident
 
-No resident review has been run by this implementation. After provisioning, trigger the
+No resident review has been run by this implementation. After runtime/login setup, trigger the
 routine once, read the actual run receipt and verify Townhall's note and every cited
 claim. Record that receipt on #466 before closing it. Unit fixtures are not this evidence.
