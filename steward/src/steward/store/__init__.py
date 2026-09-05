@@ -5,9 +5,9 @@ from steward.runs import RUN_CHAT, RUN_DELEGATED, RUN_KINDS, RUN_ROUTINE, RUN_TA
 from steward.runs import TRIGGER_MANUAL as RUN_TRIGGER_MANUAL
 from steward.runs import TRIGGER_SCHEDULE as RUN_TRIGGER_SCHEDULE
 from steward.store._connection import _Connection
-from steward.store._legacy import _LegacyTables
 from steward.store.approvals import _ApprovalTables
 from steward.store.board import _BoardTables
+from steward.store.budgets import _BudgetTables
 from steward.store.ledger import _LedgerTables
 from steward.store.records import (
     APPROVAL_DECISIONS,
@@ -68,12 +68,12 @@ __all__ = [
 
 
 class Store(
-    _ResidentTables,
-    _LedgerTables,
-    _RunTables,
-    _ApprovalTables,
     _BoardTables,
-    _LegacyTables,
+    _ApprovalTables,
+    _RunTables,
+    _LedgerTables,
+    _ResidentTables,
+    _BudgetTables,
     _RequestTables,
     _Connection,
 ):

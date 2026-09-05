@@ -1,44 +1,7 @@
-"""The durable store behind steward's API: jobs, approvals, and the request log.
+"""The residents steward has stopped firing, and the number that stopped them.
 
-One SQLite file (``.steward/state/steward.db``, next to the scheduler's own state)
-holds everything the API must remember across a restart. SQLite rather than a JSON
-file because the two things stored here both need a *conditional* write to be atomic:
-the job board's claim (steward #6) is ``UPDATE … WHERE status = 'open'``, and an
-approval decision (steward #10) is ``UPDATE … WHERE status = 'pending'`` — the first
-writer wins and every later one reads back what was recorded. A read-modify-write over
-a JSON file cannot promise that, and "two residents both hold task 7" is exactly the
-kind of lie this project refuses to tell.
-
-Nothing here emits, renders, or decides. It records facts and hands them back:
-
-- ``jobs`` — posted work, with the status the board reports. A row with an ``assignee``
-  is work one resident handed to another (:mod:`steward.delegation`): the same table,
-  because a delegated item is a task addressed to somebody rather than to the fleet, and
-  everything the board already does to a task — leasing it, sweeping it, closing it —
-  applies to it unchanged.
-- ``approvals`` — a gated action waiting on a human, and the decision it received.
-- ``requests`` — every accepted mutating API request and how it turned out, so a
-  queued action that later failed is traceable rather than silently gone.
-- ``run_ledger`` — one row per finished session, with the tokens, money, and seconds it
-  actually cost. This is what makes a daily budget survive a daemon restart: a cap that
-  resets because the process bounced is not a cap (steward #8).
-- ``budget_pauses`` — the residents steward has stopped firing, and the number that
-  stopped them. One row per paused resident, inserted conditionally, which is what makes
-  "exactly one knock at the door" true rather than hoped for.
-- ``watchdog_attempts`` / ``watchdog_passes`` / ``unbracketed_runs`` — what the watchdog
-  has already done, so a restart budget and a "run never reported back" complaint are
-  each spent exactly once however often the watchdog ticks.
-- ``open_runs`` — one row per session steward has started and not yet closed. The
-  watchdog reads this to find runs that never reported back, instead of reading the
-  undelivered-event log, which can only answer for the host that fired them and only
-  while burrow was unreachable (steward #39). It is also where a session's own scoped
-  credential lives, as a digest: the run's lease is the credential's expiry, so
-  :meth:`Store.session_principal` accepts one exactly while the watchdog could not yet
-  bury the run (steward #41).
-- ``resident_claims`` — one row per resident saying which process is currently running a
-  session for it. The scheduler's overlap guard used to be an in-process lock, which the
-  API, the board and a chat daemon could not see; this is the same guard in the one place
-  every firing process can read (warren#111). :mod:`steward.claims` owns what it means.
+One row per paused resident, inserted conditionally, makes exactly one knock
+at the door true rather than hoped for.
 """
 
 from typing import Any
@@ -50,8 +13,8 @@ from steward.store.records import (
 )
 
 
-class _LegacyTables(_Connection):
-    """Remaining table families awaiting the second extraction PR."""
+class _BudgetTables(_Connection):
+    """Budgets table operations on the shared connection."""
 
     # -- budget pauses -------------------------------------------------------------------
 
