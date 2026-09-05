@@ -497,6 +497,34 @@ class NotificationTests(unittest.TestCase):
               mock.patch.object(serve.time, "time", return_value=1787574600)):
             self.assertEqual("Resident", self.villager_name(event))
 
+    def test_notification_retains_identity_evidence_beyond_raw_viewer_tail(self):
+        self.write_resident("project.resident.json", {"project": "burrow"})
+        now = serve.datetime.datetime(2026, 8, 24, 12, tzinfo=serve.datetime.UTC)
+        child = self.event(agent_id="a")
+        child.update(type="task_started", payload={"prompt": "review", "parent_agent_id": "q"})
+        parent_idle = self.event(agent_id="q")
+        parent_idle.update(type="idle", payload={})
+        declaration = self.event(agent_id="a")
+        declaration.update(type="resident_declared", source="steward", payload={
+            "name": "Pip", "char": "Monk", "accent": "#123456", "role": "helper",
+            "summary": None, "resident_id": "pip", "uid": "0198-uid", "home": 2,
+        })
+        heartbeat = self.event(agent_id="a")
+        heartbeat.update(type="heartbeat", payload={})
+        knock = self.event(agent_id="a")
+        for history, expected in [
+            ([child] + [parent_idle] * 4000 + [knock], "Hazel"),
+            ([declaration] + [heartbeat] * 4000 + [knock], "Pip"),
+        ]:
+            with self.subTest(expected=expected):
+                self.write_events(*history)
+                runtime = serve.Runtime(self.runtime.config)
+                snapshot = runtime.state_coordinator.evaluate(now)
+                projected = {item["id"]: item["name"] for item in snapshot["villagers"]}
+                self.assertEqual(expected, projected["a"])
+                with mock.patch.object(serve.time, "time", return_value=now.timestamp()):
+                    self.assertEqual(projected["a"], serve.villager_name(knock, runtime))
+
     def test_fallback_names_use_the_projected_identity_algorithm(self):
         first = self.event(agent_id="a")
         second = self.event(agent_id="q", ts="2026-08-24T12:00:01Z")

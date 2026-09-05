@@ -443,7 +443,9 @@ metadata, never raw manifest objects or app credentials. Exact agent identity wi
 before a project fallback. One shared allocation reserves declarations first, then exact
 identities, then unambiguous project matches in agent-id order. Each identity and home
 has at most one eligible occupant; retained child lineage cannot inherit a project home.
-Notifications use the same projection, including absence and pending approvals. Legacy
+Notifications read the same authoritative log inputs and retain identity evidence with
+the same fold as `/state`, including old declarations and lineage beyond a busy raw
+event tail. They use the same projection, including absence and pending approvals. Legacy
 Markdown souls remain available through `/villagers` for v0 compatibility, but do not
 rename Visitors in notifications. Invalid or incomplete declarations remain Visitors and
 advertise no access.

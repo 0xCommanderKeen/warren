@@ -242,34 +242,21 @@ def villager_names(events, villagers_dir=None, *, evaluated_at=None, policy=None
     return {item["id"]: item["name"] for item in state["villagers"]}
 
 
-def _fleet_events(event, runtime):
-    """Read the same bounded event window as the viewer and include this event."""
-    events = []
-    config = runtime.config
-    events_path = str(config.events)
-    try:
-        with open(events_path, encoding="utf-8") as stream:
-            lines = collections.deque(
-                stream, maxlen=retention.POLICY["viewer_line_limit"]
-            )
-        for line in lines:
-            try:
-                parsed = json.loads(line)
-            except (TypeError, ValueError):
-                continue
-            if isinstance(parsed, dict) and parsed.get("agent_id"):
-                events.append(parsed)
-    except (OSError, UnicodeDecodeError):
-        pass
-    events.append(event)
-    return events
+def _fleet_events(event, runtime, evaluated_at):
+    """Retain notification evidence from the same authoritative inputs as /state."""
+    events, _, _ = runtime.projection_inputs()
+    # The current knock may still be in the pre-acknowledgement journal. Fold it
+    # with the complete log so an old declaration or lineage witness survives a
+    # busy fleet, exactly as it does in the coordinator's bootstrap projection.
+    return retention.ProjectionFold().replace([*events, event], evaluated_at)
 
 
 def villager_name(event, runtime):
     agent_id = str(event.get("agent_id") or "")
+    evaluated_at = datetime.datetime.fromtimestamp(time.time(), datetime.UTC)
     return villager_names(
-        _fleet_events(event, runtime), runtime.config.villagers_dir,
-        evaluated_at=datetime.datetime.fromtimestamp(time.time(), datetime.UTC),
+        _fleet_events(event, runtime, evaluated_at), runtime.config.villagers_dir,
+        evaluated_at=evaluated_at,
     ).get(agent_id, fallback_identity(agent_id).name)
 
 
