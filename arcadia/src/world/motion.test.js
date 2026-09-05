@@ -1,3 +1,4 @@
+import { isOutside } from "./motion.js";
 import { describe, expect, it } from "vitest";
 import { advanceMotion, createMotion, retargetMotion } from "./motion.js";
 
@@ -82,5 +83,18 @@ describe("village movement", () => {
     expect(motion.position).toEqual([0, 0]);
     advanceMotion(motion, 1);
     expect(model).toEqual(original);
+  });
+});
+
+
+describe("outside presence", () => {
+  it("hides indoor occupants at rest and shows only their travel", () => {
+    const motion = createMotion([0, 0]);
+    expect(isOutside({ indoor: true }, motion)).toBe(false);
+    expect(isOutside({ indoor: false }, motion)).toBe(true);
+    retargetMotion(motion, { destination: [5, 0], route: [[0, 0], [5, 0]] });
+    expect(isOutside({ indoor: true }, motion)).toBe(true);
+    advanceMotion(motion, 10);
+    expect(isOutside({ indoor: true }, motion)).toBe(false);
   });
 });

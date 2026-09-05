@@ -57,3 +57,8 @@ export function advanceMotion(motion, dt, speed = 2.1) {
   }
   return { walking: moved && motion.points.length > 0, heading };
 }
+
+// Indoor occupants appear in rooms; only the journey remains visible outdoors.
+export function isOutside(model, motion) {
+  return !model.indoor || motion.points.length > motion.step;
+}

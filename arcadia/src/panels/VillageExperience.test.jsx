@@ -13,6 +13,7 @@ import { VillageExperience } from "./VillageExperience.jsx";
 
 const originalScrollIntoView = Element.prototype.scrollIntoView;
 let rendererProps;
+let interiorProps;
 vi.mock("../world/VillageWorld.jsx", () => ({
   VillageWorld: (props) => {
     rendererProps = props;
@@ -31,6 +32,23 @@ vi.mock("../world/VillageWorld.jsx", () => ({
         >
           Select workshop
         </button>
+      </div>
+    );
+  },
+}));
+vi.mock("../world/InteriorWorld.jsx", () => ({
+  InteriorWorld: (props) => {
+    interiorProps = props;
+    return (
+      <div data-testid="room-renderer">
+        {props.agents.map((agent) => (
+          <button
+            key={agent.id}
+            onClick={() => props.onSelect({ kind: "agent", id: agent.id })}
+          >
+            Inspect {agent.name} indoors
+          </button>
+        ))}
       </div>
     );
   },
@@ -74,7 +92,11 @@ describe("miniature village experience", () => {
     expect(rendererProps.follow).toBe(false);
   });
   it("finds project workshops and links occupants to their real records", () => {
-    render(<VillageExperience snapshot={snapshot()} />);
+    const data = snapshot();
+    data.villagers[0].state = "working";
+    data.villagers[0].pending_approval_ids = [];
+    data.approvals = [];
+    render(<VillageExperience snapshot={data} />);
     fireEvent.click(screen.getByRole("button", { name: /Projects 1/ }));
     fireEvent.change(
       screen.getByRole("searchbox", { name: "Find a villager" }),
@@ -357,4 +379,136 @@ describe("persistent village geography", () => {
     render(<VillageExperience snapshot={snapshot()} />);
     expect(rendererProps.world.agents[0].name).toBe("Keeper");
   });
+});
+
+describe("entering village rooms", () => {
+  const atWork = () => {
+    const data = snapshot();
+    data.approvals = [];
+    data.villagers[0].pending_approval_ids = [];
+    data.villagers[0].state = "working";
+    data.villagers.push({
+      ...data.villagers[0],
+      id: "codex:guest",
+      name: "Guest",
+      residency: "visitor",
+      resident_file: null,
+      state: "resting",
+      project: "other",
+    });
+    return data;
+  };
+  it("enters the one shared workshop and lists only its actual indoor occupants", () => {
+    render(<VillageExperience snapshot={atWork()} />);
+    fireEvent.click(
+      within(
+        screen.getByRole("navigation", { name: "Village places" }),
+      ).getByRole("button", { name: "Workshop" }),
+    );
+    const room = screen.getByRole("region", { name: "Building interior" });
+    expect(room).toHaveTextContent("Workshop");
+    expect(interiorProps.agents.map((agent) => agent.name)).toEqual(["Keeper"]);
+    expect(room).not.toHaveTextContent("Guest");
+    fireEvent.click(
+      within(room).getByRole("button", { name: "Inspect Keeper indoors" }),
+    );
+    expect(
+      screen.getByRole("region", { name: "Selected villager" }),
+    ).toHaveTextContent("Keeper");
+    expect(
+      screen.getByRole("region", { name: "Building interior" }),
+    ).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Back to village" }));
+    expect(
+      screen.queryByRole("region", { name: "Building interior" }),
+    ).toBeNull();
+    expect(screen.getByTestId("miniature-world")).toBeVisible();
+  });
+  it("opens an indoor person's room and can visit their currently empty home", () => {
+    render(<VillageExperience snapshot={atWork()} />);
+    selectKeeper();
+    expect(interiorProps.building.id).toBe("workshop");
+    fireEvent.click(screen.getByRole("button", { name: "Visit home →" }));
+    expect(interiorProps.building.id).toBe("home:claude:keeper");
+    expect(
+      screen.getByRole("region", { name: "Building interior" }),
+    ).toHaveTextContent("No agents are inside right now.");
+  });
+  it("opens the lodge from the accessible places and returns outdoors when a home disappears", () => {
+    const data = atWork();
+    const view = render(<VillageExperience snapshot={data} />);
+    fireEvent.click(
+      within(
+        screen.getByRole("navigation", { name: "Village places" }),
+      ).getByRole("button", { name: "Visitor lodge" }),
+    );
+    expect(interiorProps.agents.map((agent) => agent.name)).toEqual(["Guest"]);
+    selectKeeper();
+    fireEvent.click(screen.getByRole("button", { name: "Visit home →" }));
+    view.rerender(
+      <VillageExperience
+        snapshot={{ ...data, villagers: data.villagers.slice(1) }}
+      />,
+    );
+    expect(
+      screen.queryByRole("region", { name: "Building interior" }),
+    ).toBeNull();
+  });
+  it("updates the occupants of an open room directly from the next snapshot", () => {
+    const first = atWork();
+    const view = render(<VillageExperience snapshot={first} />);
+    fireEvent.click(
+      within(
+        screen.getByRole("navigation", { name: "Village places" }),
+      ).getByRole("button", { name: "Workshop" }),
+    );
+    expect(interiorProps.agents.map((agent) => agent.name)).toEqual(["Keeper"]);
+    const next = atWork();
+    next.generation += 1;
+    next.villagers[0].state = "resting";
+    next.villagers[1].state = "working";
+    view.rerender(<VillageExperience snapshot={next} />);
+    expect(interiorProps.building.id).toBe("workshop");
+    expect(interiorProps.agents.map((agent) => agent.name)).toEqual(["Guest"]);
+  });
+  it("keeps two projects in one workshop instead of creating project buildings", () => {
+    const data = atWork();
+    data.villagers[1].state = "working";
+    render(<VillageExperience snapshot={data} />);
+    fireEvent.click(screen.getByRole("button", { name: /Projects 2/ }));
+    fireEvent.click(screen.getByRole("button", { name: /other 1 agent/ }));
+    expect(interiorProps.building.id).toBe("workshop");
+    expect(interiorProps.agents).toHaveLength(2);
+    expect(
+      rendererProps.world.buildings.filter(
+        (building) => building.kind === "workshop",
+      ),
+    ).toHaveLength(1);
+  });
+});
+
+it("controls the room camera independently of the outdoor camera", () => {
+  render(<VillageExperience snapshot={snapshot()} />);
+  fireEvent.click(
+    within(
+      screen.getByRole("navigation", { name: "Village places" }),
+    ).getByRole("button", { name: "Workshop" }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Zoom into room" }));
+  expect(interiorProps.cameraCommand).toEqual({
+    roomId: "workshop",
+    type: "zoom-in",
+    nonce: 1,
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Zoom into room" }));
+  expect(interiorProps.cameraCommand.nonce).toBe(2);
+  fireEvent.click(screen.getByRole("button", { name: "Reset room view" }));
+  expect(interiorProps.cameraCommand.type).toBe("reset");
+  expect(rendererProps.cameraCommand).toBeNull();
+  fireEvent.click(
+    within(
+      screen.getByRole("navigation", { name: "Village places" }),
+    ).getByRole("button", { name: "Visitor lodge" }),
+  );
+  expect(interiorProps.cameraCommand).toBeNull();
 });

@@ -192,3 +192,61 @@ test("lost WebGL context leaves the agent directory usable", async ({ page }) =>
   await expect(page.getByRole("region", { name: "Selected villager" })).toContainText("Keeper");
   clean(observed);
 });
+
+
+for (const count of [0, 5, 100]) {
+  test(`shared workshop interior shows ${count} actual occupants`, async ({ page }) => {
+    await page.setViewportSize({ width: count === 5 ? 390 : 1440, height: 1000 });
+    const envelope = population(count);
+    envelope.snapshot.villagers.forEach(agent => { agent.state = "working"; });
+    const observed = await load(page, envelope);
+    const outdoor = await ready(page, count);
+    await expect(outdoor).toHaveAttribute("data-outside-agents", "0");
+    await outdoor.evaluate(canvas => { window.originalVillageCanvas = canvas; });
+    await page.getByRole("button", { name: "Workshop", exact: true }).click();
+    const room = page.getByTestId("interior-canvas");
+    await expect(room).toBeVisible();
+    await expect(room).toHaveAttribute("data-ready", "true");
+    await expect(room).toHaveAttribute("data-agents", String(count));
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    if (count) {
+      await page.getByRole("region", { name: "Building interior" }).getByRole("button", { name: /Villager 000/ }).click();
+      await expect(page.getByRole("region", { name: "Selected villager" })).toContainText("Villager 000");
+      await expect(room).toBeVisible();
+      envelope.snapshot.generation += 1;
+      envelope.snapshot.villagers[0].state = "resting";
+      await page.evaluate(next => window.villageStream.listeners.snapshot({ data: JSON.stringify(next) }), envelope);
+      await expect(room).toHaveAttribute("data-agents", String(count - 1));
+    }
+    await page.getByRole("button", { name: "Back to village", exact: true }).click();
+    await expect(outdoor).toBeVisible();
+    expect(await outdoor.evaluate(canvas => canvas === window.originalVillageCanvas)).toBe(true);
+    await fits(page);
+    clean(observed);
+  });
+}
+
+
+test("homes and lodge open with their occupants and retain a directory on room graphics loss", async ({ page }) => {
+  const envelope = population(3);
+  envelope.snapshot.villagers[1].residency = "resident";
+  envelope.snapshot.villagers[2].residency = "visitor";
+  const observed = await load(page, envelope);
+  await ready(page, 3);
+  await page.getByRole("searchbox").fill("Villager 001");
+  await page.locator(".ve-person").click();
+  const room = page.getByTestId("interior-canvas");
+  await expect(room).toHaveAttribute("data-building", "home:claude:resident-1");
+  await expect(room).toHaveAttribute("data-agents", "1");
+  await page.getByRole("button", { name: "Back to village", exact: true }).click();
+  await page.getByRole("button", { name: "Visitor lodge", exact: true }).click();
+  await expect(room).toHaveAttribute("data-building", "lodge:0");
+  await expect(room).toHaveAttribute("data-agents", "1");
+  await room.evaluate(canvas => canvas.getContext("webgl2").getExtension("WEBGL_lose_context").loseContext());
+  await expect(page.getByText("The room view couldn't open.")).toBeVisible();
+  await page.getByRole("region", { name: "Building interior" }).getByRole("button", { name: /Villager 002/ }).click();
+  await expect(page.getByRole("region", { name: "Selected villager" })).toContainText("Villager 002");
+  await page.getByRole("button", { name: "Back to village", exact: true }).click();
+  await expect(page.locator('canvas[data-renderer="three"]')).toBeVisible();
+  clean(observed);
+});

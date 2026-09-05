@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
 import { createArtKit } from "./art.js";
-import { createMotion, retargetMotion, advanceMotion } from "./motion.js";
+import { createMotion, retargetMotion, advanceMotion, isOutside } from "./motion.js";
 import { daylightAt } from "./daylight.js";
 
 const keyOf = selection => selection ? `${selection.kind}:${selection.id}` : "";
@@ -60,6 +60,7 @@ export function createVillageRenderer(host, { onSelect, onError }) {
   let fittedExtent = { width: 40, height: 40 };
   let first = true, frameCount = 0, frameSampleAt = performance.now(), colorsDirty = true;
   const projected = new THREE.Vector3();
+  const hiddenInstance = new THREE.Matrix4().makeScale(0, 0, 0);
   const ownResources = new Set();
   const material = (color, extra = {}) => {
     const m = new THREE.MeshStandardMaterial({ color, roughness: 1, ...extra });
@@ -283,7 +284,7 @@ export function createVillageRenderer(host, { onSelect, onError }) {
     for (const entry of agents.values()) entry.group.updateMatrixWorld(true);
     for (const batch of dynamicBatches.values()) {
       batch.items.forEach((item, index) => {
-        batch.mesh.setMatrixAt(index, item.object.matrixWorld);
+        batch.mesh.setMatrixAt(index, isOutside(item.entry.model, item.entry.motion) ? item.object.matrixWorld : hiddenInstance);
         if (colorsDirty) {
           const color = item.object.userData.status ? new THREE.Color(statusColors[item.entry.model.state] || statusColors.resting) : item.color.clone();
           if (item.entry.model.state === "stale") color.lerp(new THREE.Color(0xbac0ae), .55);
@@ -324,7 +325,8 @@ export function createVillageRenderer(host, { onSelect, onError }) {
         dot.position.set(.3, 1.18, 0); dot.userData.status = true;
         entry.group.add(dot); rosterChanged = true;
       }
-      retargetMotion(entry.motion, model, next.paused);
+      // Hidden exterior views reconcile immediately instead of replaying old travel on return.
+      retargetMotion(entry.motion, model, next.paused || !host.clientWidth || !host.clientHeight);
       entry.group.position.set(entry.motion.position[0], .07, entry.motion.position[1]);
       entry.model = model;
     }
@@ -378,7 +380,7 @@ export function createVillageRenderer(host, { onSelect, onError }) {
     for (const hit of raycaster.intersectObjects([staticRoot, dynamicRoot], true)) {
       if (hit.object.isInstancedMesh) {
         const selection = hit.object.userData.selections?.[hit.instanceId];
-        if (selection) return selection;
+        if (selection && (selection.kind !== "agent" || isOutside(agents.get(selection.id).model, agents.get(selection.id).motion))) return selection;
       }
       for (let parent = hit.object; parent; parent = parent.parent) if (parent.userData.selection) return parent.userData.selection;
     }
@@ -410,7 +412,7 @@ export function createVillageRenderer(host, { onSelect, onError }) {
     if (disposed) return;
     frame = requestAnimationFrame(animate);
     const elapsed = time - lastTime;
-    if (document.hidden || elapsed < (state.quality === "low" ? 32 : 15)) return;
+    if (document.hidden || !host.clientWidth || !host.clientHeight || elapsed < (state.quality === "low" ? 32 : 15)) return;
     const dt = Math.min(.08, elapsed / 1000); lastTime = time;
     try {
       if (time - lastLighting > 60000) {
@@ -446,21 +448,21 @@ export function createVillageRenderer(host, { onSelect, onError }) {
       }
       controls.update();
       const selPosition = selectionPosition();
-      ring.visible = Boolean(selPosition);
+      ring.visible = Boolean(selPosition) && (state.selection?.kind !== "agent" || isOutside(agents.get(state.selection.id).model, agents.get(state.selection.id).motion));
       if (selPosition) { ring.position.copy(selPosition).y = .1; ring.scale.setScalar(state.selection.kind === "agent" ? 1 : 3); }
       const visibleLabels = camera.zoom > 1.4;
       const compactOverview = host.clientWidth < 600 && !visibleLabels;
       for (const model of state.world?.buildings || []) {
         const el = buildingLabels.get(model.id);
         if (!el) continue;
-        if ((compactOverview && model.kind !== "square") || (!visibleLabels && !["square", "lodge", "archive", "noticeboard"].includes(model.kind)) || (state.selection?.kind === "building" && state.selection.id === model.id)) { el.hidden = true; continue; }
+        if ((compactOverview && model.kind !== "square") || (!visibleLabels && !["square", "lodge", "archive", "noticeboard", "workshop"].includes(model.kind)) || (state.selection?.kind === "building" && state.selection.id === model.id)) { el.hidden = true; continue; }
         placeLabel(el, new THREE.Vector3(model.position[0], 0, model.position[1]), model.kind === "square" ? 1 : 3.2);
       }
       const shown = state.selection || hover;
       selectedLabel.hidden = !shown;
       if (shown?.kind === "agent") {
         const entry = agents.get(shown.id);
-        if (entry) { selectedLabel.textContent = `${entry.model.name} · ${entry.model.state}`; placeLabel(selectedLabel, entry.group.position, 1.65); }
+        if (entry && isOutside(entry.model, entry.motion)) { selectedLabel.textContent = `${entry.model.name} · ${entry.model.state}`; placeLabel(selectedLabel, entry.group.position, 1.65); }
         else selectedLabel.hidden = true;
       } else if (shown?.kind === "building") {
         const model = state.world?.buildings.find(b => b.id === shown.id);
@@ -472,6 +474,7 @@ export function createVillageRenderer(host, { onSelect, onError }) {
       if (time - frameSampleAt > 1000) {
         canvas.dataset.fps = String(Math.round(frameCount * 1000 / (time - frameSampleAt)));
         canvas.dataset.drawCalls = String(renderer.info.render.calls);
+        canvas.dataset.outsideAgents = String([...agents.values()].filter(entry => isOutside(entry.model, entry.motion)).length);
         frameSampleAt = time; frameCount = 0;
       }
     } catch (error) { cancelAnimationFrame(frame); onError?.(error); }

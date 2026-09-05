@@ -39,6 +39,8 @@ function front(building, slot = 0) {
     building.position[1] + 3 + Math.floor(slot / 6) * 0.8];
 }
 
+const doorway = building => [building.position[0], building.position[1] + building.depth / 2 + 0.15];
+
 function route(from, source, to, target) {
   if (from[0] === to[0] && from[1] === to[1]) return [from];
   const sourceStreet = source.position[1] + 5;
@@ -140,6 +142,7 @@ export function createVillageLayout(savedState = null) {
       building("lodge:0", "lodge", "Visitor lodge");
       building("archive", "archive", "Archive");
       building("noticeboard", "noticeboard", "Notice board");
+      const workshop = building("workshop", "workshop", "Workshop");
       const pending = new Set(pendingApprovals(snapshot.approvals ?? []).map(item => item.agent_id));
       // Home numbers guide initial ordering, never become world coordinates.
       const people = [...(snapshot.villagers ?? [])].sort((a, b) => {
@@ -148,43 +151,32 @@ export function createVillageLayout(savedState = null) {
       });
       const agents = people.map(agent => {
         let dwelling;
-        let homeSlot = 2;
         if (agent.residency === "resident") {
           dwelling = building(`home:${agent.id}`, "home", `${agent.name}’s home`);
         } else {
-          const { batch, slot } = membership("visitors", agent.id);
+          const { batch } = membership("visitors", agent.id);
           dwelling = building(`lodge:${batch}`, "lodge", batch ? `Visitor lodge ${batch + 1}` : "Visitor lodge");
-          homeSlot = slot;
         }
         dwelling.agentIds.push(agent.id);
         let destinationBuilding = dwelling;
-        let destinationSlot = homeSlot;
-        const project = agent.project?.trim();
-        let workshop;
-        if (project) {
-          const { batch, slot } = membership(`project:${project}`, agent.id);
-          workshop = building(`workshop:${project}:${batch}`, "workshop",
-            batch ? `${project} · workshop ${batch + 1}` : `${project} workshop`, project);
-          workshop.agentIds.push(agent.id);
-          if (agent.state === "working") {
-            destinationBuilding = workshop;
-            destinationSlot = slot;
-          }
-        }
+        let destinationSlot = 0;
+        if (agent.state === "working") destinationBuilding = workshop;
         if (pending.has(agent.id)) {
           const { batch, slot } = membership("attention", agent.id);
           destinationBuilding = batch ? building(`square:${batch}`, "square", `Gathering square ${batch + 1}`) : square;
           destinationBuilding.agentIds.push(agent.id);
           destinationSlot = slot;
         }
-        const arrival = front(dwelling, homeSlot);
-        const destination = front(destinationBuilding, destinationSlot);
+        if (destinationBuilding === workshop) workshop.agentIds.push(agent.id);
+        const indoor = destinationBuilding.kind !== "square";
+        const arrival = doorway(dwelling);
+        const destination = indoor ? doorway(destinationBuilding) : front(destinationBuilding, destinationSlot);
         const previous = previousDestinations.get(agent.id);
         const unchanged = previous && previous.destination.every((value, axis) => value === destination[axis]);
         const journey = unchanged ? previous.route : route(previous?.destination ?? arrival,
           previous?.building ?? dwelling, destination, destinationBuilding);
         previousDestinations.set(agent.id, { destination, building: destinationBuilding, route: journey });
-        return { ...agent, position: arrival, destination,
+        return { ...agent, position: arrival, destination, indoor,
           route: journey,
           buildingId: destinationBuilding.id, appearance: appearance(agent) };
       });

@@ -74,7 +74,7 @@ describe("expandable village layout", () => {
   it("provides a finite civic village before any agents arrive", () => {
     const world = createVillageLayout().update(snapshot([]));
     expect(world.agents).toEqual([]);
-    expect(world.buildings.map(item => item.kind)).toEqual(["square", "lodge", "archive", "noticeboard"]);
+    expect(world.buildings.map(item => item.kind)).toEqual(["square", "lodge", "archive", "noticeboard", "workshop"]);
     expect(Object.values(world.bounds).every(Number.isFinite)).toBe(true);
     expect(world.roads.length).toBeGreaterThan(0);
   });
@@ -92,7 +92,7 @@ describe("expandable village layout", () => {
     expect(layout.update(snapshot(original))).toEqual(first);
   });
 
-  it("uses actual approvals and project activity, preserving failed/stale/resting states", () => {
+  it("uses one indoor workshop for all work and actual approvals for outdoor attention", () => {
     const people = [person("working", { state: "working", project: "garden" }),
       person("approval", { state: "working", project: "garden" }),
       person("knocking", { state: "knocking", pending_approval_ids: ["old"] }),
@@ -102,11 +102,17 @@ describe("expandable village layout", () => {
       { agent_id: "approval", state: "pending" }, { agent_id: "knocking", state: "resolved" },
     ]));
     const agents = byId(world.agents);
-    expect(agents.get("working").buildingId).toBe("workshop:garden:0");
+    expect(agents.get("working").buildingId).toBe("workshop");
+    expect(agents.get("unknown-work").buildingId).toBe("workshop");
+    expect(agents.get("working").indoor).toBe(true);
+    expect(world.buildings.filter(building => building.kind === "workshop")).toHaveLength(1);
+    expect(byId(world.buildings).get("workshop").agentIds.toSorted()).toEqual(["unknown-work", "working"]);
     expect(agents.get("approval").buildingId).toBe("square");
-    for (const id of ["knocking", "failed", "stale", "resting", "unknown-work"]) {
+    expect(agents.get("approval").indoor).toBe(false);
+    for (const id of ["knocking", "failed", "stale", "resting"]) {
       expect(agents.get(id).buildingId).toBe(`home:${id}`);
       expect(agents.get(id).destination).toEqual(agents.get(id).position);
+      expect(agents.get(id).indoor).toBe(true);
     }
     expect(agents.get("stale").state).toBe("stale");
     expect(agents.get("working").appearance.body).toBe("#ff9933");
@@ -128,7 +134,9 @@ describe("expandable village layout", () => {
           Math.abs(a.position[1] - b.position[1]) >= (a.depth + b.depth) / 2).toBe(true);
       }
     }
-    expect(new Set(world.agents.map(agent => String(agent.destination))).size).toBe(count);
+    expect(world.buildings.filter(building => building.kind === "workshop")).toHaveLength(1);
+    expect(new Set(world.agents.map(agent => String(agent.destination))).size).toBe(1);
+    expect(world.agents.every(agent => agent.indoor && agent.buildingId === "workshop")).toBe(true);
     for (const agent of world.agents) {
       expect(agent.route[0]).toEqual(agent.position);
       expect(agent.route.at(-1)).toEqual(agent.destination);
@@ -140,13 +148,14 @@ describe("expandable village layout", () => {
     }
   });
 
-  it("provides distinct stable frontage positions for 100 visitors and 100 pending approvals", () => {
+  it("shares lodge entrances while retaining distinct outdoor positions for 100 approvals", () => {
     const layout = createVillageLayout();
     const people = Array.from({ length: 100 }, (_, i) => person(`guest-${i}`, { residency: "visitor" }));
     const approvals = people.map(agent => ({ agent_id: agent.id, state: "pending" }));
     const world = layout.update(snapshot(people, approvals));
-    expect(new Set(world.agents.map(agent => String(agent.position))).size).toBe(100);
+    expect(new Set(world.agents.map(agent => String(agent.position))).size).toBe(Math.ceil(100 / 12));
     expect(new Set(world.agents.map(agent => String(agent.destination))).size).toBe(100);
+    expect(world.agents.every(agent => !agent.indoor)).toBe(true);
     const after = layout.update(snapshot(people.slice(1), approvals.slice(1)));
     for (const agent of after.agents) expect(agent).toEqual(byId(world.agents).get(agent.id));
   });
@@ -164,7 +173,7 @@ describe("expandable village layout", () => {
     expect(resting.route.at(-1)).toEqual(first.position);
   });
 
-  it("retains terrain and street extents after outlying workshops and all residents depart", () => {
+  it("retains terrain and street extents after outlying residents depart", () => {
     const layout = createVillageLayout();
     const people = Array.from({ length: 100 }, (_, i) => person(`a${String(i).padStart(3, "0")}`, {
       state: "working", project: "one",
@@ -190,7 +199,35 @@ describe("expandable village layout", () => {
     expect(empty.roads.filter(road => road.width === 1.25))
       .toEqual(working.roads.filter(road => road.width === 1.25));
     expect(empty.agents).toEqual([]);
-    expect(empty.buildings).toHaveLength(4);
+    expect(empty.buildings).toHaveLength(5);
+  });
+
+  it("keeps the shared workshop across project changes and sends resting visitors indoors", () => {
+    const layout = createVillageLayout();
+    const worker = person("worker", { state: "working", project: "first" });
+    const first = layout.update(snapshot([worker]));
+    const second = layout.update(snapshot([{ ...worker, project: "second" }, person("visitor", { residency: "visitor" })]));
+    expect(byId(second.buildings).get("workshop").position).toEqual(byId(first.buildings).get("workshop").position);
+    expect(byId(second.agents).get("worker").destination).toEqual(first.agents[0].destination);
+    expect(byId(second.agents).get("visitor").indoor).toBe(true);
+    expect(byId(second.agents).get("visitor").buildingId).toBe("lodge:0");
+    expect(second.buildings.some(building => building.project)).toBe(false);
+    const restored = createVillageLayout(JSON.parse(JSON.stringify(layout.serialize()))).update(snapshot([worker]));
+    expect(byId(restored.buildings).get("workshop").position).toEqual(byId(first.buildings).get("workshop").position);
+  });
+
+  it("restores version-one retired project workshop plots without creating extra workshops", () => {
+    const layout = createVillageLayout();
+    const before = layout.update(snapshot([person("resident")]));
+    const saved = layout.serialize();
+    // A prior UI version reserved project workshops; keep their plots retired.
+    const allocation = saved.allocated.find(entry => entry[0] === "workshop");
+    allocation[0] = "workshop:legacy-project:0";
+    saved.groups.push(["project:legacy-project", [["resident", 0]]]);
+    const restored = createVillageLayout(saved).update(snapshot([person("resident", { state: "working" })]));
+    expect(restored.buildings.filter(building => building.kind === "workshop")).toHaveLength(1);
+    expect(byId(restored.buildings).get("home:resident").position).toEqual(byId(before.buildings).get("home:resident").position);
+    expect(byId(restored.buildings).get("workshop").position).not.toEqual(allocation[1]);
   });
 
   it("is deterministic for the same population and does not mutate a snapshot", () => {

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { InteriorWorld } from "../world/InteriorWorld.jsx";
 import { VillageWorld } from "../world/VillageWorld.jsx";
 import { createVillageLayout } from "../world/layout.js";
 import { daylightAt } from "../world/daylight.js";
@@ -7,7 +8,7 @@ import "./village-experience.css";
 
 const purposes = {
   home: "A permanent home for a resident of Warren.",
-  workshop: "A shared place for agents working on this project.",
+  workshop: "A shared place for working agents across every project.",
   lodge: "A place for visiting agent sessions to gather.",
   square: "The heart of the village. Requests for your attention arrive here.",
   archive: "The village's recorded artifacts, journals, and routines.",
@@ -65,6 +66,7 @@ function AgentDetails({
   setFollow,
   onClose,
   detailRef,
+  onVisitHome,
 }) {
   const charter = snapshot.residents.find(
     (r) => r.file === agent.resident_file,
@@ -151,6 +153,11 @@ function AgentDetails({
           )}
         </details>
       )}
+      {agent.residency === "resident" && (
+        <button className="ve-text-button" onClick={onVisitHome}>
+          Visit home →
+        </button>
+      )}
       <Records title="Tasks" items={tasks}>
         {(t) => (
           <li key={t.id}>
@@ -211,27 +218,51 @@ export function VillageExperience({ snapshot }) {
   const world = useMemo(() => layout.current.update(snapshot), [snapshot]);
   useEffect(() => {
     try {
-      localStorage.setItem(
-        "arcadia:village-layout:v1",
-        JSON.stringify(layout.current.serialize()),
-      );
+      const saved = layout.current.serialize();
+      if (saved)
+        localStorage.setItem(
+          "arcadia:village-layout:v1",
+          JSON.stringify(saved),
+        );
     } catch {
       // Persistence is optional: the live village still works without storage.
     }
   }, [world]);
   const [selection, setSelection] = useState(null);
-  const detailRef = useRef(null);
+  const [roomId, setRoomId] = useState(null);
+  const [roomError, setRoomError] = useState(null);
+  const [roomCameraCommand, setRoomCameraCommand] = useState(null);
+  const room = world.buildings.find((building) => building.id === roomId);
+  const roomAgents = room
+    ? world.agents.filter(
+        (agent) => agent.buildingId === room.id && agent.indoor,
+      )
+    : [];
   useEffect(() => {
+    if (roomId && !room) setRoomId(null);
+  }, [roomId, room]);
+  useEffect(() => setRoomError(null), [roomId]);
+  const onRoomError = useCallback(
+    (error) => setRoomError(error?.message || "Room rendering is unavailable."),
+    [],
+  );
+  const detailRef = useRef(null);
+  const roomRef = useRef(null);
+  const previousScrollRoom = useRef(null);
+  useEffect(() => {
+    const enteredRoom = roomId && roomId !== previousScrollRoom.current;
+    previousScrollRoom.current = roomId;
     if (!selection || !globalThis.matchMedia?.("(max-width: 800px)").matches)
       return;
-    detailRef.current?.scrollIntoView?.({
+    const target = enteredRoom ? roomRef.current : detailRef.current;
+    target?.scrollIntoView?.({
       behavior: globalThis.matchMedia?.("(prefers-reduced-motion: reduce)")
         .matches
         ? "auto"
         : "smooth",
       block: "nearest",
     });
-  }, [selection?.kind, selection?.id]);
+  }, [selection?.kind, selection?.id, roomId]);
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState("people");
   const [filter, setFilter] = useState("all");
@@ -321,10 +352,28 @@ export function VillageExperience({ snapshot }) {
       nonce: (previous?.nonce || 0) + 1,
     }));
   };
-  const select = useCallback((next) => {
-    setSelection(next);
-    setFollow(false);
-  }, []);
+  const select = useCallback(
+    (next) => {
+      setSelection(next);
+      setFollow(false);
+      setRoomCameraCommand(null);
+      if (!next) return;
+      const target =
+        next.kind === "building"
+          ? world.buildings.find((building) => building.id === next.id)
+          : world.agents.find((agent) => agent.id === next.id);
+      setRoomId(
+        next.kind === "building"
+          ? ["home", "lodge", "workshop"].includes(target?.kind)
+            ? target.id
+            : null
+          : target?.indoor
+            ? target.buildingId
+            : null,
+      );
+    },
+    [world],
+  );
   const selectedAgent =
     selection?.kind === "agent"
       ? world.agents.find((a) => a.id === selection.id)
@@ -339,7 +388,21 @@ export function VillageExperience({ snapshot }) {
       setFollow(false);
     }
   }, [selection, selectedAgent, selectedBuilding]);
-  const projects = world.buildings.filter((b) => b.kind === "workshop");
+  const workshop = world.buildings.find(
+    (building) => building.kind === "workshop",
+  );
+  const projects = [
+    ...new Set(world.agents.map((agent) => agent.project).filter(Boolean)),
+  ]
+    .sort()
+    .map((project) => ({
+      id: project,
+      name: project,
+      project,
+      agentIds: world.agents
+        .filter((agent) => agent.project === project)
+        .map((agent) => agent.id),
+    }));
   const search = query.toLowerCase().trim();
   const people = world.agents
     .filter(
@@ -392,7 +455,11 @@ export function VillageExperience({ snapshot }) {
         </p>
       </header>
       <div className="ve-main">
-        <section className="ve-world-panel" aria-label="Village">
+        <section
+          className="ve-world-panel"
+          data-interior={Boolean(room)}
+          aria-label="Village"
+        >
           <div className="ve-world-heading">
             <span className="ve-map-label">
               <i />
@@ -400,7 +467,108 @@ export function VillageExperience({ snapshot }) {
             </span>
             <span className="ve-world-note">A home for every agent</span>
           </div>
-          <div className="ve-canvas">
+          {room && (
+            <section
+              ref={roomRef}
+              className="ve-room"
+              aria-label="Building interior"
+            >
+              <header className="ve-room-header">
+                <button
+                  aria-label="Back to village"
+                  onClick={() => {
+                    setRoomId(null);
+                    setRoomCameraCommand(null);
+                    setSelection(null);
+                    setFollow(false);
+                  }}
+                >
+                  ← Back to village
+                </button>
+                <div>
+                  <p className="ve-kicker">Inside the {room.kind}</p>
+                  <h3>{room.name}</h3>
+                </div>
+                <span>{roomAgents.length} inside</span>
+              </header>
+              <div className="ve-room-canvas">
+                <InteriorWorld
+                  key={room.id}
+                  building={room}
+                  agents={roomAgents}
+                  paused={paused}
+                  quality={quality}
+                  onSelect={select}
+                  onError={onRoomError}
+                  cameraCommand={
+                    roomCameraCommand?.roomId === room.id
+                      ? roomCameraCommand
+                      : null
+                  }
+                />
+                <div
+                  className="ve-camera ve-room-camera"
+                  aria-label="Room camera controls"
+                >
+                  {[
+                    ["zoom-in", "+", "Zoom into room"],
+                    ["zoom-out", "−", "Zoom out of room"],
+                    ["reset", "⌂", "Reset room view"],
+                  ].map(([type, icon, label]) => (
+                    <button
+                      key={type}
+                      aria-label={label}
+                      title={label}
+                      onClick={() =>
+                        setRoomCameraCommand((previous) => ({
+                          roomId: room.id,
+                          type,
+                          nonce: (previous?.nonce || 0) + 1,
+                        }))
+                      }
+                    >
+                      {icon}
+                    </button>
+                  ))}
+                </div>
+                {roomError && (
+                  <div
+                    className="ve-scene-message ve-scene-error"
+                    role="status"
+                  >
+                    <strong>The room view couldn't open.</strong>
+                    <p>The people inside are listed below.</p>
+                    <details>
+                      <summary>Rendering details</summary>
+                      {roomError}
+                    </details>
+                  </div>
+                )}
+              </div>
+              <div className="ve-room-roster" aria-label="People inside">
+                {roomAgents.length ? (
+                  roomAgents.map((agent) => (
+                    <button
+                      key={agent.id}
+                      aria-pressed={selectedAgent?.id === agent.id}
+                      onClick={() => select({ kind: "agent", id: agent.id })}
+                    >
+                      <Portrait agent={agent} />
+                      <span>
+                        <strong>{agent.name}</strong>
+                        <small>
+                          {agent.project || stateLabel(agent.state)}
+                        </small>
+                      </span>
+                    </button>
+                  ))
+                ) : (
+                  <p>No agents are inside right now.</p>
+                )}
+              </div>
+            </section>
+          )}
+          <div className="ve-canvas" hidden={Boolean(room)}>
             <VillageWorld
               world={world}
               selection={selection}
@@ -608,8 +776,10 @@ export function VillageExperience({ snapshot }) {
                     className="ve-project"
                     aria-label={`${b.project || b.name} ${b.agentIds.length} ${b.agentIds.length === 1 ? "agent" : "agents"} · Workshop`}
                     key={b.id}
-                    aria-pressed={selectedBuilding?.id === b.id}
-                    onClick={() => select({ kind: "building", id: b.id })}
+                    aria-pressed={selectedBuilding?.id === workshop?.id}
+                    onClick={() =>
+                      workshop && select({ kind: "building", id: workshop.id })
+                    }
                   >
                     <span className="ve-building-icon" aria-hidden="true">
                       ⌂
@@ -636,14 +806,20 @@ export function VillageExperience({ snapshot }) {
               <p className="ve-empty">
                 {projects.length
                   ? "No projects match this search."
-                  : "Workshops appear when agents have a project."}
+                  : "Projects appear here when agents work on them."}
               </p>
             )}
           </div>
           <nav className="ve-places" aria-label="Village places">
             {world.buildings
               .filter((b) =>
-                ["square", "lodge", "archive", "noticeboard"].includes(b.kind),
+                [
+                  "square",
+                  "lodge",
+                  "workshop",
+                  "archive",
+                  "noticeboard",
+                ].includes(b.kind),
               )
               .map((b) => (
                 <button
@@ -663,6 +839,9 @@ export function VillageExperience({ snapshot }) {
               follow={follow}
               setFollow={setFollow}
               onClose={() => select(null)}
+              onVisitHome={() =>
+                select({ kind: "building", id: `home:${selectedAgent.id}` })
+              }
             />
           ) : selectedBuilding ? (
             <section
@@ -686,7 +865,11 @@ export function VillageExperience({ snapshot }) {
               <h3>{selectedBuilding.name}</h3>
               <p className="ve-current">{purposes[selectedBuilding.kind]}</p>
               {world.agents
-                .filter((a) => selectedBuilding.agentIds.includes(a.id))
+                .filter((a) =>
+                  ["home", "lodge", "workshop"].includes(selectedBuilding.kind)
+                    ? a.buildingId === selectedBuilding.id && a.indoor
+                    : selectedBuilding.agentIds.includes(a.id),
+                )
                 .map((a) => (
                   <button
                     className="ve-occupant"
