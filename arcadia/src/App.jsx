@@ -1,3 +1,4 @@
+import { TelemetryWarning } from "./panels/TelemetryWarning.jsx";
 import { useEffect, useRef, useState } from "react";
 import { pendingApprovals } from "./contract/approvals.js";
 import {
@@ -221,6 +222,7 @@ function VillageShell({ snapshot, stewardClient, connectionStatus }) {
             </p>
           </div>
         </section>
+        <TelemetryWarning snapshot={snapshot} />
         {(visitedVillage || view === "village") && <div className="village-scene-view" hidden={view !== "village"}><VillageExperience snapshot={snapshot} stewardClient={stewardClient} active={view === "village"} /></div>}
         {view !== "village" && <section className={`village-secondary-view ${view === "records" ? "records-page" : "requests-page"}`} aria-label={view === "records" ? "Village records" : "Village requests"} id={view === "records" ? "records" : "requests-view"}>
           <header className="secondary-view-heading">

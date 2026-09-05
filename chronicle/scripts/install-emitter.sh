@@ -48,7 +48,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-install -m 600 "$repo_root/hooks/emit.py" "$repo_root/hooks/durable.py" "$stage/"
+install -m 600 "$repo_root/hooks/emit.py" "$repo_root/hooks/durable.py" "$repo_root/hooks/delivery_worker.py" "$repo_root/hooks/delivery_service.py" "$repo_root/hooks/presence.py" "$stage/"
 install -m 700 "$repo_root/hooks/chronicle-emit" "$stage/chronicle-emit"
 # The bundle answers to both entry-point names for one release. A hook config
 # written before the rename invokes burrow-emit by absolute path, and an upgrade
@@ -57,10 +57,10 @@ install -m 700 "$repo_root/hooks/chronicle-emit" "$stage/chronicle-emit"
 install -m 700 "$repo_root/hooks/chronicle-emit" "$stage/burrow-emit"
 
 # Validate the private, complete candidate before the published path changes.
-[ "$(find "$stage" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" = 4 ]
+[ "$(find "$stage" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" = 7 ]
 [ -x "$stage/chronicle-emit" ]
 [ -x "$stage/burrow-emit" ]
-python3 -m py_compile "$stage/emit.py" "$stage/durable.py"
+python3 -m py_compile "$stage/"*.py
 rm -rf -- "$stage/__pycache__"
 
 if [ "${CHRONICLE_INSTALL_FAIL_BEFORE_PUBLISH:-}" = 1 ]; then
@@ -107,3 +107,17 @@ if [ -d "$stage" ]; then rm -rf -- "$stage"; fi
 stage=$parent/.${name}.published
 trap - EXIT HUP INT TERM
 printf '%s\n' "Installed Chronicle emitter: $install_root/chronicle-emit"
+
+# Opt in only after Chronicle supports /telemetry and /events/batch. An already
+# installed service is restarted on every atomic bundle upgrade.
+if [ "${1:-}" = --service ]; then
+  python3 "$install_root/delivery_service.py" install
+elif [ -f "${HOME}/.chronicle/delivery-config.json" ] && python3 - "$install_root" <<'PYCONFIG'
+import json, os, sys
+with open(os.path.expanduser("~/.chronicle/delivery-config.json")) as stream:
+    config = json.load(stream)
+sys.exit(0 if config.get("BUNDLE") == sys.argv[1] else 1)
+PYCONFIG
+then
+  python3 "$install_root/delivery_service.py" restart
+fi

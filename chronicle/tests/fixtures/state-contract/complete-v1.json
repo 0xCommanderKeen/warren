@@ -1,7 +1,7 @@
 {
   "kind": "snapshot",
   "snapshot": {
-    "schema_version": 1,
+    "schema_version": 2,
     "generation": 7,
     "cursor": "v1:fixture:1:2:3:4",
     "log_generation": 1,
@@ -33,6 +33,7 @@
     "routines": [{"run_id": "run-1", "routine": "daily", "agent_id": "claude:keeper", "project": "burrow", "source": "steward", "state": "finished", "trigger": "schedule", "started_at": "2026-08-27T11:50:00.000Z", "updated_at": "2026-08-27T11:55:00.000Z", "outcome": "ok", "duration_s": 300, "artifacts": ["report.md"], "error": null}],
     "diagnostics": [{"kind": "malformed_event", "file": "events.jsonl", "message": "invalid record"}],
     "capacity": {"villagers": 80, "events_per_villager": 160, "ambient_events_per_villager": 4, "tasks": 200, "approvals": 200, "journals": 200, "routines": 200, "diagnostics": 200, "ambient_diagnostics": 40},
+    "producer_health": [],
     "capabilities": {"ingest": true, "approvals": true, "jobs": true, "routines": true}
   }
 }

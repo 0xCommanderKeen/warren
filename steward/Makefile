@@ -175,7 +175,7 @@ image-cp-ship:
 # recorded beside it would go stale on the next rebase while the bytes stayed identical.
 # The commit is echoed below for the human running this, and `git log -1 -- hooks/` in
 # chronicle answers the same question at any later date.
-BUNDLE_SOURCES = hooks/emit.py hooks/durable.py hooks/build.py
+BUNDLE_SOURCES = hooks/emit.py hooks/durable.py hooks/build.py hooks/presence.py hooks/delivery_worker.py
 
 vendor-emitter:
 	@git -C "$(CHRONICLE)" rev-parse --git-dir >/dev/null 2>&1 || { echo "no checkout at $(CHRONICLE); pass CHRONICLE=/path/to/chronicle"; exit 1; }

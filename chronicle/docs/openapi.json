@@ -137,6 +137,43 @@
         "title": "ArtifactWire",
         "type": "object"
       },
+      "DeliveryBatch": {
+        "properties": {
+          "records": {
+            "items": {
+              "$ref": "#/components/schemas/DeliveryRecord"
+            },
+            "maxItems": 32,
+            "minItems": 1,
+            "title": "Records",
+            "type": "array"
+          }
+        },
+        "required": [
+          "records"
+        ],
+        "title": "DeliveryBatch",
+        "type": "object"
+      },
+      "DeliveryRecord": {
+        "properties": {
+          "delivery_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Delivery Id",
+            "type": "string"
+          },
+          "event": {
+            "$ref": "#/components/schemas/ProtocolEvent"
+          }
+        },
+        "required": [
+          "delivery_id",
+          "event"
+        ],
+        "title": "DeliveryRecord",
+        "type": "object"
+      },
       "DiagnosticWire": {
         "additionalProperties": true,
         "description": "One bounded projection diagnostic.",
@@ -205,6 +242,135 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HealthWire": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "enum": [
+                  "dns",
+                  "connect",
+                  "timeout",
+                  "authentication",
+                  "invalid_event",
+                  "http",
+                  "disk",
+                  "worker"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "number"
+          },
+          "failures": {
+            "minimum": 0.0,
+            "title": "Failures",
+            "type": "integer"
+          },
+          "last_success": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Success"
+          },
+          "observed_at": {
+            "minimum": 0.0,
+            "title": "Observed At",
+            "type": "number"
+          },
+          "oldest_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oldest At"
+          },
+          "overflow": {
+            "minimum": 0.0,
+            "title": "Overflow",
+            "type": "integer"
+          },
+          "presence_overflow": {
+            "minimum": 0.0,
+            "title": "Presence Overflow",
+            "type": "integer"
+          },
+          "producer": {
+            "pattern": "^[A-Za-z0-9_-]{1,64}$",
+            "title": "Producer",
+            "type": "string"
+          },
+          "queue_depth": {
+            "minimum": 0.0,
+            "title": "Queue Depth",
+            "type": "integer"
+          },
+          "received_at": {
+            "title": "Received At",
+            "type": "number"
+          },
+          "retry_at": {
+            "title": "Retry At",
+            "type": "number"
+          },
+          "status": {
+            "enum": [
+              "healthy",
+              "delayed",
+              "unknown",
+              "overloaded"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "target": {
+            "pattern": "^[A-Za-z0-9_-]{1,64}$",
+            "title": "Target",
+            "type": "string"
+          },
+          "worker": {
+            "const": "running",
+            "title": "Worker",
+            "type": "string"
+          }
+        },
+        "required": [
+          "producer",
+          "target",
+          "observed_at",
+          "queue_depth",
+          "oldest_at",
+          "last_success",
+          "error",
+          "retry_at",
+          "failures",
+          "worker",
+          "overflow",
+          "presence_overflow",
+          "status",
+          "expires_at",
+          "received_at"
+        ],
+        "title": "HealthWire",
         "type": "object"
       },
       "IngestStatus": {
@@ -333,6 +499,269 @@
           "dropped"
         ],
         "title": "NotificationStatus",
+        "type": "object"
+      },
+      "Observation": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "epoch": {
+            "minimum": 0.0,
+            "title": "Epoch",
+            "type": "integer"
+          },
+          "observed_at": {
+            "minimum": 0.0,
+            "title": "Observed At",
+            "type": "number"
+          },
+          "project": {
+            "maxLength": 256,
+            "title": "Project",
+            "type": "string"
+          },
+          "sequence": {
+            "minimum": 0.0,
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "session_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "codex",
+              "claude-code"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "working",
+              "resting",
+              "knocking",
+              "failed",
+              "ended"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_id",
+          "session_id",
+          "epoch",
+          "sequence",
+          "observed_at",
+          "source",
+          "project",
+          "state"
+        ],
+        "title": "Observation",
+        "type": "object"
+      },
+      "PresenceWire": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "epoch": {
+            "minimum": 0.0,
+            "title": "Epoch",
+            "type": "integer"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "number"
+          },
+          "freshness": {
+            "enum": [
+              "fresh",
+              "unknown"
+            ],
+            "title": "Freshness",
+            "type": "string"
+          },
+          "observed_at": {
+            "minimum": 0.0,
+            "title": "Observed At",
+            "type": "number"
+          },
+          "producer": {
+            "title": "Producer",
+            "type": "string"
+          },
+          "project": {
+            "maxLength": 256,
+            "title": "Project",
+            "type": "string"
+          },
+          "sequence": {
+            "minimum": 0.0,
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "session_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "codex",
+              "claude-code"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "working",
+              "resting",
+              "knocking",
+              "failed",
+              "ended"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_id",
+          "session_id",
+          "epoch",
+          "sequence",
+          "observed_at",
+          "source",
+          "project",
+          "state",
+          "producer",
+          "freshness",
+          "expires_at"
+        ],
+        "title": "PresenceWire",
+        "type": "object"
+      },
+      "ProducerHealth": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "enum": [
+                  "dns",
+                  "connect",
+                  "timeout",
+                  "authentication",
+                  "invalid_event",
+                  "http",
+                  "disk",
+                  "worker"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "failures": {
+            "minimum": 0.0,
+            "title": "Failures",
+            "type": "integer"
+          },
+          "last_success": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Success"
+          },
+          "observed_at": {
+            "minimum": 0.0,
+            "title": "Observed At",
+            "type": "number"
+          },
+          "oldest_at": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oldest At"
+          },
+          "overflow": {
+            "minimum": 0.0,
+            "title": "Overflow",
+            "type": "integer"
+          },
+          "presence_overflow": {
+            "minimum": 0.0,
+            "title": "Presence Overflow",
+            "type": "integer"
+          },
+          "producer": {
+            "pattern": "^[A-Za-z0-9_-]{1,64}$",
+            "title": "Producer",
+            "type": "string"
+          },
+          "queue_depth": {
+            "minimum": 0.0,
+            "title": "Queue Depth",
+            "type": "integer"
+          },
+          "retry_at": {
+            "title": "Retry At",
+            "type": "number"
+          },
+          "target": {
+            "pattern": "^[A-Za-z0-9_-]{1,64}$",
+            "title": "Target",
+            "type": "string"
+          },
+          "worker": {
+            "const": "running",
+            "title": "Worker",
+            "type": "string"
+          }
+        },
+        "required": [
+          "producer",
+          "target",
+          "observed_at",
+          "queue_depth",
+          "oldest_at",
+          "last_success",
+          "error",
+          "retry_at",
+          "failures",
+          "worker",
+          "overflow",
+          "presence_overflow"
+        ],
+        "title": "ProducerHealth",
         "type": "object"
       },
       "ProjectionCapacity": {
@@ -819,6 +1248,28 @@
         "title": "TaskWire",
         "type": "object"
       },
+      "TelemetryReport": {
+        "additionalProperties": false,
+        "properties": {
+          "health": {
+            "$ref": "#/components/schemas/ProducerHealth"
+          },
+          "presence": {
+            "items": {
+              "$ref": "#/components/schemas/Observation"
+            },
+            "maxItems": 128,
+            "title": "Presence",
+            "type": "array"
+          }
+        },
+        "required": [
+          "health",
+          "presence"
+        ],
+        "title": "TelemetryReport",
+        "type": "object"
+      },
       "TransportStatus": {
         "properties": {
           "ingest": {
@@ -940,6 +1391,13 @@
             "title": "Log Generation",
             "type": "integer"
           },
+          "producer_health": {
+            "items": {
+              "$ref": "#/components/schemas/HealthWire"
+            },
+            "title": "Producer Health",
+            "type": "array"
+          },
           "residents": {
             "items": {
               "$ref": "#/components/schemas/ResidentWire"
@@ -955,7 +1413,7 @@
             "type": "array"
           },
           "schema_version": {
-            "const": 1,
+            "const": 2,
             "title": "Schema Version",
             "type": "integer"
           },
@@ -1091,6 +1549,16 @@
               }
             ],
             "title": "Place"
+          },
+          "presence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PresenceWire"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "project": {
             "title": "Project",
@@ -1308,6 +1776,38 @@
         "summary": "Ingest Event"
       }
     },
+    "/events/batch": {
+      "post": {
+        "description": "Validate the entire batch before committing its ordered, idempotent prefix.\n\nA failure after an append is ambiguous to the sender. Retrying the same IDs\nuses the same event and notification dedupe authorities as /events.",
+        "operationId": "ingest_batch_events_batch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeliveryBatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ingest Batch"
+      }
+    },
     "/residents": {
       "get": {
         "operationId": "get_residents_residents_get",
@@ -1443,6 +1943,37 @@
           }
         },
         "summary": "Stream State"
+      }
+    },
+    "/telemetry": {
+      "post": {
+        "operationId": "ingest_telemetry_telemetry_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TelemetryReport"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ingest Telemetry"
       }
     },
     "/transport/status": {

@@ -386,3 +386,14 @@
     color: #96917a;
   }
 }
+
+.telemetry-warning {
+  padding: 14px 20px;
+  background: #fff1ce;
+  border: 1px solid #c9943f;
+  border-radius: 8px;
+  color: #624411;
+  font-size: 0.875rem;
+}
+.telemetry-warning p { margin: 5px 0; }
+.telemetry-warning ul { padding-left: 20px; overflow-wrap: anywhere; }
