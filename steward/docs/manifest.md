@@ -1020,10 +1020,10 @@ notifications:
   note: Miha's phone         # a label, never an address
 ```
 
-**Quote the `on` key.** YAML 1.1 resolves a bare `on` (like `yes`, `no` and `off`) to the
-*boolean* `true`, so `on: [needs_human]` declares a mapping keyed by `True` and the manifest
-is refused with `notifications[1]: Keys should be strings` — a message that says nothing
-about the real cause. `"on"` is the whole fix.
+**Quote the `on` key.** YAML 1.1 resolves a bare `on` (like `yes` and `true`) to the
+*boolean* `true`; `off`, `no` and `false` resolve to `false`. Thus `on: [needs_human]`
+declares a mapping keyed by `True`. Validation names the containing mapping, explains
+YAML's boolean coercion, and suggests quoting the intended key. `"on"` is the whole fix.
 
 **A notification is not a route, and not a chat.** `routes` answers *how work reaches this
 resident*: every kind in it is a doorway something arrives through, and two of them
