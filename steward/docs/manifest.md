@@ -1329,21 +1329,21 @@ deploy:
   tz: Europe/Ljubljana                # the container's clock; see "The container's clock"
 ```
 
-Every field is optional, and every one has a default for the layout this fleet already
-uses — everything the warren puts on `dxp2800` lives under `~/docker/warren`, chronicle's
-own server at `burrow/` in it, and a new resident lands in `residents/<id>` beside it:
+Resident fields override installation settings. Host and user must be declared here or
+provided by `STEWARD_DEPLOY_HOST` / `STEWARD_DEPLOY_USER`; missing or invalid settings
+produce a validation error. Other fields retain these defaults:
 
 | field | default |
 |---|---|
-| `host` | `dxp2800` |
-| `user` | `Miha` |
+| `host` | `STEWARD_DEPLOY_HOST` (required if omitted) |
+| `user` | `STEWARD_DEPLOY_USER` (required if omitted) |
 | `path` | `~/docker/warren/residents/<id>` |
 | `container` | `steward-<id>` |
 | `image` | `steward-resident:latest` |
 | `command` | `["sleep", "infinity"]` |
 | `tz` | the routines' `schedule_tz`, when they all agree |
 
-So an ordinary resident declares no `deploy` block at all and still deploys. The block is
+With installation host/user settings, a resident can omit the `deploy` block. The block is
 for the resident that does *not* live where everything else lives: a second machine, a
 different compose root, a container somebody named by hand before steward existed.
 

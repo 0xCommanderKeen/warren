@@ -5,8 +5,7 @@ from collections.abc import Sequence
 from pathlib import PurePosixPath
 
 from steward.deployment_rules import (
-    DEFAULT_HOST,
-    DEFAULT_USER,
+    DeploymentSettings,
     burrow_home_for,
     resolve_mount_host_path,
 )
@@ -79,15 +78,16 @@ def _check_competing_mount_writers(residents: Sequence[Resident]) -> list[Diagno
     # the same spelling there is two resources. Defaults and home resolution are shared
     # with deployment rendering through deployment_rules.
     by_host: dict[tuple[str, str], dict[str, Resident]] = {}
+    defaults = DeploymentSettings.from_env()
     for resident in residents:
         for mount in resident.manifest.deploy.mounts:
             if mount.mode == "rw":
                 host = mount.host
                 if host.startswith("~/"):
-                    user = resident.manifest.deploy.user or DEFAULT_USER
+                    user = defaults.resolve_user(resident.manifest.deploy.user)
                     home = burrow_home_for(user)
                     host = resolve_mount_host_path(host, home)
-                burrow = resident.manifest.deploy.host or DEFAULT_HOST
+                burrow = defaults.resolve_host(resident.manifest.deploy.host)
                 by_host.setdefault((burrow, posixpath.normpath(host)), {})[resident.id] = resident
     diagnostics: list[Diagnostic] = []
     for (burrow, host_path), residents_by_id in by_host.items():

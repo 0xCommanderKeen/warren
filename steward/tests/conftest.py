@@ -178,6 +178,8 @@ type ResidentWriter = Callable[..., Path]
 def this_test_burrow(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make daemon partition tests deterministic on every developer and CI host."""
     monkeypatch.setenv("STEWARD_BURROW", "dxp2800")
+    monkeypatch.setenv("STEWARD_DEPLOY_HOST", "dxp2800")
+    monkeypatch.setenv("STEWARD_DEPLOY_USER", "Miha")
 
 
 @pytest.fixture

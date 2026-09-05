@@ -27,6 +27,7 @@ from steward.credential_policy import scan_text_for_secrets as scan_text_for_sec
 from steward.deployment_policy import UNPLACEABLE_RUNNER_KINDS as UNPLACEABLE_RUNNER_KINDS
 from steward.deployment_policy import (
     _check_container_zone,
+    _check_deployment_settings,
     _check_mount_collisions,
     _check_placement,
     _check_workspace_is_reachable,
@@ -418,6 +419,7 @@ def _validate_manifest(source: Path, library: SkillLibrary) -> ValidationResult:
     diagnostics.extend(_check_tools_are_enforceable(manifest, source))
     diagnostics.extend(_check_workspace_is_reachable(manifest, source))
     diagnostics.extend(_check_mount_collisions(manifest, source))
+    diagnostics.extend(_check_deployment_settings(manifest, source))
     diagnostics.extend(_check_container_zone(manifest, source))
     diagnostics.extend(_check_placement(manifest, source))
     diagnostics.extend(_check_delegation(manifest, source))

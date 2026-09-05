@@ -981,11 +981,10 @@ class Mount(_Model):
 class Deploy(_Model):
     """Where this resident runs: the address the nursery ships it to and the watchdog probes.
 
-    Every field is optional and every one has a documented default for the dxp2800 layout
-    (see :mod:`steward.deploy`), so an ordinary resident declares nothing here and still
-    deploys. What the block is for is the resident that does *not* live where everything
-    else lives — a second NAS, a different compose root, a container someone named by hand
-    before steward existed.
+    Explicit host/user fields override STEWARD_DEPLOY_HOST and STEWARD_DEPLOY_USER.
+    Validation requires those fields or installation settings; other fields retain their
+    documented defaults (see :mod:`steward.deploy`). This block also selects a different
+    compose root or a container named before steward existed.
 
     An absent ``deploy`` block is still what the watchdog calls **unsupervised**: the
     default container name is what the nursery *would* create, and a resident nobody has
@@ -1003,12 +1002,12 @@ class Deploy(_Model):
     host: str | None = Field(
         default=None,
         pattern=HOST_PATTERN,
-        description="Host the container runs on. Default: dxp2800.",
+        description="Host the container runs on. Falls back to STEWARD_DEPLOY_HOST.",
     )
     user: str | None = Field(
         default=None,
         pattern=SSH_USER_PATTERN,
-        description="SSH user steward reaches that host as. Default: Miha.",
+        description="SSH user steward reaches that host as. Falls back to STEWARD_DEPLOY_USER.",
     )
     path: str | None = Field(
         default=None,

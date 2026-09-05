@@ -2,16 +2,56 @@
 
 import os
 import posixpath
+import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 
-from steward.manifest_models import DEFAULT_SCHEDULE_TZ, ResidentManifest
+from steward.manifest_models import (
+    DEFAULT_SCHEDULE_TZ,
+    HOST_PATTERN,
+    SSH_USER_PATTERN,
+    ResidentManifest,
+)
 
-#: The NAS this fleet runs on, and the user steward reaches it as. Burrow's server, the
-#: village's event log, and hob are all already here; a new resident that landed
-#: somewhere else by default would be a resident nobody could find.
-DEFAULT_HOST = "dxp2800"
-DEFAULT_USER = "Miha"
+DEPLOY_HOST_ENV = "STEWARD_DEPLOY_HOST"
+DEPLOY_USER_ENV = "STEWARD_DEPLOY_USER"
+
+
+class DeploymentSettingsError(ValueError):
+    """Placement is missing or unsafe; refuse before provisioning anything."""
+
+
+@dataclass(frozen=True)
+class DeploymentSettings:
+    """One snapshot of installation defaults; explicit resident fields take precedence."""
+
+    host: str | None = None
+    user: str | None = None
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> DeploymentSettings:
+        """Read at construction, never at import, so separate installations stay separate."""
+        source = os.environ if env is None else env
+        return cls(source.get(DEPLOY_HOST_ENV), source.get(DEPLOY_USER_ENV))
+
+    def resolve_host(self, explicit: str | None = None) -> str:
+        """Resolve a host with the manifest's existing safety grammar."""
+        return self._resolve(explicit, self.host, DEPLOY_HOST_ENV, HOST_PATTERN)
+
+    def resolve_user(self, explicit: str | None = None) -> str:
+        """Resolve an SSH user without guessing the current process account."""
+        return self._resolve(explicit, self.user, DEPLOY_USER_ENV, SSH_USER_PATTERN)
+
+    @staticmethod
+    def _resolve(explicit: str | None, default: str | None, name: str, pattern: str) -> str:
+        value = explicit if explicit is not None else default
+        if not value or not re.fullmatch(pattern, value):
+            raise DeploymentSettingsError(
+                f"set an explicit deploy field or {name} to a valid nonblank value"
+            )
+        return value
+
 
 #: Where the warren lives on a burrow (warren#358): one directory under the deploy user's
 #: home holding everything the warren puts there — chronicle at ``<root>/burrow``, the
