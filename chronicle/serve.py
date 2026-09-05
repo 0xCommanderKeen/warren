@@ -50,10 +50,11 @@ import uvicorn
 from fastapi import FastAPI, Header, Query, Request
 from fastapi.openapi.utils import get_openapi
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel, ConfigDict, JsonValue, RootModel, model_validator
 from sse_starlette import EventSourceResponse, ServerSentEvent
 
+import artifact_preview
 import notification_persistence
 import event_log
 from identity import fallback_identity
@@ -1162,6 +1163,33 @@ async def get_state(
             },
         )
     return delivery
+
+
+@app.get("/artifacts/preview")
+async def get_artifact_preview(
+    request: Request,
+    agent_id: str = Query(..., min_length=1, max_length=1024),
+    path: str = Query(..., min_length=1, max_length=4096),
+    ts: str = Query(..., min_length=1, max_length=128),
+):
+    runtime = _runtime(request)
+
+    def preview():
+        # The same coordinator owns retention and projection for /state. Re-evaluate
+        # here so an expired or removed record cannot authorize a later file read.
+        snapshot = runtime.state_coordinator.evaluate()
+        return artifact_preview.read_preview(
+            snapshot["artifacts"], runtime.config.artifact_preview_roots,
+            agent_id=agent_id, path=path, ts=ts,
+        )
+
+    try:
+        result = await anyio.to_thread.run_sync(preview)
+    except artifact_preview.PreviewError as error:
+        return _error(error.status, str(error))
+    return JSONResponse(result, headers={
+        "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+    })
 
 
 @app.get(

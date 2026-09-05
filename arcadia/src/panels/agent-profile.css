@@ -1,0 +1,262 @@
+.agent-profile {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: min(960px, calc(100vw - 48px));
+  max-height: calc(100dvh - 48px);
+  padding: 0;
+  border: 1px solid #d5dac8;
+  border-radius: 24px;
+  background: #faf8ef;
+  color: #294139;
+  box-shadow: 0 24px 100px #142e3850;
+  overflow: hidden;
+  overscroll-behavior: contain;
+  font-family: "Avenir Next", "Trebuchet MS", sans-serif;
+  scrollbar-width: thin;
+  scrollbar-color: #c3ccb1 transparent;
+}
+.agent-profile::backdrop {
+  background: #172d36a6;
+  backdrop-filter: blur(5px);
+}
+.agent-profile .ve-dossier {
+  max-height: none;
+  overflow: visible;
+  padding: 0;
+  display: grid;
+  grid-template-columns: 285px minmax(0, 1fr);
+}
+.agent-profile-identity {
+  padding: 32px;
+  background: #e9edde;
+  border-right: 1px solid #d5dac8;
+  min-width: 0;
+}
+.agent-profile-work {
+  padding: 34px 32px;
+  min-width: 0;
+}
+.agent-profile .ve-detail-heading {
+  align-items: start;
+  margin-bottom: 22px;
+}
+.agent-profile .ve-portrait {
+  width: 104px;
+  height: 110px;
+  flex: 0 0 104px;
+  border-radius: 23px;
+  background: radial-gradient(ellipse at 50% 20%, #f5f4e8, #dce3cc);
+  box-shadow: inset 0 0 0 1px #d0d9c3;
+}
+.agent-profile .ve-portrait-body {
+  width: 72%;
+  height: 57%;
+  left: 14%;
+  bottom: -10%;
+  transform: none;
+  border-radius: 32px 32px 4px 4px;
+}
+.agent-profile .ve-portrait-face {
+  width: 39%;
+  height: 43%;
+  left: 32%;
+  top: 27%;
+  transform: none;
+  border-radius: 15px 15px 19px 19px;
+}
+.agent-profile .ve-portrait-face:after {
+  width: 50%;
+  height: 4px;
+  left: 25%;
+  top: 44%;
+  background: none;
+  box-shadow: none;
+  border-left: 3px solid #514536;
+  border-right: 3px solid #514536;
+  border-radius: 0;
+}
+.agent-profile .ve-portrait-hat {
+  width: 56%;
+  height: 20%;
+  left: 24%;
+  top: 16%;
+  transform: rotate(-8deg);
+  border-radius: 24px 24px 5px 5px;
+  border-bottom-width: 4px;
+}
+.agent-profile .agent-profile-close {
+  position: absolute;
+  right: 18px;
+  top: 18px;
+  width: 38px;
+  height: 38px;
+  font-size: 25px !important;
+  background: #edf0e4;
+  color: #74866a;
+  z-index: 2;
+}
+.agent-profile .agent-profile-close:hover {
+  background: #dfe7d4;
+  color: #3e6039;
+}
+.agent-profile .ve-dossier h3 {
+  font:
+    38px/1.1 Georgia,
+    serif;
+  margin: 18px 0 12px;
+  letter-spacing: -1px;
+  overflow-wrap: anywhere;
+}
+.agent-profile .ve-current {
+  font-size: 14px;
+  line-height: 1.8;
+  color: #607454;
+}
+.agent-profile .ve-role {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.agent-profile .ve-facts {
+  font-size: 12px;
+  grid-template-columns: 65px minmax(0, 1fr);
+  line-height: 1.7;
+  gap: 11px;
+  margin: 24px 0;
+}
+.agent-profile .ve-facts dd {
+  overflow-wrap: anywhere;
+}
+.agent-profile .ve-detail-records {
+  margin-top: 22px;
+  padding-top: 18px;
+}
+.agent-profile .ve-detail-records h4 {
+  font-size: 13px;
+  margin-bottom: 11px;
+}
+.agent-profile .ve-detail-records li {
+  font-size: 12px;
+  line-height: 1.7;
+  padding: 7px 0;
+  gap: 16px;
+}
+.agent-profile .ve-detail-records li small {
+  font-size: 10px;
+}
+.agent-profile .ve-muted {
+  font-size: 12px;
+}
+.agent-profile .ve-detail-records a {
+  display: inline-block;
+  font-size: 11px;
+  padding: 8px 0;
+}
+.agent-profile .ve-text-button {
+  font-size: 12px !important;
+  padding: 8px 10px;
+  border: 1px solid #cdd8bd;
+  background: #f5f8ed;
+  border-radius: 7px;
+  text-decoration: none;
+  text-align: left;
+}
+.agent-profile .ve-text-button:hover {
+  background: #e3edda;
+}
+.agent-profile .ve-text-button[aria-pressed="true"] {
+  background: #54774c;
+  border-color: #54774c;
+  color: #f9f7ec;
+}
+.agent-profile-work > h4 {
+  font:
+    25px Georgia,
+    serif;
+  margin: 0 36px 15px 0;
+}
+.agent-profile .ve-detail-status {
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 19px 0;
+}
+.agent-profile .ve-state {
+  font-size: 11px;
+  padding: 6px 8px;
+  white-space: nowrap;
+}
+.agent-profile .ve-charter {
+  font-size: 12px;
+  line-height: 1.8;
+  margin: 18px 0;
+}
+.agent-profile :is(button, a, summary):focus-visible {
+  outline: 3px solid #aa8050;
+  outline-offset: 3px;
+}
+@media (max-width: 650px) {
+  .agent-profile {
+    width: calc(100vw - 20px);
+    max-height: calc(100dvh - 20px);
+    border-radius: 18px;
+  }
+  .agent-profile .ve-dossier {
+    grid-template-columns: 1fr;
+  }
+  .agent-profile-identity {
+    padding: 22px;
+    border-right: 0;
+    border-bottom: 1px solid #d5dac8;
+  }
+  .agent-profile-work {
+    padding: 24px 22px;
+  }
+  .agent-profile .ve-portrait {
+    width: 80px;
+    height: 85px;
+    flex-basis: 80px;
+    border-radius: 18px;
+  }
+  .agent-profile .ve-detail-heading {
+    margin-bottom: 14px;
+  }
+  .agent-profile .ve-dossier h3 {
+    font-size: 32px;
+    margin: 12px 0 8px;
+  }
+  .agent-profile .ve-facts {
+    margin: 18px 0;
+  }
+  .agent-profile .ve-detail-records li {
+    flex-wrap: wrap;
+    gap: 4px 12px;
+  }
+  .agent-profile .agent-profile-close {
+    top: 14px;
+    right: 14px;
+  }
+  .agent-profile-work > h4 {
+    font-size: 23px;
+  }
+}
+
+.agent-profile-content {
+  max-height: calc(100dvh - 50px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: #c3ccb1 transparent;
+}
+.agent-profile-close {
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  line-height: 1;
+  cursor: pointer;
+}
+@media (max-width: 650px) {
+  .agent-profile-content {
+    max-height: calc(100dvh - 22px);
+  }
+}

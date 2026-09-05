@@ -1,0 +1,17 @@
+.village-layout-editor{padding:18px;background:#f4f2e6;border:1px solid #c6cbb8;border-radius:12px;color:#355346;display:grid;gap:12px;max-width:580px}
+.village-layout-editor h3{margin:0 0 5px;font-size:17px}
+.village-layout-editor p{margin:0;font-size:12px;line-height:1.5}
+.village-layout-editor label{display:grid;gap:5px;font-size:12px}
+.village-layout-editor select{width:100%;padding:8px;background:#fffdf5;color:inherit;border:1px solid #b7c3ac;border-radius:6px;font:inherit}
+.layout-plot-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:5px;max-width:420px}
+.layout-plot-grid button{aspect-ratio:1;min-height:32px;font-size:20px;background:#e0e7ce;color:#657a54;border:1px dashed #9cae86;border-radius:5px;cursor:pointer}
+.layout-plot-grid button.occupied{background:#d6c2a1;color:#72533c;border-style:solid}
+.layout-plot-grid button.selected{background:#47705a;color:#fff5de;border:2px solid #e0b565}
+.layout-plot-grid button:disabled{opacity:.2;cursor:default}
+.layout-direction-buttons,.layout-editor-actions{display:flex;gap:7px;flex-wrap:wrap}
+.layout-direction-buttons button,.layout-editor-actions button{padding:7px 10px;font:inherit;font-size:12px;color:inherit;background:#fffdf5;border:1px solid #b7c3ac;border-radius:6px;cursor:pointer}
+.layout-editor-actions button:disabled{opacity:.5;cursor:default}
+.village-layout-editor button:focus-visible,.village-layout-editor select:focus-visible{outline:2px solid #355e51;outline-offset:3px}
+.layout-editor-status{min-height:18px;color:#5c705f}
+/* The panel grows when its editor opens; bottom anchoring would cover the plots. */
+.ve-world-panel:has(.village-layout-editor) > .ve-map-overlay{position:static;align-self:flex-end;padding:10px 16px;flex-shrink:0}

@@ -1,0 +1,12 @@
+.visit-briefing{margin:0 0 16px;border:1px solid #c7cbbb;border-radius:12px;background:#f6f4e9;color:#354e43}
+.visit-briefing summary{cursor:pointer;padding:13px 16px;font-size:14px;font-weight:600}
+.visit-briefing-count{margin-left:12px;font-size:12px;font-weight:400;color:#627267}
+.visit-briefing-body{padding:0 16px 16px;display:grid;gap:12px;max-height:380px;overflow:auto}
+.visit-briefing-body p{margin:0;font-size:12px;color:#647064}
+.visit-briefing h3{margin:0 0 5px;font-size:12px;font-weight:600}
+.visit-briefing ul{list-style:none;padding:0;margin:0;display:flex;flex-wrap:wrap;gap:6px}
+.visit-briefing button{font:inherit;font-size:12px;line-height:1.5;text-align:left;color:#355e51;background:#e9eddf;border:1px solid #c7d0bd;border-radius:6px;padding:5px 9px;cursor:pointer;overflow-wrap:anywhere}
+.visit-briefing button:hover{background:#dde7d2}
+.visit-briefing button:focus-visible,.visit-briefing summary:focus-visible{outline:2px solid #446b59;outline-offset:3px}
+.visit-briefing .visit-briefing-seen{justify-self:start;background:transparent}
+@media(max-width:600px){.visit-briefing summary{padding:11px 12px}.visit-briefing-body{padding:0 12px 12px}}

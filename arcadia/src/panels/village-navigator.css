@@ -1,0 +1,116 @@
+.village-navigator {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  margin: 0 0 10px;
+  gap: 8px;
+  color: #637453;
+  font-family: "Avenir Next", "Trebuchet MS", sans-serif;
+}
+.navigator-shortcuts {
+  display: flex;
+  gap: 3px;
+  background: #fbfaf0ed;
+  border: 1px solid #d7dfca;
+  border-radius: 9px;
+  padding: 4px;
+  box-shadow: 0 4px 16px #354b2110;
+  pointer-events: auto;
+}
+.navigator-shortcuts button {
+  border: 0;
+  background: none;
+  color: #637453;
+  padding: 6px 7px;
+  font-size: 9px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.navigator-shortcuts button:hover {
+  background: #e8eedc;
+}
+.navigator-shortcuts button:focus-visible {
+  outline: 2px solid #b78451;
+  outline-offset: 2px;
+}
+.navigator-map {
+  width: 165px;
+  padding: 10px;
+  background: #faf9eeec;
+  border: 1px solid #d3ddc4;
+  border-radius: 11px;
+  box-shadow: 0 8px 20px #33482312;
+  pointer-events: auto;
+}
+.navigator-map header {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 7px;
+  font-size: 9px;
+}
+.navigator-map header small {
+  font-size: 8px;
+  color: #8c987c;
+}
+.navigator-map svg {
+  display: block;
+  width: 100%;
+  height: 95px;
+}
+.navigator-map p {
+  font-size: 7px;
+  line-height: 1.7;
+  color: #9a9f88;
+  margin: 7px 0 0;
+}
+.navigator-map-building {
+  cursor: pointer;
+  outline: none;
+}
+.navigator-map-building:hover rect,
+.navigator-map-building:focus-visible rect {
+  stroke: #f9f5dc;
+  stroke-width: 1.2;
+  fill: #58764b;
+}
+.navigator-key-hint {
+  align-self: center;
+  padding: 0 7px;
+  font-size: 8px;
+  color: #9aa387;
+  white-space: nowrap;
+}
+@media (max-width: 600px) {
+  .navigator-shortcuts button {
+    font-size: 8px;
+    padding: 6px;
+  }
+  .navigator-shortcuts button span {
+    display: none;
+  }
+  .navigator-map {
+    width: 135px;
+    padding: 8px;
+  }
+  .navigator-map svg {
+    height: 85px;
+  }
+  .navigator-map header {
+    font-size: 8px;
+  }
+  .navigator-map p {
+    display: none;
+  }
+  .navigator-key-hint {
+    font-size: 7px;
+    padding: 0 3px;
+  }
+}
+
+.ve-canvas > .navigator-map { position:absolute; top:64px; left:18px; z-index:3; }
+@media(max-width:600px) { .ve-canvas > .navigator-map { left:10px; top:52px; } }
