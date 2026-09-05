@@ -38,6 +38,131 @@ beforeEach(() => {
 });
 
 describe("createStateTransport", () => {
+  it("aborts a pending fetch and ignores its late result after close", async () => {
+    let resolveFetch;
+    const fetch = vi.fn(() => new Promise((resolve) => { resolveFetch = resolve; }));
+    const onEnvelope = vi.fn();
+    const onStatus = vi.fn();
+    const onError = vi.fn();
+    const transport = createStateTransport({ fetch, EventSource: FakeEventSource, onEnvelope, onStatus, onError });
+    const starting = transport.start();
+    transport.close();
+    const statuses = onStatus.mock.calls.slice();
+    resolveFetch({ status: 200, json: async () => envelope(1, "cursor:1") });
+    await starting;
+
+    expect(onEnvelope).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    expect(onStatus.mock.calls).toEqual(statuses);
+    expect(transport.snapshot()).toBeNull();
+    expect(FakeEventSource.instances).toHaveLength(0);
+    expect(fetch.mock.calls[0][1].signal.aborted).toBe(true);
+  });
+
+  it.each(["success", "malformed", "rejection"])("ignores %s after closing during response decoding", async (outcome) => {
+    let resolveJson;
+    let rejectJson;
+    const json = vi.fn(() => new Promise((resolve, reject) => { resolveJson = resolve; rejectJson = reject; }));
+    const fetch = vi.fn().mockResolvedValue({ status: 200, json });
+    const onEnvelope = vi.fn();
+    const onStatus = vi.fn();
+    const onError = vi.fn();
+    const transport = createStateTransport({ fetch, EventSource: FakeEventSource, onEnvelope, onStatus, onError });
+    const starting = transport.start();
+    await Promise.resolve();
+    expect(json).toHaveBeenCalledOnce();
+    transport.close();
+    onStatus.mockClear();
+    if (outcome === "rejection") rejectJson(new Error("decoding failed"));
+    else resolveJson(outcome === "success" ? envelope(1, "cursor:1") : { invalid: true });
+    await expect(starting).resolves.toBeUndefined();
+    expect(onEnvelope).not.toHaveBeenCalled();
+    expect(onStatus).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    expect(transport.snapshot()).toBeNull();
+    expect(fetch.mock.calls[0][1].signal.aborted).toBe(true);
+    expect(FakeEventSource.instances).toHaveLength(0);
+  });
+
+  it("requires a fresh instance after close, even while the old fetch is pending", async () => {
+    let resolveFetch;
+    const fetch = vi.fn(() => new Promise((resolve) => { resolveFetch = resolve; }));
+    const onStatus = vi.fn();
+    const onEnvelope = vi.fn();
+    const onError = vi.fn();
+    const transport = createStateTransport({ fetch, EventSource: FakeEventSource, onStatus, onEnvelope, onError });
+    const starting = transport.start();
+    transport.close();
+    onStatus.mockClear();
+    await expect(transport.start()).rejects.toThrow("Cannot start a closed state transport");
+    resolveFetch({ status: 200, json: async () => envelope(2, "cursor:2") });
+    await starting;
+    transport.close();
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(onStatus).not.toHaveBeenCalled();
+    expect(onEnvelope).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    expect(transport.snapshot()).toBeNull();
+    expect(FakeEventSource.instances).toHaveLength(0);
+  });
+
+  it("stops callback delivery when an envelope observer closes then throws", async () => {
+    const onStatus = vi.fn();
+    const onError = vi.fn();
+    const transport = createStateTransport({
+      fetch: vi.fn().mockResolvedValue({ status: 204 }),
+      EventSource: FakeEventSource,
+      onStatus,
+      onError,
+      onEnvelope: () => { transport.close(); throw new Error("observer disposed"); },
+    });
+    await transport.start();
+    const stream = FakeEventSource.instances[0];
+    onStatus.mockClear();
+    stream.emit("snapshot", envelope(1, "cursor:1"));
+    stream.open();
+    await stream.onerror();
+    expect(onStatus.mock.calls).toEqual([["disconnected"]]);
+    expect(onError).not.toHaveBeenCalled();
+    expect(transport.snapshot()?.generation).toBe(1);
+  });
+
+  it.each(["abort", "network", "HTTP"])("silences a pending catch-up %s failure after close", async (failure) => {
+    vi.useFakeTimers();
+    try {
+      let resolveFetch;
+      let rejectFetch;
+      const fetch = vi.fn()
+        .mockResolvedValueOnce({ status: 200, json: async () => envelope(1, "cursor:1") })
+        .mockImplementationOnce((_url, { signal }) => new Promise((resolve, reject) => {
+          resolveFetch = resolve;
+          rejectFetch = reject;
+          if (failure === "abort") signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+        }));
+      const onEnvelope = vi.fn();
+      const onStatus = vi.fn();
+      const onError = vi.fn();
+      const transport = createStateTransport({ fetch, EventSource: FakeEventSource, onEnvelope, onStatus, onError });
+      await transport.start();
+      const catchingUp = FakeEventSource.instances[0].onerror();
+      transport.close();
+      onEnvelope.mockClear();
+      onStatus.mockClear();
+      if (failure === "network") rejectFetch(new Error("network failed"));
+      if (failure === "HTTP") resolveFetch({ status: 500 });
+      await catchingUp;
+      await vi.runAllTimersAsync();
+      expect(onEnvelope).not.toHaveBeenCalled();
+      expect(onStatus).not.toHaveBeenCalled();
+      expect(onError).not.toHaveBeenCalled();
+      expect(fetch.mock.calls[1][1].signal.aborted).toBe(true);
+      expect(FakeEventSource.instances).toHaveLength(1);
+      expect(transport.snapshot()?.generation).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("loads state and opens the prefixed stream with its resume query", async () => {
     const initial = envelope(4, "cursor 4");
     const fetch = vi.fn().mockResolvedValue({ status: 200, json: async () => initial });
@@ -51,7 +176,7 @@ describe("createStateTransport", () => {
     });
     await transport.start();
 
-    expect(fetch).toHaveBeenCalledWith("/chronicle/state", { cache: "no-store" });
+    expect(fetch).toHaveBeenCalledWith("/chronicle/state", { cache: "no-store", signal: expect.any(AbortSignal) });
     expect(onEnvelope).toHaveBeenCalledWith(initial);
     expect(FakeEventSource.instances[0].url).toBe(
       "/chronicle/state/stream?generation=4&cursor=cursor%204",
@@ -79,7 +204,7 @@ describe("createStateTransport", () => {
 
       expect(fetch).toHaveBeenLastCalledWith(
         "/state?generation=8&cursor=cursor%3A8",
-        { cache: "no-store" },
+        { cache: "no-store", signal: expect.any(AbortSignal) },
       );
       expect(FakeEventSource.instances[1].url).toBe(
         "/state/stream?generation=9&cursor=cursor%3A9",

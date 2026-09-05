@@ -38,6 +38,7 @@ export function createStateTransport({
   let currentEnvelope = null;
   let stream = null;
   let stopped = false;
+  const requests = new Set();
   let retryTimer = null;
   let consecutiveFailures = 0;
   const retiredNamespaces = new Set();
@@ -58,6 +59,7 @@ export function createStateTransport({
     }
     const jitter = Number.isFinite(sample) ? Math.max(0, Math.min(1, sample)) : 0;
     const delay = Math.max(1, Math.floor((ceiling / 2) + ((ceiling / 2) * jitter)));
+    if (stopped) return;
     retryTimer = setTimeout(() => {
       retryTimer = null;
       connect();
@@ -65,6 +67,7 @@ export function createStateTransport({
   }
 
   function reportError(error) {
+    if (stopped) return;
     try {
       onError(error instanceof Error ? error : new Error(String(error)));
     } catch {
@@ -73,6 +76,7 @@ export function createStateTransport({
   }
 
   function reportStatus(status) {
+    if (stopped && status !== "disconnected") return;
     try {
       onStatus(status);
     } catch (error) {
@@ -116,21 +120,30 @@ export function createStateTransport({
   }
 
   async function poll() {
+    if (stopped) return;
+    const controller = new AbortController();
+    requests.add(controller);
     try {
       const response = await fetch(
         `${backend}/state${resumeQuery(currentEnvelope?.snapshot)}`,
-        { cache: "no-store" },
+        { cache: "no-store", signal: controller.signal },
       );
+      if (stopped) return;
       if (response.status === 204) {
         resetRetryDelay();
         return;
       }
       if (response.status !== 200) throw new Error(`State request failed: HTTP ${response.status}`);
-      const result = apply(await response.json());
+      const envelope = await response.json();
+      if (stopped) return;
+      const result = apply(envelope);
       if (result.valid) resetRetryDelay();
     } catch (error) {
+      if (stopped) return;
       reportError(error);
       throw error;
+    } finally {
+      requests.delete(controller);
     }
   }
 
@@ -176,7 +189,7 @@ export function createStateTransport({
   }
 
   async function start() {
-    stopped = false;
+    if (stopped) throw new Error("Cannot start a closed state transport");
     reportStatus("connecting");
     try {
       await poll();
@@ -186,7 +199,10 @@ export function createStateTransport({
   }
 
   function close() {
+    if (stopped) return;
     stopped = true;
+    for (const controller of requests) controller.abort();
+    requests.clear();
     clearTimeout(retryTimer);
     retryTimer = null;
     stream?.close();

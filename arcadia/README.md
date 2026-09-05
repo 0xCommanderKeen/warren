@@ -13,6 +13,12 @@ It does not consume `/events` or recreate Chronicle's projection decisions. The 
 
 The app loads `/state`, then opens `/state/stream` from the returned generation and cursor. Reconnects first catch up from the last applied boundary and then reopen the stream. Unsupported `schema_version` values replace the village with a visible contract-mismatch screen instead of applying unknown state.
 
+A state transport instance has a terminal `close()`: it aborts pending requests,
+ignores late fetch/decoding results, and emits `disconnected` once. Its last accepted
+snapshot remains available for inspection. Calling `start()` after close rejects;
+create a fresh transport to reconnect. Arcadia's React effect creates a new instance
+for each mount or backend change.
+
 ## Steward writes
 
 [`src/steward/StewardClient.js`](src/steward/StewardClient.js) is Arcadia's only Steward write boundary. It owns job posts, approval decisions, resident declarations, and manual routine runs. Feature code supplies declarations or decisions to that client; it must not call Steward directly.

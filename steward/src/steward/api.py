@@ -349,7 +349,7 @@ class ManualRuns:
     max_workers: int = 4
     _pool: ThreadPoolExecutor = field(init=False)
     _inflight: set[str] = field(default_factory=set, init=False)
-    _futures: list[Future[None]] = field(default_factory=list, init=False)
+    _futures: set[Future[None]] = field(default_factory=set, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
 
     def __post_init__(self) -> None:
@@ -380,8 +380,18 @@ class ManualRuns:
                     "rather than queueing one, so ask again when it has finished"
                 )
             self._inflight.add(item.key)
-            future = self._pool.submit(self._fire, item, request_id)
-            self._futures.append(future)
+            try:
+                future = self._pool.submit(self._fire, item, request_id)
+            except Exception:
+                self._inflight.discard(item.key)
+                raise
+            self._futures.add(future)
+        # A finished future invokes this inline: never register under the lock.
+        future.add_done_callback(self._forget_future)
+
+    def _forget_future(self, future: Future[None]) -> None:
+        with self._lock:
+            self._futures.discard(future)
 
     def _fire(self, item: ScheduledRoutine, request_id: str) -> None:
         try:
