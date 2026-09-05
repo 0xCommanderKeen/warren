@@ -30,7 +30,15 @@ class StateHTTPTests(unittest.TestCase):
         )
         with open(self.events, "w", encoding="utf-8") as stream:
             stream.write(json.dumps(initial_event) + "\n")
-        self.running = RunningServer(serve.create_app(Config(events=Path(self.events), villagers_dir=Path(self.villagers), max_log_bytes=0)))
+        self.running = RunningServer(
+            serve.create_app(
+                Config(
+                    events=Path(self.events),
+                    villagers_dir=Path(self.villagers),
+                    max_log_bytes=0,
+                )
+            )
+        )
         self.addCleanup(self.running.stop)
 
     def request(self, path):
