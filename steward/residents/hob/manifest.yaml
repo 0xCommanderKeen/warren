@@ -58,8 +58,9 @@ routes:
   kind: chat
   address: telegram:hob
   status: active
-  note: The token is STEWARD_CHAT_TOKEN_HOB in the burrow's .env; until it is set
-    the chat daemon idles.
+  note: 'Shared household Telegram bot: address @hob or @karen; follow-ups stay with
+    the selected resident.'
+  shared: true
 - id: discord
   kind: chat
   address: discord:hob
@@ -83,7 +84,8 @@ budgets:
   daily_cost_usd: 50
 notifications:
   transport: discord
-  "on": [needs_human]
+  'on':
+  - needs_human
   status: active
   note: Miha — the escalations in the charter, and steward's own knocks about Hob.
 deploy:
