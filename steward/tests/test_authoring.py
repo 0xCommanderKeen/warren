@@ -1302,11 +1302,22 @@ def test_concurrent_skill_writers_serialize_revision_through_commit(fleet: Scrat
 # --------------------------------------------------------------------------------------
 
 
-def test_a_new_skill_is_written_parsed_and_committed(fleet: ScratchRepo) -> None:
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Sort the inbox before anything else.",
+        "Triage: inbox",
+        "Read #inbox",
+        "on",
+        'Read "inbox" and the operator\'s notes.',
+        "Sort the inbox\nname: something-else",
+    ],
+)
+def test_a_new_skill_is_written_parsed_and_committed(fleet: ScratchRepo, description: str) -> None:
     """A skill added over HTTP is a skill in git, indistinguishable from a hand-written one."""
     document = au.SkillDocument(
         name="triage",
-        description="Sort the inbox before anything else.",
+        description=description,
         body="Read every message. Answer what you can. Escalate what you cannot.",
     )
 
@@ -1321,33 +1332,11 @@ def test_a_new_skill_is_written_parsed_and_committed(fleet: ScratchRepo) -> None
 
     assert result.commit.committed
     written, revision = au.read_skill_document(fleet.skills, "triage")
+    assert written.name == "triage"
     assert written.description == document.description
+    assert written.body == document.body
     assert revision == result.revision
     assert "add triage via the API" in fleet.git("log", "-1", "--format=%s").stdout
-
-
-def test_a_skill_whose_description_would_break_its_own_frontmatter_is_refused(
-    fleet: ScratchRepo,
-) -> None:
-    """`Skill.document` builds frontmatter with f-strings, so the round trip is the real check."""
-    document = au.SkillDocument(
-        name="triage",
-        description="Sort the inbox\nname: something-else",
-        body="Read every message.",
-    )
-
-    with pytest.raises(au.AuthoringError) as refused:
-        au.write_skill(
-            fleet.residents,
-            fleet.skills,
-            document,
-            request_id=REQUEST_ID,
-            principal=PRINCIPAL,
-            created=True,
-        )
-
-    assert refused.value.reason == "skill_invalid"
-    assert not (fleet.skills / "triage").exists()
 
 
 def test_an_oversized_skill_body_is_refused_before_anything_is_written(
