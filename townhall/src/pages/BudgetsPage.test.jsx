@@ -59,13 +59,19 @@ it.each(["budget", "declaration"])("keeps the receipt through both refreshes whe
   await saveCaps();
   await waitFor(() => expect(reads).toHaveLength(4));
   expectReceipt();
+  expect(screen.getAllByRole("textbox").every((input) => input.disabled)).toBe(true);
   const pending = reads.slice(2).sort((a) => a.url.endsWith(`/${first}`) ? -1 : 1);
   await resolveReads([pending[0]], 20, "refreshed spend");
   expectReceipt();
+  expect(screen.getAllByRole("textbox").every((input) => input.disabled)).toBe(true);
   await resolveReads([pending[1]], 20, "refreshed spend");
   await screen.findByText("refreshed spend");
   await waitFor(() => expect(screen.getByRole("button", { name: "Nothing changed" }).disabled).toBe(true));
   expectReceipt();
+  expect(screen.getAllByRole("textbox").every((input) => !input.disabled)).toBe(true);
+  fireEvent.change(screen.getByDisplayValue("20"), { target: { value: "25" } });
+  expect(screen.getByDisplayValue("25")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Write caps" }).disabled).toBe(false);
 });
 
 it("clears the old resident's receipt and data while the next resident loads", async () => {
@@ -105,8 +111,8 @@ it.each(["budget", "declaration"])("keeps the receipt and blocks writes after a 
   });
   await screen.findByText(/Refresh unavailable/);
   expectReceipt();
-  fireEvent.change(screen.getByDisplayValue("20"), { target: { value: "25" } });
-  expect(screen.getByRole("button", { name: "Write caps" }).disabled).toBe(true);
+  expect(screen.getAllByRole("textbox").every((input) => input.disabled)).toBe(true);
+  expect(screen.getByRole("button", { name: /Write caps|Nothing changed/ }).disabled).toBe(true);
   fireEvent.click(screen.getByRole("button", { name: "Retry refresh" }));
   await waitFor(() => expect(reads).toHaveLength(6));
   expectReceipt();
@@ -114,6 +120,7 @@ it.each(["budget", "declaration"])("keeps the receipt and blocks writes after a 
   await screen.findByText("retry spend");
   expect(screen.queryByText(/Refresh unavailable/)).toBeNull();
   expectReceipt();
+  expect(screen.getAllByRole("textbox").every((input) => !input.disabled)).toBe(true);
   fireEvent.change(screen.getByDisplayValue("20"), { target: { value: "25" } });
   expect(screen.getByRole("button", { name: "Write caps" }).disabled).toBe(false);
 });

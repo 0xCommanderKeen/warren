@@ -216,6 +216,7 @@ function CapsForm({ id, declaration, onWritten, refreshing }) {
             problems={diagnosticsFor(diagnostics, field.path)}
           >
             <Input
+              disabled={refreshing}
               inputMode="decimal"
               placeholder="unlimited"
               value={scalarValue(getIn(draft, field.path))}
