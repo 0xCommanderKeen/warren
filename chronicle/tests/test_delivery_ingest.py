@@ -190,6 +190,21 @@ class DeliveryIngestTests(unittest.TestCase):
                     client.get("/state").json()["snapshot"]["villagers"][0]["state"],
                 )
 
+    def test_batch_can_replay_an_event_at_the_existing_single_event_size_limit(self):
+        import dataclasses
+        import json
+        with tempfile.TemporaryDirectory() as root:
+            event = dict(v=0, ts=dt.datetime.now(dt.UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                source="codex", agent_id="codex:test", project="test", type="idle", payload={})
+            config = Config(events=Path(root) / "events.jsonl", villagers_dir=Path(root) / "villagers")
+            config = dataclasses.replace(config, max_event_bytes=len(json.dumps(event).encode()))
+            with TestClient(serve.create_app(config)) as client:
+                self.assertEqual(204, client.post("/events", json=event).status_code)
+                batch = dict(records=[dict(delivery_id="synthetic-record-1", event=event)])
+                self.assertEqual(204, client.post("/events/batch", json=batch).status_code)
+                batch["records"][0]["event"]["project"] = "x" * 1000
+                self.assertEqual(413, client.post("/events/batch", json=batch).status_code)
+
 
 if __name__ == "__main__":
     unittest.main()

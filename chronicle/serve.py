@@ -843,6 +843,10 @@ async def guard_event_ingest(request: Request, call_next):
         return _error(400, "invalid content length")
     config = request.app.state.config
     limit = max(config.max_event_bytes, 512 * 1024) if request.url.path == "/telemetry" else config.max_event_bytes
+    if request.url.path == "/events/batch":
+        # One legacy event at its existing limit still fits after adding an ID
+        # and batch framing. Each event is separately bounded below.
+        limit += 1024
     if int(lengths[0]) > limit:
         return _error(413, "event too large")
     presented = request.headers.get("x-burrow-token") or ""
@@ -915,6 +919,9 @@ async def ingest_batch(request: Request, batch: DeliveryBatch):
     uses the same event and notification dedupe authorities as /events.
     """
     for record in batch.records:
+        encoded = json.dumps(record.event.model_dump(exclude_unset=True), ensure_ascii=False).encode("utf-8")
+        if len(encoded) > request.app.state.config.max_event_bytes:
+            return _error(413, "event too large")
         if not _delivery_id_pattern.fullmatch(record.delivery_id):
             return _error(400, "invalid delivery id")
         error = validate_event(record.event.model_dump(exclude_unset=True))
