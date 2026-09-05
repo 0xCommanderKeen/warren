@@ -207,6 +207,16 @@ def _diagnostics_from_validation_error(error: ValidationError, source: Path) -> 
         loc = raw["loc"]
         path = _render_loc(loc)
         problem = raw["msg"]
+        if raw["type"] == "invalid_key" and isinstance(raw["input"], bool):
+            # Parsing has lost the original spelling: do not claim it was necessarily on.
+            value = "true" if raw["input"] else "false"
+            spellings = "'on', 'yes', or 'true'" if raw["input"] else "'off', 'no', or 'false'"
+            quoted = '"on":' if raw["input"] else '"off":'
+            path = _render_loc(loc[:-1])
+            problem = (
+                f"YAML resolves unquoted keys such as {spellings} to boolean {value}; "
+                f"mapping keys must be strings. Quote the intended key, e.g. {quoted}"
+            )
         if raw["type"] == "missing":
             problem = "required field is missing"
         key = (path, problem)

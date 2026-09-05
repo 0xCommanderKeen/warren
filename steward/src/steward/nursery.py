@@ -339,14 +339,11 @@ def declare_resident(spec: NewResident, residents_dir: Path | str) -> CreatedRes
         raise NurseryError(f"resident {spec.id!r} already exists at {directory}")
 
     manifest = _manifest_model(spec, home=_next_home(root))
-    payload = manifest.model_dump(mode="json", exclude_none=True)
-    # An ordinary resident declares no `deploy` block at all — docs/manifest.md says so, and
-    # the dxp2800 defaults (image, `command: [sleep, infinity]`) fill it in. The bare model
-    # default dumps as `deploy: {command: [], mounts: []}`, which reads as "this container
-    # runs nothing and mounts nothing", the opposite of the documented default. Drop it so
-    # the skeleton says what it means.
-    if payload.get("deploy") == {"command": [], "mounts": []}:
-        del payload["deploy"]
+    # Keep the format version explicit even though it has a model default. All other
+    # defaults can be reconstructed by the validator, including the absent deploy block.
+    payload = {"version": manifest.version} | manifest.model_dump(
+        mode="json", exclude_none=True, exclude_defaults=True
+    )
 
     directory.mkdir(parents=True)
     manifest_path = directory / MANIFEST_FILENAME

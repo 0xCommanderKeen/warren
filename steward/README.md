@@ -446,6 +446,45 @@ hob: container hob on dxp2800 — supervised from here
 watchdog: last pass …
 ```
 
+For machine consumers, `steward doctor --json [RESIDENTS] [--db PATH]` emits one JSON
+object on stdout. It runs the same checks and keeps the same exit codes: `0` means no
+blocking problems, `1` means an invalid declaration or failed health check. Warnings,
+such as a scheduler state file absent on this laptop, do not change that decision.
+
+The version 1 document has `schema_version`, `ok`, `residents` (id and retired flag),
+`checks`, `diagnostics` (manifest validation), and `errors` (operational failures).
+Each check has a stable `name`, nullable `resident` id (`null` for fleet-wide checks),
+`status` (`ok`, `warning`, `error`, or `info`), and structured `details`. For example:
+
+```json
+{
+  "name": "runner",
+  "resident": "hob",
+  "status": "ok",
+  "details": {
+    "kind": "claude",
+    "model": "claude-opus-5",
+    "placement": {"container": "steward-hob", "workdir": "/data"},
+    "ready": true,
+    "problem": null
+  }
+}
+```
+
+`runner.ready` reports the existing binary/container readiness probe; `false` may mean
+a missing binary or an unreachable container, with `problem` explaining the failure.
+`reach` reports CLI capability support separately. Other check names are `master_token`,
+`telemetry`, `telemetry_delivery` (when delivery is known to fail), `board`, `journal`,
+`budget`, `inbox`, `session`, `topology`, `budget_health`, `watchdog`, `scheduler`, and
+`routines`. Details include numeric budget and inbox facts, session ownership without its
+claim token, daemon timestamps, and upcoming routine times in ISO 8601. Null values and
+absent checks mean unavailable or unperformed observations, not healthy results. Retired
+residents are listed without operational checks; residents assigned elsewhere appear in
+topology rather than this burrow's resident list. Invalid manifests and operational
+failures still produce a JSON document, possibly with only partial checks. Diagnostic
+strings are scrubbed of recognizable secrets and configured credential values. CLI usage
+errors (such as an unknown option) retain Click's normal error output and exit code `2`.
+
 Doctor warns and still exits 0 (it is routinely run from a laptop while the daemons are on
 the NAS); the watchdog says it in red, because that process *is* the supervisor.
 `STEWARD_BURROW` names this burrow when the machine's hostname is not what manifests call
@@ -647,6 +686,27 @@ residents/
 skills/
   <name>/SKILL.md                             the shared library both draw on
 ```
+
+`steward/residents/` and `steward/skills/` are the tracked seed declarations and
+shared library. A deployed burrow uses its own authoritative checkout, as described
+in [the deployment guide](../deploy/README.md#the-residents-checkout).
+
+`steward/local/` is ignored development scratch, not a second declaration source.
+Its historical `burrow-builder`, `life-agent`, and `pip` copies and the `skills`
+symlink are no longer tracked. The old builder has no current seed counterpart;
+`life-agent` describes Hob under an older identity, while its settings and the old
+Pip's local memory paths, routes, and schedules differ from the current seeds.
+These copies are not migrated into `residents/`: use the current declarations and
+make deliberate edits there instead of copying old operational settings back.
+Untracking with `git rm --cached` preserves the working files where that command
+runs; other clones should save any local copies they want before updating to the
+commit that removes them.
+
+Ignore rules apply to untracked files. They do **not** hide edits to tracked files
+from `git status`; untracking the scratch copies is what makes the existing
+`local/` exclusion apply. The repository root also shares cache, coverage,
+`demo/`, `.tmp/`, and `.claude/` exclusions across clones. Local coverage and demo
+data are disposable outputs, not checked-in fixtures or declaration sources.
 
 Each manifest declares the resident's soul identity, charter (mission, duties, hard
 rules, escalation policy), and the capability dimensions chronicle renders — skills,

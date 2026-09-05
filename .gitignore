@@ -1,0 +1,26 @@
+# Shared Python tooling and build output.
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# JavaScript dependencies and package-manager cache.
+node_modules/
+.pnpm-store/
+
+# Machine-local agent settings and operating-system metadata.
+.claude/
+.DS_Store
+
+# Root-only scratch data and nested working checkouts.
+/demo/
+/.tmp/
+/warren-worktrees/
