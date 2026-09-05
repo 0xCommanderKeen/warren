@@ -681,7 +681,7 @@ that must commit and push — Hob and its vault — has today no narrower mode t
 | kind | what it runs |
 |---|---|
 | `claude` | `claude -p <prompt> --output-format json --setting-sources "" [--settings <json>] --model <model>`, in the session's working directory. The JSON result carries usage and cost, so a claude run feeds the budget ledger for free; [`--setting-sources ""`](#what-a-session-loads-from-disk-nothing) is on every session and [`--settings`](#what-steward-declares-instead-six-hooks-and-nothing-else) on every session that has an emitter to name — both come from no declaration. |
-| `codex` | `codex exec [--model <model>] <prompt>`. Plain text out; usage is unavailable, and steward reports it as unknown rather than guessing. |
+| `codex` | `codex exec --json [--model <model>] <prompt>`. Extracts the reply and token usage; explicit `codex_pricing` enables estimated dollar accounting. |
 | `command` | The argv template below, for anything else. |
 | `mock` | Deterministic, offline, no subprocess. Used by tests and `--dry-run`. |
 
@@ -1152,31 +1152,61 @@ the moment somebody asks**. Nothing is zeroed or rolled over by a process starti
 daily cap that resets because the daemon bounced is not a cap. Across a DST seam the
 window is genuinely 23 or 25 hours long, because the budget is a promise about a day.
 
-**What is counted.** Every finished session appends one row to the run ledger — a
-scheduled routine, a claimed board task, a delegated item, and a run a human asked for
-through the API. Failed runs and runs steward killed at their timeout count too: a session
-that burned four minutes and produced nothing still burned four minutes. Usage a brain did
-not report is written as **zero and flagged**, never guessed — a `codex` or `command` run
-has no cost to give, so the gauge says "0.00 spent, 3 of today's 4 runs did not report
-what they cost" rather than a comfortable "0.00 spent".
+**What is counted.** Every finished session appends a row to the run ledger, including
+failed and timed-out runs. Claude reports token usage and a dollar amount. Codex reports
+input, cached-input and output tokens through `codex exec --json`; its dollar amount is
+an **API-equivalent estimate**, calculated only when the declaration supplies a rate card.
+The ledger retains the counts and rates in `cost_estimate`; aggregate views carry
+`estimated_cost_runs`, and the CLI and Townhall label totals that include estimates.
 
-**A cap has to be enforceable.** The two daily caps are computed from what the runner
-reported, so a runner that reports nothing can never trip one — the ledger fills with
-zeros, the pause machinery never fires, and the gauge reads green while the resident
-spends. `steward validate` therefore **refuses** a manifest that declares `daily_cost_usd`
-or `daily_tokens` alongside `runner.kind: codex` or `runner.kind: command`:
+### Codex cost accounting
 
+A Codex daily cap requires an explicit model and matching `runner.codex_pricing`:
+
+```yaml
+runner:
+  kind: codex
+  model: gpt-5.3-codex
+  codex_pricing:
+    model: gpt-5.3-codex
+    input_usd_per_million: 1.75
+    cached_input_usd_per_million: 0.175
+    output_usd_per_million: 14
+budgets:
+  daily_cost_usd: 5
+  max_run_seconds: 600
 ```
-budgets.daily_cost_usd
-    problem: runner kind 'codex' does not report usage, so this cap can never trip:
-             every run is ledgered as costing zero and the budget gauge reads green
-             while the resident spends
-```
 
-Either run it on `claude`, which reports usage, or cap the session instead —
-`max_run_seconds` is enforceable under any runner, because steward times the run itself
-rather than reading a number the brain supplied. `kind: mock` is exempt: it spawns nothing
-and spends nothing, so a cap over it is inert without being untruthful.
+These example rates are the model's standard API rates verified on 2026-09-05 in
+[OpenAI's pricing table](https://developers.openai.com/api/docs/pricing). The operator owns
+the rate card: verify it for the selected model and processing tier before use. Model
+overrides without matching rates are refused before launch. There is no automatic price
+lookup and no guessed rate for an unspecified model.
+
+For each complete receipt, the calculation is:
+
+`((input - cached_input) × input_rate + cached_input × cached_rate + output × output_rate) / 1,000,000`
+
+Cached input is already part of input, so it is subtracted before the ordinary input
+rate is applied. Reasoning output is already part of output and is not added again.
+The calculation happens before the reply is truncated for display. Rates are copied into
+each ledger entry; changing a declaration never reprices old runs.
+
+**This is an estimated token-cost budget, not an invoice or a hard billing limit.**
+ChatGPT subscription usage does not become a separate API charge. The estimate excludes
+additional tool charges and cannot infer tier changes, long-context premiums, discounts,
+or provider routing from this CLI receipt. Use rates appropriate to the intended test;
+reconcile actual API charges with the provider separately. See
+[Codex JSON output](https://learn.chatgpt.com/docs/non-interactive-mode) and
+[Codex authentication and billing](https://learn.chatgpt.com/docs/auth).
+
+Missing, malformed, negative, non-finite or incomplete usage remains unknown. An
+unfinished or failed turn cannot turn a partial receipt into a claimed complete cost.
+For a capped Codex resident, unknown accounting triggers a durable `usage_accounting`
+pause and a human knock, including after timeout. An explicit budget allowance can accept
+that uncertainty for the rest of the day; otherwise subsequent runs remain refused.
+Unpriced Codex remains usable without daily caps and still exposes valid token counts.
+`command` still cannot declare a daily cap. `max_run_seconds` works with every runner.
 
 **What happens when a cap trips.** The resident is *paused*: steward refuses its scheduled
 fires, refuses its board claims, answers run-now with `409 paused: budget exceeded`, and

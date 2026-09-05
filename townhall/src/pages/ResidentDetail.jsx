@@ -272,7 +272,7 @@ function BudgetPanel({ settled, id }) {
             }`,
           ],
           ["tokens", String(spent.tokens || 0)],
-          ["cost", `$${(spent.cost_usd || 0).toFixed(4)}`],
+          [spent.estimated_cost_runs ? "cost (includes estimates)" : "cost", `$${(spent.cost_usd || 0).toFixed(4)}`],
           ["seconds", String(Math.round(spent.duration_s || 0))],
           ["max run", budget.max_run_seconds ? `${budget.max_run_seconds}s` : null],
         ]}

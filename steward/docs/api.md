@@ -898,9 +898,11 @@ Everything here is a sum over rows steward wrote when runs finished, inside a wi
 computed from the calendar **at the moment of the request**. A steward that restarted an
 hour ago answers exactly what one that has been up all day answers — a daily cap that
 resets because the daemon bounced is not a cap. `"limit": null` means no cap is declared,
-and `unreported_runs` counts the runs whose brain reported no usage at all (a `codex` or
-`command` session has none to give); steward writes those as zero and says how many they
-were rather than inventing a number.
+and `unreported_runs` counts runs without usable cost accounting. Priced Codex runs
+carry an API-equivalent estimate, not a billed-dollar receipt: `spent.estimated_cost_runs`
+counts them, and each ledger entry carries `cost_estimate` with the exact rates and token
+counts used. Origin rollups also expose `estimated_cost_runs`. A capped Codex resident
+pauses when accounting is unknown; see [Codex cost accounting](manifest.md#codex-cost-accounting).
 
 ### `GET /org`
 

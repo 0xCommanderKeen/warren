@@ -3,6 +3,9 @@
 This is what makes a daily budget survive a daemon restart.
 """
 
+import json
+from typing import Any
+
 from steward.events import utc_now_iso
 from steward.runs import (
     RUN_ROUTINE,
@@ -38,6 +41,7 @@ class _LedgerTables(_Connection):
         cost_usd: float = 0.0,
         duration_s: float = 0.0,
         usage_known: bool = True,
+        cost_estimate: dict[str, Any] | None = None,
         now: str | None = None,
     ) -> LedgerEntry:
         """Append what one finished session cost. Append-only, and never revised.
@@ -67,13 +71,15 @@ class _LedgerTables(_Connection):
             cost_usd=cost_usd,
             duration_s=duration_s,
             usage_known=usage_known,
+            cost_estimate=cost_estimate,
             recorded_at=now or utc_now_iso(),
         )
         with self._lock, self._conn:
             self._conn.execute(
                 "INSERT INTO run_ledger (entry_id, resident, agent_id, kind, trigger, run_id, ref, "
                 "origin, outcome, input_tokens, output_tokens, cost_usd, duration_s, "
-                "usage_known, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "usage_known, recorded_at, cost_estimate) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     entry.entry_id,
                     entry.resident,
@@ -90,6 +96,7 @@ class _LedgerTables(_Connection):
                     entry.duration_s,
                     int(entry.usage_known),
                     entry.recorded_at,
+                    json.dumps(entry.cost_estimate) if entry.cost_estimate is not None else None,
                 ),
             )
         return entry
@@ -165,6 +172,7 @@ class _LedgerTables(_Connection):
                 "SELECT COALESCE(NULLIF(l.origin, ''), NULLIF(j.origin, ''), ?) AS origin, "  # noqa: S608
                 "COUNT(*) AS runs, "
                 "SUM(l.cost_usd) AS cost_usd, "
+                "COUNT(l.cost_estimate) AS estimated_cost_runs, "
                 "SUM(l.input_tokens + l.output_tokens) AS tokens, "
                 "SUM(l.duration_s) AS duration_s "
                 "FROM run_ledger l LEFT JOIN jobs j ON j.task_id = l.ref"
@@ -177,6 +185,7 @@ class _LedgerTables(_Connection):
             OriginSpend(
                 origin=row["origin"],
                 runs=row["runs"],
+                estimated_cost_runs=row["estimated_cost_runs"],
                 cost_usd=row["cost_usd"] or 0.0,
                 tokens=row["tokens"] or 0,
                 duration_s=row["duration_s"] or 0.0,

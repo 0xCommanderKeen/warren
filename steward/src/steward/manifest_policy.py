@@ -292,9 +292,8 @@ def _check_budget_runtime(manifest: ResidentManifest, source: Path) -> list[Diag
     return diagnostics
 
 
-#: Runner kinds that spawn a real brain and cannot say what it cost. ``codex`` prints
-#: plain text — :mod:`steward.runners` says so out loud — and a ``command`` is whatever
-#: argv the manifest supplied. Only ``claude`` parses ``--output-format json`` for usage.
+#: Runner kinds without intrinsic dollar accounting. Codex becomes meterable when
+#: the declaration supplies explicit rates; command has no supported usage protocol.
 #:
 #: ``mock`` is missing from this set deliberately: it reports no usage either, but it
 #: spawns nothing and spends nothing, so a cap over it is inert without being untruthful.
@@ -324,6 +323,8 @@ def _check_budget_is_enforceable(manifest: ResidentManifest, source: Path) -> li
     ``max_run_seconds`` is untouched — steward measures a run's duration itself, so that
     cap is enforceable whatever the brain is.
     """
+    if manifest.runner.kind == "codex" and manifest.runner.codex_pricing is not None:
+        return []
     if manifest.runner.kind not in UNMETERED_RUNNER_KINDS:
         return []
     return [
@@ -336,7 +337,7 @@ def _check_budget_is_enforceable(manifest: ResidentManifest, source: Path) -> li
                 f"gauge reads green while the resident spends"
             ),
             example=(
-                "runner: {kind: claude}  (the only kind that reports usage), "
+                "give Codex an explicit model and codex_pricing rate card, use claude, "
                 "or drop the cap and cap the session instead: "
                 "budgets: {max_run_seconds: 900}"
             ),

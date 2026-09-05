@@ -199,6 +199,44 @@
       "title": "Charter",
       "type": "object"
     },
+    "CodexPricing": {
+      "additionalProperties": false,
+      "description": "Operator-declared API-equivalent rates, never a provider billing receipt.",
+      "properties": {
+        "model": {
+          "description": "Exact model id these rates describe.",
+          "minLength": 1,
+          "title": "Model",
+          "type": "string"
+        },
+        "input_usd_per_million": {
+          "exclusiveMinimum": 0,
+          "maximum": 10000,
+          "title": "Input Usd Per Million",
+          "type": "number"
+        },
+        "cached_input_usd_per_million": {
+          "maximum": 10000,
+          "minimum": 0,
+          "title": "Cached Input Usd Per Million",
+          "type": "number"
+        },
+        "output_usd_per_million": {
+          "exclusiveMinimum": 0,
+          "maximum": 10000,
+          "title": "Output Usd Per Million",
+          "type": "number"
+        }
+      },
+      "required": [
+        "model",
+        "input_usd_per_million",
+        "cached_input_usd_per_million",
+        "output_usd_per_million"
+      ],
+      "title": "CodexPricing",
+      "type": "object"
+    },
     "Delegation": {
       "additionalProperties": false,
       "description": "Whether this resident may hand work to another resident, and to whom.\n\nThe sending half of steward #7, and it is one boolean that defaults to *off*, for the\nsame reason ``board.claim`` does: silence in a declaration is not consent. A resident\nthat has never been told it may delegate never delegates, however sensible the handoff\nwould have been, because the point of a manifest is that you can read what a resident\nwill do before it does it.\n\n``to`` is an optional allowlist of resident ids. Empty means \"any resident whose own\nmanifest declares a route that accepts the work\" \u2014 the receiver's declaration is\nalways the second half of the answer, and neither half can be waived by the other.",
@@ -742,6 +780,18 @@
           "default": null,
           "description": "Model id passed to the CLI.",
           "title": "Model"
+        },
+        "codex_pricing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodexPricing"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Explicit model rates for estimated Codex cost accounting."
         },
         "command": {
           "anyOf": [
