@@ -2,7 +2,7 @@
 
 ``routes: {kind: chat}`` has been descriptive since the manifest had routes at all — a
 manifest could say "you can talk to me here" and nothing in steward listened. This module
-is what makes it deliverable (warren#108): a daemon long-polls one bot per resident, and
+is what makes it deliverable (warren#108): a daemon long-polls dedicated or shared bots, and
 every message from a named operator fires **one ordinary session** whose final message is
 sent back as the reply.
 
@@ -12,7 +12,7 @@ task that finished — is a *notification*, it goes through :mod:`steward.notify
 one-way by construction (warren#114). A bridge that grew unprompted messages would be two
 channels wearing one name.
 
-**One bot per resident, and no secret in the manifest.** The route's ``address`` is a
+**No secret in the manifest.** The route's ``address`` is a
 reference — ``telegram:pip`` — and the token BotFather issued lives in steward's own
 environment under :data:`TOKEN_ENV_PREFIX` plus the reference (``STEWARD_CHAT_TOKEN_PIP``).
 That is the same division every other credential in this system lives on: manifests are git,
@@ -70,7 +70,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -432,6 +432,11 @@ class ChatRoute:
         return self.route.id
 
     @property
+    def poll_key(self) -> str:
+        """Share one Telegram cursor between all routes to a shared bot."""
+        return self.address.token_env if self.route.shared else self.key
+
+    @property
     def name(self) -> str:
         """What to call this resident *to its operator*: the soul's name, not the id.
 
@@ -442,12 +447,65 @@ class ChatRoute:
         return self.resident.manifest.soul.name
 
 
+def _addressed_routes(routes: Sequence[ChatRoute], text: str) -> tuple[list[ChatRoute], str, bool]:
+    """Resolve an explicit prefix, preserving ambiguity instead of picking by order."""
+    text = text.lstrip()
+    if text.startswith("@"):
+        candidates: list[tuple[int, ChatRoute, str]] = []
+        for route in routes:
+            for alias in {route.resident.id, route.name}:
+                match = re.match(r"@" + re.escape(alias) + r"(?=:|\s|$):?\s*", text, re.IGNORECASE)
+                if match:
+                    candidates.append((len(alias), route, text[match.end() :]))
+        if not candidates:
+            return [], text, True
+        longest = max(length for length, _, _ in candidates)
+        matches = {route.key: route for length, route, _ in candidates if length == longest}
+        remaining = next(rest for length, _, rest in candidates if length == longest)
+        return list(matches.values()), remaining, True
+    if ":" in text:
+        alias, remaining = text.split(":", 1)
+        matches = [
+            route
+            for route in routes
+            if alias.strip().casefold() in {route.resident.id.casefold(), route.name.casefold()}
+        ]
+        if matches or re.fullmatch(r"[\w-]+", alias.strip()):
+            return matches, remaining.lstrip(), True
+    return [], text, False
+
+
 def _declared_chat_routes(residents: Sequence[Resident]) -> Iterator[tuple[Resident, Route]]:
     """Yield every chat route of every active resident, in declared order."""
     for resident in active_residents(residents):
         for route in resident.manifest.routes:
             if route.kind == CHAT_ROUTE_KIND:
                 yield resident, route
+
+
+def _shared_bot_problems(
+    routes: Sequence[ChatRoute], tokens: Mapping[str, str]
+) -> dict[str, tuple[str, ...]]:
+    """Refuse conflicting shared bot declarations before two pollers can steal updates."""
+    groups: dict[str, list[ChatRoute]] = {}
+    for route in routes:
+        if route.address.transport == TELEGRAM:
+            identity = tokens.get(route.address.token_env) or route.address.token_env
+            groups.setdefault(identity, []).append(route)
+    problems: dict[str, tuple[str, ...]] = {}
+    for group in groups.values():
+        if any(route.route.shared for route in group) and (
+            not all(route.route.shared for route in group)
+            or len({route.address.token_env for route in group}) > 1
+        ):
+            for route in group:
+                problems[route.key] = (
+                    (
+                        "routes using a shared bot must all declare shared: true and the same "
+                        "bot reference; use a different token for a dedicated bot"
+                    ),
+                )
+    return problems
 
 
 def chat_routes(residents: Sequence[Resident]) -> list[ChatRoute]:
@@ -513,6 +571,7 @@ class ChatReport:
     reachable: bool
     note: str | None
     bot: str | None = None
+    shared: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Render as the JSON object ``steward chat list --format json`` prints."""
@@ -526,6 +585,7 @@ class ChatReport:
             "reachable": self.reachable,
             "note": self.note,
             "bot": self.bot,
+            "shared": self.shared,
         }
 
 
@@ -600,6 +660,7 @@ def describe_chat(
         DISCORD: DiscordTransport.from_env(source),
     }
     reports: list[ChatReport] = []
+    conflicts = _shared_bot_problems(chat_routes(residents), tokens)
     for resident, route in _declared_chat_routes(residents):
         address = Address.parse(route.address)
         if address is None:
@@ -642,7 +703,7 @@ def describe_chat(
             )
         )
         rooms = [*route.posts_to, *route.listens_in]
-        problems = list(check.problems)
+        problems = [*check.problems, *conflicts.get(f"{resident.id}/{route.id}", ())]
         room = (
             _room_complaint(transport, tokens[address.token_env], rooms, source)
             if transport is not None and check.bot is not None and rooms
@@ -659,6 +720,7 @@ def describe_chat(
                 reachable=not problems,
                 note=problems[0] if problems else (room or route.note),
                 bot=check.bot,
+                shared=route.shared,
             )
         )
     return reports
@@ -1964,7 +2026,8 @@ class ChatBridge:
             # A door that is no longer declared has no health to report. Left behind, it
             # would keep ``run`` awake believing something reachable still exists.
             del self._health[key]
-        for key in [key for key in self._offsets if key not in live]:
+        live_polls = {route.poll_key for route in self.routes}
+        for key in [key for key in self._offsets if key not in live_polls]:
             # And its poll offset goes with it, so a route that is declared, retired and
             # declared again does not resume from a cursor belonging to the last time.
             del self._offsets[key]
@@ -1986,6 +2049,7 @@ class ChatBridge:
             self._reloaded_at = now
             self.reload()
         changed: list[ChatOutcome] = []
+        conflicts = _shared_bot_problems(self.routes, self.tokens)
         for route in self.carried():
             previous = self._health.get(route.key)
             if (
@@ -1999,7 +2063,7 @@ class ChatBridge:
                 token=self.token_for(route),
                 transport=self.transports.get(route.address.transport),
                 operators=self._operators_for(route.address.transport),
-            ).problems
+            ).problems + conflicts.get(route.key, ())
             self._health[route.key] = RouteHealth(problems=problems, checked_at=now)
             if previous is not None and previous.problems == problems:
                 continue
@@ -2091,8 +2155,10 @@ class ChatBridge:
             except Exception as exc:  # noqa: BLE001 — mirror context cannot stop chat
                 log.warning("Discord guild mirror refresh failed: %s", exc)
         outcomes: list[ChatOutcome] = self._refresh_health(moment)
+        polled: set[str] = set()
         for route in self.carried():
-            if self._health[route.key].reachable:
+            if self._health[route.key].reachable and route.poll_key not in polled:
+                polled.add(route.poll_key)
                 outcomes.extend(self._poll_route(route, moment))
         self._report_storms(moment)
         return outcomes
@@ -2124,7 +2190,7 @@ class ChatBridge:
             return []
         try:
             messages = self.transports[route.address.transport].poll(
-                token, self._offsets.get(route.key, 0)
+                token, self._offsets.get(route.poll_key, 0)
             )
         except Exception as exc:  # noqa: BLE001 — the protocol says it does not; belt and braces
             # :class:`ChatTransport` promises never to raise, and the shipped one keeps that
@@ -2149,9 +2215,13 @@ class ChatBridge:
             # this conversation moving instead of wedging the daemon on it for ever. Nothing
             # durable rests on it: the cursor lives in this process, and Telegram redelivers
             # whatever was never acknowledged when a new one starts.
-            self._offsets[route.key] = message.update_id + 1
+            self._offsets[route.poll_key] = message.update_id + 1
             try:
-                outcomes.append(self._handle(route, message, now))
+                outcomes.append(
+                    self._handle_shared(route, message, now)
+                    if route.route.shared
+                    else self._handle(route, message, now)
+                )
             except Exception as exc:  # noqa: BLE001 — one bad message must not stop the fleet
                 log.warning("%s: could not answer a message: %s", route.key, exc)
                 outcomes.append(
@@ -2164,6 +2234,56 @@ class ChatBridge:
                     )
                 )
         return outcomes
+
+    def _handle_shared(self, route: ChatRoute, message: Message, now: datetime) -> ChatOutcome:
+        """Authenticate before resolving or changing a shared conversation's recipient."""
+        refusal = self._unanswerable(route, message, now)
+        if refusal is not None:
+            return refusal
+        routes = [
+            candidate
+            for candidate in self.routes
+            if candidate.route.shared and candidate.poll_key == route.poll_key
+        ]
+        matches, text, addressed = _addressed_routes(routes, message.text)
+        if not addressed:
+            current = self.store.chat_recipient(route.poll_key, message.conversation)
+            matches = [candidate for candidate in routes if candidate.resident.uid == current]
+        if len(matches) != 1:
+            return self._routing_reply(
+                route,
+                message,
+                "Name one resident with 'id: message' or '@id message'. "
+                "Available: " + ", ".join(candidate.resident.id for candidate in routes),
+            )
+        [selected] = matches
+        if addressed:
+            self.store.select_chat_recipient(
+                route.poll_key, message.conversation, selected.resident.uid
+            )
+        health = self._health[selected.key]
+        if not health.reachable:
+            return self._refuse(
+                selected,
+                message,
+                ChatStatus.UNREACHABLE,
+                reason="; ".join(health.problems),
+                reply="Cannot answer right now: " + "; ".join(health.problems),
+            )
+        if not text.strip():
+            return self._routing_reply(selected, message, f"Now talking to {selected.name}.")
+        return self._handle(selected, replace(message, text=text), now)
+
+    def _routing_reply(self, route: ChatRoute, message: Message, text: str) -> ChatOutcome:
+        """Explain a routing decision without attributing the daemon's words to a resident."""
+        return ChatOutcome(
+            resident_id=route.resident.id,
+            route=route.route_id,
+            conversation=message.conversation,
+            status=ChatStatus.REFUSED,
+            reason="shared bot routing",
+            reply=self._reply(route, message, text, tag=False),
+        )
 
     def _handle(self, route: ChatRoute, message: Message, now: datetime) -> ChatOutcome:
         """Decide what one message deserves, and give it that."""
@@ -2364,7 +2484,13 @@ class ChatBridge:
                 reason=admission.reason,
                 reply=f"{route.name} cannot answer right now: {admission.reason}",
             )
-        transcript = Transcript(resident.manifest, message.conversation)
+        conversation = message.conversation
+        if route.route.shared:
+            # Telegram uses the same private chat id across bots. Keep shared bot
+            # windows separate while leaving existing dedicated transcript paths intact.
+            bot = hashlib.sha256(route.poll_key.encode()).hexdigest()[:16]
+            conversation = f"shared-{bot}-{conversation}"
+        transcript = Transcript(resident.manifest, conversation)
         try:
             return self._run_session(route, message, run_id, now, admission, transcript)
         finally:
@@ -2483,7 +2609,7 @@ class ChatBridge:
             return f"{route.name} could not answer: {result.summary()}"
         return (result.output or "").strip() or f"{route.name} finished without saying anything."
 
-    def _reply(self, route: ChatRoute, message: Message, text: str) -> str:
+    def _reply(self, route: ChatRoute, message: Message, text: str, *, tag: bool = True) -> str:
         """Send one reply and return what was actually sent. Never raises.
 
         **The one egress**, and the one place redaction happens — redact, *then* bound
@@ -2500,7 +2626,7 @@ class ChatBridge:
         the transport's business and a log line — a reply the operator did not get is not a
         session that failed, and there is nobody to tell about it anyway.
         """
-        sent = _bounded(text)
+        sent = _bounded(f"{route.name}: {text}" if tag and route.route.shared else text)
         token = self.token_for(route)
         if token is None:  # pragma: no cover — nothing reaches here without a token
             return sent
@@ -2768,7 +2894,7 @@ class RoutineDelivery:
                     "there is nobody to deliver to"
                 ),
             )
-        sent = _bounded(text)
+        sent = _bounded(f"{route.name}: {text}" if route.route.shared else text)
         reached = 0
         for operator in sorted(operators):
             try:

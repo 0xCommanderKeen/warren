@@ -1205,6 +1205,12 @@
             "title": "Posts To",
             "type": "array"
           },
+          "shared": {
+            "default": false,
+            "description": "Route a shared Telegram bot by resident id or display name.",
+            "title": "Shared",
+            "type": "boolean"
+          },
           "status": {
             "default": "active",
             "enum": [

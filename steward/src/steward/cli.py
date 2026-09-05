@@ -1927,6 +1927,7 @@ def chat_list(residents: Path, output_format: str) -> None:
         state = "reachable" if report.reachable else f"{report.status} — not reachable yet"
         click.secho(
             f"{report.resident}/{report.route}: {report.address} — {state}"
+            + (", shared" if report.shared else "")
             + (f", bot {report.bot}" if report.bot else ""),
             fg="cyan" if report.reachable else "yellow",
         )

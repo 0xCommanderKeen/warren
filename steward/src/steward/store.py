@@ -306,6 +306,13 @@ CREATE TABLE IF NOT EXISTS operator_credentials (
 
 CREATE INDEX IF NOT EXISTS operator_credentials_live
     ON operator_credentials (digest, revoked_at);
+
+CREATE TABLE IF NOT EXISTS chat_recipients (
+    bot          TEXT NOT NULL,
+    conversation TEXT NOT NULL,
+    resident_uid TEXT NOT NULL,
+    PRIMARY KEY (bot, conversation)
+);
 """
 
 #: Columns added after the first database was written. Applied with ``ALTER TABLE`` at
@@ -1076,6 +1083,25 @@ class Store:
     def __exit__(self, *_exc: object) -> None:
         """Close the connection on the way out."""
         self.close()
+
+    def chat_recipient(self, bot: str, conversation: str) -> str | None:
+        """Read the resident last explicitly addressed in a shared bot conversation."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT resident_uid FROM chat_recipients WHERE bot = ? AND conversation = ?",
+                (bot, conversation),
+            ).fetchone()
+        return row["resident_uid"] if row is not None else None
+
+    def select_chat_recipient(self, bot: str, conversation: str, resident_uid: str) -> None:
+        """Remember a shared conversation's recipient across daemon restarts."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO chat_recipients (bot, conversation, resident_uid) VALUES (?, ?, ?) "
+                "ON CONFLICT (bot, conversation) DO UPDATE "
+                "SET resident_uid = excluded.resident_uid",
+                (bot, conversation, resident_uid),
+            )
 
     # -- jobs ------------------------------------------------------------------------
 

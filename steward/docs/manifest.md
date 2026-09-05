@@ -251,6 +251,7 @@ routes:
     status: active           # active | pending | disabled
     posts_to: []             # Discord chat only; allowed guild channel names
     listens_in: []           # Discord chat only; channels where @mentions are answered
+    shared: false           # Telegram chat only; opt into resident-name routing on one bot
     note: Optional.
 ```
 
@@ -276,6 +277,13 @@ Three kinds are more than description, because steward itself delivers through t
   `listens_in` accepts at most ten names. See
   [Discord channel mentions](chat.md#discord-channel-mentions) and
   [Discord room posts](chat.md#discord-room-posts).
+
+Telegram chat routes may set `shared: true` and use the same bot reference on several
+residents (`telegram:warren`, one `STEWARD_CHAT_TOKEN_WARREN`). The daemon routes
+`hob: …` or `@hob …` to the named resident and remembers the recipient for bare follow-ups.
+Replies and delivered routines are prefixed with the sender's name. A dedicated bot
+omits `shared`; a resident may declare both on different bot references/tokens.
+See [shared Telegram addressing](chat.md#one-shared-telegram-bot).
 
 Every kind here is **inbound**: a way work reaches this resident. The other direction —
 steward tapping a person about this resident, one-way, with nothing listening for a reply —
