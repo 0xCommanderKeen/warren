@@ -77,7 +77,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from steward import events as ev
 from steward.deploy import (
-    BUNDLE_NAMES,
     CHRONICLE_URL_ENV,
     COMPOSE_FILENAME,
     DeployTarget,
@@ -85,6 +84,7 @@ from steward.deploy import (
     TransportError,
     bundle_changes,
     bundle_for,
+    bundle_names,
     compose_argv,
     emitter_env,
     planned_env,
@@ -397,7 +397,7 @@ RETIRE_SUBJECT = "chore(residents): retire {id}"
 CLAUDE_LOGIN_REMAINS = (
     "left in place: claude/ still holds any login a `docker exec … claude` wrote — "
     "steward did not write it and a re-provision does not restore it, so removing it is "
-    "yours to decide"
+    "yours to decide. Codex residents likewise retain their codex/ login directory."
 )
 
 #: How many dirty paths a refusal names before it starts counting instead.
@@ -1126,7 +1126,7 @@ def _provision(
     if dry_run:
         return ProvisionStage(
             target=target,
-            files=BUNDLE_NAMES,
+            files=bundle_names(resident),
             compose=compose,
             compose_changed=None,
             env_keys=tuple(sorted(values)),

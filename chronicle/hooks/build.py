@@ -149,7 +149,25 @@ def build(hooks=HOOKS):
     for name in ("emit.py", "durable.py"):
         with open(os.path.join(hooks, name), encoding="utf-8") as stream:
             sources.append(stream.read())
-    return bundle(*sources)
+    text = bundle(*sources)
+    start = text.index("def delivery_module():")
+    end = text.index("\n\ndef main(", start)
+    modules = {}
+    for name in ("presence", "delivery_worker"):
+        with open(os.path.join(hooks, name + ".py"), encoding="utf-8") as stream:
+            modules[name] = stream.read()
+    loader = """def delivery_module():
+    import types
+    if 'delivery_worker' not in sys.modules:
+        sys.modules['durable'] = durable
+        sys.modules['emit'] = sys.modules[__name__]
+        for name, source in _DELIVERY_MODULES.items():
+            module = types.ModuleType(name)
+            sys.modules[name] = module
+            exec(compile(source, name + '.py', 'exec'), module.__dict__)
+    return sys.modules['delivery_worker']
+"""
+    return text[:start] + "_DELIVERY_MODULES = " + repr(modules) + "\n\n" + loader + text[end:]
 
 
 def write(text, destination):

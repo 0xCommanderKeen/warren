@@ -101,6 +101,21 @@ const protocolEvent = model({
   cwd: nullable(string), type: string, payload: record(jsonValue),
 }, { optional: ["cwd"] });
 
+const presence = model({
+  agent_id: string, session_id: string, epoch: integer, sequence: integer,
+  observed_at: number, source: literal("codex", "claude-code"), project: string,
+  state: literal("working", "resting", "knocking", "failed", "ended"), producer: string,
+  freshness: literal("fresh", "unknown"), expires_at: number,
+});
+const producerHealth = model({
+  producer: string, target: string, observed_at: number, queue_depth: integer,
+  oldest_at: nullable(number), last_success: nullable(number),
+  error: nullable(literal("dns", "connect", "timeout", "authentication", "invalid_event", "http", "disk", "worker")),
+  retry_at: number, failures: integer, worker: literal("running"), overflow: integer,
+  presence_overflow: integer, status: literal("healthy", "delayed", "unknown", "overloaded"),
+  expires_at: number, received_at: number,
+});
+
 const villager = model({
   id: string, name: string, char: string, accent: string,
   residency: literal("resident", "visitor"), home: nullable(integer),
@@ -108,8 +123,8 @@ const villager = model({
   state: literal("knocking", "resting", "failed", "stale", "working"),
   project: string, cwd: string, last_ts: string, last_line: string, place: nullable(string),
   lineage: record(string), history: array(protocolEvent), mood: record(jsonValue),
-  pending_approval_ids: array(string),
-});
+  pending_approval_ids: array(string), presence: nullable(presence),
+}, { optional: ["presence"] });
 
 const resident = model({
   file: string, valid: literal(true), manifest_version: literal(1), match: record(string),
@@ -156,19 +171,20 @@ const capacity = model({
 });
 
 const villageState = model({
-  schema_version: literal(1), generation: integer, cursor: string, log_generation: integer,
+  schema_version: literal(1, 2), generation: integer, cursor: string, log_generation: integer,
   evaluated_at: string, villagers: array(villager), residents: array(resident),
   diagnostic_residents: array(diagnosticResident), artifacts: array(artifact), tasks: array(task),
   approvals: array(approval), journals: array(journal), routines: array(routine),
   diagnostics: array(diagnostic), capacity, capabilities: record(boolean),
-}, { allowExtra: false });
+  producer_health: array(producerHealth),
+}, { allowExtra: false, optional: ["producer_health"] });
 
 export function parseSnapshot(envelope) {
   if (envelope?.kind !== "snapshot" && envelope?.kind !== "reset") {
     invalid("envelope.kind", '"snapshot" or "reset"');
   }
   const snapshot = envelope.snapshot;
-  if (snapshot?.schema_version !== 1) {
+  if (![1, 2].includes(snapshot?.schema_version)) {
     throw new UnsupportedSchemaVersionError(snapshot?.schema_version);
   }
   villageState(snapshot, "snapshot", { active: new WeakSet() });

@@ -82,3 +82,13 @@ client's business and are not part of the state contract. The rule that matters 
 direction of change: anything two clients need belongs in the versioned Python snapshot, and
 anything one client's presentation needs belongs inside that client. That keeps one
 projection authority no matter how many clients exist.
+
+## Version 2: observed presence and producer health
+
+Version 2 adds `producer_health` to the snapshot and optional `presence` on villagers.
+Presence and health have independent observation times and expiry; only Chronicle applies
+these to activity. A managed villager whose presence expires has `state: "stale"` and
+`presence.freshness: "unknown"`. See [delivery worker](delivery-worker.md) for ordering,
+capacity and thresholds. Clients must accept versions 1 and 2 before the server upgrade.
+The historical fixture filename `complete-v1.json` remains stable for import paths; its
+schema_version and contents now describe version 2.

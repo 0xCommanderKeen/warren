@@ -931,7 +931,7 @@ def test_the_flags_a_manifest_needs_are_exactly_what_argv_writes() -> None:
         "--tools",
         "--strict-mcp-config",
     )
-    assert r.required_flags(RunnerSpec(kind="codex"), ToolGrant(["Read"]), ("/data",)) == ()
+    assert "--skip-git-repo-check" in r.required_flags(RunnerSpec(kind="codex"), UNRESTRICTED, ())
 
 
 def test_a_session_that_will_carry_hook_settings_asks_for_that_flag_too(
@@ -1366,6 +1366,15 @@ def test_codex_runner_uses_exec_and_puts_the_prompt_last(
     assert argv_dump.read_text().splitlines() == [
         "exec",
         "--json",
+        "--skip-git-repo-check",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--sandbox",
+        "workspace-write",
+        "--config",
+        'approval_policy="never"',
+        "--config",
+        "sandbox_workspace_write.network_access=true",
         "--model",
         "gpt-5-codex",
         "tidy up",
@@ -2100,3 +2109,20 @@ def test_the_flag_probe_reports_a_container_cli_too_old_to_bound(
 
     assert complaint is not None
     assert "--tools" in complaint
+
+
+def test_codex_doctor_checks_exec_help(stub_bin: StubWriter) -> None:
+    stub_bin(
+        "codex",
+        'test "$1" = exec && test "$2" = --help && '
+        'echo "--json --skip-git-repo-check --ignore-user-config '
+        '--ignore-rules --sandbox --config"',
+    )
+    assert r.check_cli_support(RunnerSpec(kind="codex"), UNRESTRICTED, ()) is None
+
+
+def test_codex_doctor_refuses_an_old_cli(stub_bin: StubWriter) -> None:
+    stub_bin("codex", 'echo "--json --sandbox --config"')
+    complaint = r.check_cli_support(RunnerSpec(kind="codex"), UNRESTRICTED, ())
+    assert complaint is not None
+    assert "--ignore-user-config" in complaint

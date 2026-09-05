@@ -22,6 +22,7 @@ NAS ?= Miha@dxp2800
 #: default, for `docker build` without this Makefile, and tests/test_resident_image.py
 #: fails when the two disagree.
 CLAUDE_VERSION ?= 2.1.243
+CODEX_VERSION ?= 0.153.4
 
 #: What the built image records as `org.opencontainers.image.revision`, so that "this
 #: resident runs steward-resident:latest" can be turned back into a commit.
@@ -127,6 +128,7 @@ image:
 	  --platform $(PLATFORM) \
 	  --load \
 	  --build-arg CLAUDE_VERSION=$(CLAUDE_VERSION) \
+	  --build-arg CODEX_VERSION=$(CODEX_VERSION) \
 	  --build-arg IMAGE_REVISION=$(REVISION) \
 	  -t $(IMAGE):$(IMAGE_VERSION) \
 	  -t $(IMAGE):latest \
@@ -175,7 +177,7 @@ image-cp-ship:
 # recorded beside it would go stale on the next rebase while the bytes stayed identical.
 # The commit is echoed below for the human running this, and `git log -1 -- hooks/` in
 # chronicle answers the same question at any later date.
-BUNDLE_SOURCES = hooks/emit.py hooks/durable.py hooks/build.py
+BUNDLE_SOURCES = hooks/emit.py hooks/durable.py hooks/build.py hooks/presence.py hooks/delivery_worker.py
 
 vendor-emitter:
 	@git -C "$(CHRONICLE)" rev-parse --git-dir >/dev/null 2>&1 || { echo "no checkout at $(CHRONICLE); pass CHRONICLE=/path/to/chronicle"; exit 1; }

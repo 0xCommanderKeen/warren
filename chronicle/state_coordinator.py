@@ -25,7 +25,9 @@ class StateCoordinator:
         capabilities=None,
         *,
         read_updates=None,
+        apply_telemetry=None,
     ):
+        self._apply_telemetry = apply_telemetry
         self._read_events = read_events
         self._read_updates = read_updates
         self._read_residents = read_residents
@@ -69,6 +71,8 @@ class StateCoordinator:
                 generation=0,
                 capabilities=self._capabilities,
             )
+            if self._apply_telemetry is not None:
+                self._apply_telemetry(candidate, residents, evaluated_at)
             semantic = dict(candidate)
             semantic.pop("generation", None)
             semantic.pop("evaluated_at", None)

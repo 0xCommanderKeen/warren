@@ -2300,3 +2300,12 @@ def test_a_broken_deliver_is_reported_once_not_also_as_a_stray_quiet_word(
     assert not result.ok
     assert "routines[0].deliver" in field_paths(result)
     assert "routines[0].quiet_word" not in field_paths(result)
+
+
+@pytest.mark.parametrize("container", ["/root/.codex", "/root/.codex/auth.json", "/root"])
+def test_extra_mounts_cannot_replace_codex_auth(write_resident, container: str) -> None:
+    data = valid_manifest()
+    data.update(runner={"kind": "codex"}, tools="unrestricted")
+    data["deploy"] = {"mounts": [{"host": "/srv/other", "container": container, "mode": "rw"}]}
+    result = m.validate_manifest(write_resident(data))
+    assert "collides" in problem_for(result, "deploy.mounts[0].container")

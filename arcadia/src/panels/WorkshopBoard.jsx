@@ -1,3 +1,4 @@
+import { TelemetryWarning } from "./TelemetryWarning.jsx";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import "./workshop-board.css";
 
@@ -158,6 +159,7 @@ export function WorkshopBoard({
     : columns;
   return (
     <section className="wb-board" aria-label="Workshop task board">
+      <TelemetryWarning snapshot={snapshot} />
       <header className="wb-header">
         <div>
           <p className="wb-kicker">Pinned in the workshop · across Warren</p>

@@ -436,6 +436,7 @@ def seed_volume(
     )
     result = subprocess.run(  # noqa: S603 — a fixed argv, no shell, no template
         ["/bin/sh", str(script), "true"],
+        env={**os.environ, "CODEX_HOME": str(tmp_path / "codex")},
         capture_output=True,
         text=True,
         check=False,
@@ -830,3 +831,29 @@ def test_pip_renders_the_nursery_container_and_memory_mount() -> None:
         "~/docker/warren/residents/pip/memory",
         "/data/residents/pip/memory",
     )
+
+
+def test_codex_pin_matches_and_build_probes_the_cli() -> None:
+    dockerfile = DOCKERFILE.read_text()
+    makefile = MAKEFILE.read_text()
+    pin = re.search(r"^ARG CODEX_VERSION=(\S+)", dockerfile, re.MULTILINE)
+    make_pin = re.search(r"^CODEX_VERSION\s*\?=\s*(\S+)", makefile, re.MULTILINE)
+    assert pin
+    assert make_pin
+    assert pin[1] == make_pin[1]
+    assert "@openai/codex@${CODEX_VERSION}" in dockerfile
+    assert "codex --version" in dockerfile
+    assert "--build-arg CODEX_VERSION=$(CODEX_VERSION)" in makefile
+
+
+def test_entrypoint_preserves_codex_credentials_and_private_directory(tmp_path: Path) -> None:
+    auth_dir = tmp_path / "codex"
+    auth_dir.mkdir()
+    auth = auth_dir / "auth.json"
+    auth.write_text("fixture credentials")
+    config = auth_dir / "config.toml"
+    config.write_text("# operator settings")
+    seed_volume(tmp_path, None, ())
+    assert auth.read_text() == "fixture credentials"
+    assert config.read_text() == "# operator settings"
+    assert auth_dir.stat().st_mode & 0o777 == 0o700
