@@ -22,6 +22,7 @@ NAS ?= Miha@dxp2800
 #: default, for `docker build` without this Makefile, and tests/test_resident_image.py
 #: fails when the two disagree.
 CLAUDE_VERSION ?= 2.1.243
+CODEX_VERSION ?= 0.153.4
 
 #: What the built image records as `org.opencontainers.image.revision`, so that "this
 #: resident runs steward-resident:latest" can be turned back into a commit.
@@ -127,6 +128,7 @@ image:
 	  --platform $(PLATFORM) \
 	  --load \
 	  --build-arg CLAUDE_VERSION=$(CLAUDE_VERSION) \
+	  --build-arg CODEX_VERSION=$(CODEX_VERSION) \
 	  --build-arg IMAGE_REVISION=$(REVISION) \
 	  -t $(IMAGE):$(IMAGE_VERSION) \
 	  -t $(IMAGE):latest \

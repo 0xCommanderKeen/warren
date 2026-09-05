@@ -41,6 +41,12 @@ set -eu
 CONFIG_DIR=/root/.claude
 BAKED_DIR=/opt/steward
 
+# CODEX_HOME is declared only for Codex residents. Never seed or replace credentials.
+if [ -n "${CODEX_HOME:-}" ]; then
+    mkdir -p "$CODEX_HOME"
+    chmod 0700 "$CODEX_HOME"
+fi
+
 mkdir -p "$CONFIG_DIR"
 cp "$BAKED_DIR/chronicle-emit.py" "$CONFIG_DIR/chronicle-emit.py"
 
