@@ -1822,7 +1822,7 @@ def test_losing_the_add_column_race_to_a_neighbour_is_nothing(store: Store) -> N
 def test_recent_requests_are_bounded_newest_first_with_stable_ties(
     store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("steward.store.utc_now_iso", lambda: EARLY)
+    monkeypatch.setattr("steward.store.requests.utc_now_iso", lambda: EARLY)
     for key in ("z", "a", "m"):
         store.log_request(request_id=key, method="POST", path="/jobs", outcome="queued")
     assert [r.request_id for r in store.recent_requests(limit=2)] == ["m", "a"]
@@ -1850,7 +1850,7 @@ def test_recent_requests_filter_exact_resident_before_limit(store: Store) -> Non
 def test_latest_routine_requests_select_only_requested_keys_with_stable_ties(
     store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("steward.store.utc_now_iso", lambda: EARLY)
+    monkeypatch.setattr("steward.store.requests.utc_now_iso", lambda: EARLY)
     for key, routine in (("z", "hob/inbox"), ("a", "hob/inbox"), ("x", 7), ("y", "ada/check")):
         store.log_request(
             request_id=key,
@@ -1872,7 +1872,7 @@ def test_large_request_ledger_uses_bounded_index_scans(
 ) -> None:
     # Exercise the actual public queries, then EXPLAIN their traced SQL. This is
     # deliberate query-plan instrumentation, not a developer-machine timing budget.
-    monkeypatch.setattr("steward.store.utc_now_iso", lambda: EARLY)
+    monkeypatch.setattr("steward.store.requests.utc_now_iso", lambda: EARLY)
     for index in range(20_000):
         resident = "hob" if index % 2 == 0 else "ada"
         store.log_request(
@@ -1883,7 +1883,7 @@ def test_large_request_ledger_uses_bounded_index_scans(
             detail={"routine": f"{resident}/daily"},
         )
     # A late insertion with an older timestamp must not displace a newer request.
-    monkeypatch.setattr("steward.store.utc_now_iso", lambda: "2020-01-01T00:00:00Z")
+    monkeypatch.setattr("steward.store.requests.utc_now_iso", lambda: "2020-01-01T00:00:00Z")
     store.log_request(
         request_id="older",
         method="POST",
