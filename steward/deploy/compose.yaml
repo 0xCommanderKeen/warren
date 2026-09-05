@@ -39,7 +39,9 @@
 # same checkout read-only: the standing rule that only the API writes declarations, written
 # into the mounts. The checkout is authoritative for this burrow's residents; steward/
 # residents/ in the repository is the seed a new burrow is cloned from, not a place charters
-# are edited. The image still carries a copy of that seed, and nothing here reads it.
+# are edited. The image still carries a copy of that seed. STEWARD_RESIDENTS gives every
+# process, including bare `docker exec steward-api steward ...` commands, the live tree
+# as its default; only an explicit path override reads the seed.
 #
 # Every process reads the same checkout. The scheduler and watchdog partition that tree by
 # deploy.host through topology.py, so a burrow acts only for its own residents — and an
@@ -60,6 +62,7 @@
 # what was provisioned, and it refuses to start.
 
 x-steward-environment: &steward-environment
+  STEWARD_RESIDENTS: /checkout/steward/residents
   STEWARD_STATE: /data/state.json
   STEWARD_BURROW: dxp2800
   # The deploy user's home on this machine: what every ~/ in a manifest or a rendered

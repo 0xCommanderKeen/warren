@@ -490,8 +490,8 @@ escalation: When and how to raise needs_human instead of acting.
 
 The other flags: `--skills` grants library skills by name (comma-separated); `--runner`
 and `--model` choose the brain (default `claude`); `--project` and `--summary` are the
-optional soul fields; `--residents` names the tree to declare into (default `residents`,
-relative to the current directory) and `--repo` the checkout to commit into (default: the
+optional soul fields; `--residents` names the tree to declare into (default `$STEWARD_RESIDENTS`,
+or `residents` relative to the current directory) and `--repo` the checkout to commit into (default: the
 parent of that tree); `--dry-run`, `--allow-dirty`, and `--no-commit` behave as they do for
 `retire`; and **`--no-deploy`** is the only host-less path — it declares and checks but
 builds no container, for developing a resident before it has a machine. `--skills` is a
@@ -786,7 +786,7 @@ the scheduler and the API name the ones they need on startup.
 | `STEWARD_TOKEN` | API | The bearer token every endpoint requires. Unset or blank refuses to start unless `--allow-open` says out loud this is loopback-only local development. |
 | `STEWARD_EVENTS_FALLBACK` | everything that emits | Steward's complete local event record, read by the watchdog. Remote-bound events wait for acknowledgement in its `.pending` sibling. Defaults to `~/.chronicle/events.jsonl`. |
 | `STEWARD_CORS_ORIGINS` | API | Comma-separated origins allowed to call the API from a browser. Unset means same-origin only. |
-| `STEWARD_RESIDENTS` | API | The residents tree `create_app()` reads when nothing names one. `steward serve` always passes `--residents` (default `residents`), so on that path the flag decides and this is only read by an embedder that builds the app itself. |
+| `STEWARD_RESIDENTS` | CLI + API | Default residents tree for every command, including `validate` and `doctor`, and for `create_app()`. Explicit paths (`--residents` or positional arguments) win; unset or blank falls back to `residents` under the current directory. The burrow's Compose file sets `/checkout/steward/residents` for all services, so bare `docker exec steward-api steward notify list` reads the live checkout. |
 | `STEWARD_COMMIT_IDENTITY` | API | `Name <email>`, the git author the write API commits as when the caller is not a named [operator](#operator-credentials). Anything that is not that exact spelling is ignored rather than half-parsed, leaving commits reading `steward (api)` — which is true. |
 | `STEWARD_ALLOW_UNCOMMITTED_WRITES` | API | `1`/`true`/`yes`/`on` accepts a residents tree with no git behind it. Off, a write into a tree outside a checkout is refused `409 not_a_git_checkout` rather than leaving declarations with no history and no author. Never set this on a burrow whose tree lives in the image: the writes would land in the container layer and die on the next deploy (warren#313, warren#351). |
 | `STEWARD_PUSH_BRANCH` | API | The branch every commit the write API makes is pushed to afterwards — `burrow/residents` on the NAS. Unset, nothing is pushed (a laptop's checkout, where the person pushes). The push is best effort and never fails a write: the response carries `commit.pushed` — `true`, `false` with the reason in `commit.note`, or `null` when there was nothing to push. |
