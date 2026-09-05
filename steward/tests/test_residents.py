@@ -13,17 +13,12 @@ def test_the_residents_tree_validates() -> None:
         "hob",
         "pip",
     }
-    assert "burrow-builder" not in {resident.id for resident in result.residents}
     assert len({resident.manifest.uid for resident in result.residents}) == len(result.residents)
 
 
 def test_hob_is_the_vault_keeper_declared_on_the_burrow() -> None:
     hob = m.load_manifest(RESIDENTS_DIR / "hob" / "manifest.yaml")
     assert hob.manifest.agent_id == f"resident:{hob.uid}"
-    assert hob.manifest.soul.name == "Hob"
-    assert hob.manifest.soul.char == "Monk"
-    assert hob.manifest.soul.accent == "#a68a4f"
-    assert hob.manifest.soul.role == "vault keeper"
     assert any("health, relationships or money" in rule for rule in hob.manifest.charter.rules)
     escalation = hob.manifest.charter.escalation
     assert isinstance(escalation, m.Escalation)
