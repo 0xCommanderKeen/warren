@@ -20,7 +20,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_for_futures
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Unpack
 
 import httpx
 import pytest
@@ -71,9 +71,25 @@ from steward.input_bounds import (
 )
 from steward.manifest import Runner as RunnerSpec
 from steward.manifest import validate_tree
-from steward.nursery import RegisterStage, provision_resident, raise_resident, retire_resident
+from steward.nursery import (
+    NewResident,
+    NurseryReport,
+    RegisterStage,
+    RetireReport,
+    provision_resident,
+    raise_resident,
+    retire_resident,
+)
 from steward.operator_auth import new_operator_credential, operator_email
 from steward.org import NO_OPEN_ROUTE
+from steward.routes.deps import (
+    NurseryOptions,
+    NurseryPipeline,
+    ProvisionOptions,
+    ProvisionPipeline,
+    RetireOptions,
+    RetirePipeline,
+)
 from steward.run_lifecycle import RUN_LEASE_GRACE_S
 from steward.runners import MockRunner, Outcome, RunRequest, RunResult
 from steward.runs import RUN_ROUTINE, RUN_TASK
@@ -153,9 +169,9 @@ def api(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ApiFactory]:
         behavior: Callable[[RunRequest], RunResult] | None = None,
         db_path: Path | None = None,
         residents: bool = True,
-        nursery: Any = raise_resident,  # noqa: ANN401 — the pipeline seam, injected
-        provisioner: Any = provision_resident,  # noqa: ANN401 — the other door's seam
-        retirer: Any = retire_resident,  # noqa: ANN401 — the door back out (warren#331)
+        nursery: NurseryPipeline = raise_resident,
+        provisioner: ProvisionPipeline = provision_resident,
+        retirer: RetirePipeline = retire_resident,
         git: bool = True,
         push: au.PushTarget | None = None,
         transport: LocalTransport | None = None,
@@ -3206,12 +3222,13 @@ def test_the_api_calls_the_same_pipeline_the_cli_does(
     """Verified by injection, not by convention: the route is handed the pipeline."""
     seen: list[dict[str, Any]] = []
 
-    def recorder(spec: Any, **kwargs: Any) -> Any:  # noqa: ANN401 — a recorder takes anything
+    def recorder(spec: NewResident, **kwargs: Unpack[NurseryOptions]) -> NurseryReport:
         seen.append({"spec": spec, **kwargs})
         return raise_resident(spec, **kwargs)
 
     host = LocalTransport(root=tmp_path / "nas")
-    harness = api(nursery=recorder, transport=host)
+    pipeline: NurseryPipeline = recorder
+    harness = api(nursery=pipeline, transport=host)
 
     harness.client.post("/residents", json=NEW_RESIDENT | {"deploy": True})
 
@@ -3311,12 +3328,13 @@ def test_the_provision_route_runs_the_pipeline_the_command_runs(
     """Verified by injection, not by convention — the same seam `POST /residents` has."""
     seen: list[dict[str, Any]] = []
 
-    def recorder(resident_id: str, **kwargs: Any) -> Any:  # noqa: ANN401 — a recorder takes anything
+    def recorder(resident_id: str, **kwargs: Unpack[ProvisionOptions]) -> NurseryReport:
         seen.append({"resident_id": resident_id, **kwargs})
         return provision_resident(resident_id, **kwargs)
 
     host = LocalTransport(root=tmp_path / "nas")
-    harness = api(provisioner=recorder, transport=host)
+    pipeline: ProvisionPipeline = recorder
+    harness = api(provisioner=pipeline, transport=host)
 
     harness.client.post("/residents/test-agent/provision")
 
@@ -3506,13 +3524,14 @@ def test_a_container_that_went_up_with_a_failing_check_says_both_halves(
 ) -> None:
     """Saying only "the container is up" would be a control panel's one unforgivable sin."""
 
-    def unschedulable(resident_id: str, **kwargs: Any) -> Any:  # noqa: ANN401 — a stub answers anything
+    def unschedulable(resident_id: str, **kwargs: Unpack[ProvisionOptions]) -> NurseryReport:
         report = provision_resident(resident_id, **kwargs)
         return dataclasses.replace(
             report, register=RegisterStage(problems=("claude is not on PATH",))
         )
 
-    harness = api(provisioner=unschedulable, transport=LocalTransport(root=tmp_path / "nas"))
+    pipeline: ProvisionPipeline = unschedulable
+    harness = api(provisioner=pipeline, transport=LocalTransport(root=tmp_path / "nas"))
 
     response = harness.client.post("/residents/test-agent/provision")
 
@@ -3662,12 +3681,13 @@ def test_the_retire_route_runs_the_pipeline_the_command_runs(
     """Verified by injection, not by convention — the seam both other doors have."""
     seen: list[dict[str, Any]] = []
 
-    def recorder(resident_id: str, **kwargs: Any) -> Any:  # noqa: ANN401 — a recorder takes anything
+    def recorder(resident_id: str, **kwargs: Unpack[RetireOptions]) -> RetireReport:
         seen.append({"resident_id": resident_id, **kwargs})
         return retire_resident(resident_id, **kwargs)
 
     host = LocalTransport(root=tmp_path / "nas")
-    harness = api(retirer=recorder, transport=host)
+    pipeline: RetirePipeline = recorder
+    harness = api(retirer=pipeline, transport=host)
     commit_tree(tmp_path)
 
     rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
@@ -3871,7 +3891,7 @@ def test_a_retirement_whose_commit_git_refused_says_which_side_it_stopped_on(
     """
     host = LocalTransport(root=tmp_path / "nas")
 
-    def unable_to_commit(resident_id: str, **kwargs: Any) -> Any:  # noqa: ANN401 — a stub answers anything
+    def unable_to_commit(resident_id: str, **kwargs: Unpack[RetireOptions]) -> RetireReport:
         def git(argv: list[str]) -> au.CommandOutcome:
             if "commit" in argv:
                 return au.CommandOutcome(argv=tuple(argv), exit_status=1, stderr="gpg failed")
@@ -3879,7 +3899,8 @@ def test_a_retirement_whose_commit_git_refused_says_which_side_it_stopped_on(
 
         return retire_resident(resident_id, git=git, **kwargs)
 
-    harness = api(retirer=unable_to_commit, transport=host)
+    pipeline: RetirePipeline = unable_to_commit
+    harness = api(retirer=pipeline, transport=host)
     commit_tree(tmp_path)
 
     rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()

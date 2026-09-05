@@ -61,8 +61,6 @@ from steward.deploy import Transport
 from steward.manifest import SessionGrant, validate_manifest
 from steward.nursery import (
     CommitIdentity,
-    NurseryReport,
-    RetireReport,
     provision_resident,
     raise_resident,
     retire_resident,
@@ -84,7 +82,7 @@ from steward.routes.auth import (
     _auth_dependency,
     session_of,  # noqa: F401 — compatibility re-export
 )
-from steward.routes.deps import Deps
+from steward.routes.deps import Deps, NurseryPipeline, ProvisionPipeline, RetirePipeline
 from steward.routes.residents import (
     ResidentPost,
 )
@@ -125,21 +123,6 @@ __all__ = [
     "last_run_view",
     "run_server",
 ]
-
-#: How the API reaches the nursery. Injectable so a test can prove the endpoint and
-#: ``steward new-resident`` run *the same* pipeline rather than two that agree by
-#: convention — hand it a recorder and assert on what the route asked for.
-type NurseryPipeline = Callable[..., NurseryReport]
-
-#: How the API reaches the *other* nursery door — provision from a declared manifest.
-#: Injectable for the reason :data:`NurseryPipeline` is: a test proves the route and
-#: ``steward provision`` run one pipeline rather than two that happen to agree.
-type ProvisionPipeline = Callable[..., NurseryReport]
-
-#: And how it reaches the door back out again. Same seam, same reason: retirement is a
-#: mark, a commit, a ``docker compose down`` and two removals in one order, and a route
-#: with its own copy of that order would be a second place for it to be wrong.
-type RetirePipeline = Callable[..., RetireReport]
 
 log = logging.getLogger("steward.api")
 
