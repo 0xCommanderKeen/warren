@@ -100,6 +100,17 @@ runner:
 budgets:
   daily_cost_usd: 10.0
 
+# Hob's digest is deliberately silent on a quiet morning (`quiet_word: NOTHING`), which
+# leaves one hole: a digest that *crashed* looks exactly like a digest with nothing to
+# say. Routine brackets are not tappable on purpose, so this closes the half that can be
+# closed — the escalations the charter promises. Discord because the burrow already has
+# STEWARD_NOTIFY_DISCORD_WEBHOOK; ntfy would need an app and a topic subscription first.
+notifications:
+  transport: discord
+  "on": [needs_human]   # quoted: bare `on` is a YAML 1.1 boolean, not the string "on"
+  status: active
+  note: Miha — the escalations in the charter, and steward's own knocks about Hob.
+
 deploy:
   host: dxp2800
   user: Miha

@@ -1954,9 +1954,9 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "routes.listens_in": (
         "listens_in: [household]  (Discord channels where @mentions may start a session)"
     ),
-    "notifications": "notifications: {transport: ntfy, on: [needs_human]}",
+    "notifications": 'notifications: {transport: ntfy, "on": [needs_human]}',
     "notifications.transport": "transport: ntfy  (omit the block entirely to tap nobody)",
-    "notifications.on": "on: [needs_human, task_done]",
+    "notifications.on": '"on": [needs_human, task_done]',
     "notifications.status": "status: active  (active | pending | disabled)",
     "notifications.note": "note: Miha's phone  (a label, never an address)",
     "app_grants": "app_grants: [{id: gmail, name: Gmail, status: granted}]",
@@ -2375,7 +2375,7 @@ def _check_notifications_are_deliverable(
                 "tap under this kind"
             ),
             example=(
-                "on: [needs_human]  (the knock this resident can actually raise), or "
+                '"on": [needs_human]  (the knock this resident can actually raise), or '
                 "board: {claim: true}  (give it work it can finish)"
             ),
             severity=Severity.WARNING,
