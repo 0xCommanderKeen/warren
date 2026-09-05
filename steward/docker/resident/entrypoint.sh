@@ -41,6 +41,12 @@ set -eu
 CONFIG_DIR=/root/.claude
 BAKED_DIR=/opt/steward
 
+# CODEX_HOME is declared only for Codex residents. Never seed or replace credentials.
+if [ -n "${CODEX_HOME:-}" ]; then
+    mkdir -p "$CODEX_HOME"
+    chmod 0700 "$CODEX_HOME"
+fi
+
 mkdir -p "$CONFIG_DIR"
 cp "$BAKED_DIR/chronicle-emit.py" "$CONFIG_DIR/chronicle-emit.py"
 
@@ -116,5 +122,16 @@ fi
 # options. Printing the path is how a human finds the queue when it matters.
 echo "steward: durable outbox under $HOME/.chronicle — container-local unless the"
 echo "steward:          compose file mounts it"
+
+# One supervised delivery owner per container spool. Hooks only enqueue once the
+# worker publishes its managed marker; a restart keeps the existing outbox IDs.
+if [ -n "${CHRONICLE_URL:-}" ]; then
+    (
+        while :; do
+            python3 "$BAKED_DIR/chronicle-emit.py" --worker || true
+            sleep 5
+        done
+    ) &
+fi
 
 exec "$@"

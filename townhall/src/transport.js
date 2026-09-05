@@ -5,7 +5,7 @@ const COLLECTIONS = [
 
 export function validateSnapshot(value) {
   if (!value || Object.getPrototypeOf(value) !== Object.prototype) return "snapshot must be an object";
-  if (value.schema_version !== 1) return "unsupported snapshot schema";
+  if (![1, 2].includes(value.schema_version)) return "unsupported snapshot schema";
   if (!Number.isSafeInteger(value.generation) || value.generation < 0) return "invalid generation";
   if (!Number.isSafeInteger(value.log_generation) || value.log_generation < 0) return "invalid log generation";
   if (typeof value.cursor !== "string") return "invalid cursor";

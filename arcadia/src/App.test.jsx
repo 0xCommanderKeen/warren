@@ -95,10 +95,10 @@ describe("Arcadia", () => {
     };
     render(<LiveApp transportFactory={transportFactory} />);
 
-    options.onError(new UnsupportedSchemaVersionError(2));
+    options.onError(new UnsupportedSchemaVersionError(3));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Unsupported village schema version: 2",
+      "Unsupported village schema version: 3",
     );
   });
 
@@ -220,7 +220,7 @@ describe("Arcadia", () => {
         envelope={{
           kind: "snapshot",
           snapshot: {
-            schema_version: 2,
+            schema_version: 3,
             villagers: [{ id: "future:villager", name: "Future Villager" }],
           },
         }}
@@ -228,7 +228,7 @@ describe("Arcadia", () => {
     );
 
     expect(screen.getByRole("alert")).toHaveTextContent(
-      "Unsupported village schema version: 2",
+      "Unsupported village schema version: 3",
     );
     expect(screen.queryByText("Future Villager")).not.toBeInTheDocument();
     expect(screen.queryByTestId("village-canvas")).not.toBeInTheDocument();

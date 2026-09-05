@@ -215,7 +215,7 @@ class VillageProjectionTests(unittest.TestCase):
             cursor="c1",
             generation=3,
         )
-        self.assertEqual(1, state["schema_version"])
+        self.assertEqual(2, state["schema_version"])
         self.assertEqual((3, "c1"), (state["generation"], state["cursor"]))
         residents = {item["id"]: item for item in state["villagers"]}
         self.assertEqual(

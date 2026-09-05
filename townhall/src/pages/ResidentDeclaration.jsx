@@ -8,6 +8,7 @@ import {
   changed, getIn, linesToList, listToLines, scalarValue, setIn,
 } from "../manifest.js";
 import { SkillsPanel } from "../console/skills.jsx";
+import { RoutineFields } from "../console/RoutineFields.jsx";
 import {
   Actions, Button, Check, Facts, Field, Input, Loading, Note, Panel, Problem, Receipt,
   Select, Textarea, Verbatim, buttonClass,
@@ -102,6 +103,7 @@ function ManifestFields({ draft, edit, diagnostics, wasRetired }) {
       </Panel>
 
       <SkillsPanel manifest={draft} edit={edit} diagnostics={diagnostics} />
+      <RoutineFields manifest={draft} edit={edit} diagnostics={diagnostics} />
 
       {/* Shown because the file on disk says retired, not because the draft does — so
           unticking the box does not take the box off the screen, which would make an
@@ -263,8 +265,14 @@ export default function ResidentDeclaration({ id }) {
         draft.text !== loaded.data.text ||
         draft.soul !== loaded.data.soul),
   );
-  const edit = (path, value) =>
+  const edit = (path, value) => {
+    // Routine diagnostics name positions in the submitted array. Adding/removing a row
+    // invalidates those positions; do not pin an old refusal on a different routine.
+    if (path === "routines" && value.length !== (draft.manifest.routines || []).length) {
+      clearRefusal();
+    }
     setDraft((previous) => ({ ...previous, manifest: setIn(previous.manifest, path, value) }));
+  };
 
   async function save(event) {
     event.preventDefault();

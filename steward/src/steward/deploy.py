@@ -50,6 +50,7 @@ file, and the host's docker is what says whether the image exists. ``make image-
 how it gets there.
 """
 
+import hashlib
 import io
 import os
 import tarfile
@@ -110,6 +111,7 @@ __all__ = [
     "TransportError",
     "bundle_changes",
     "bundle_for",
+    "bundle_names",
     "compose_argv",
     "emitter_env",
     "memory_host_dir",
@@ -135,6 +137,8 @@ SOUL_FILENAME = "soul.md"
 COMPOSE_HEADER = (Path(__file__).parent / "templates" / "resident-compose.yaml").read_text(
     encoding="utf-8"
 )
+
+_CODEX_SECCOMP = (Path(__file__).parent / "templates" / "codex-seccomp.json").read_bytes()
 
 #: The two variables that carry the village's address and its shared secret into the
 #: container are :data:`~steward.runners.CHRONICLE_URL_ENV` and
@@ -351,6 +355,7 @@ def render_compose(
             "CHRONICLE_TOKEN": "${CHRONICLE_TOKEN-}",
             "STEWARD_URL": "${STEWARD_URL:?steward writes this into .env at provision time}",
             "STEWARD_RESIDENT": resident.id,
+            **({"CODEX_HOME": "/root/.codex"} if resident.manifest.runner.kind == "codex" else {}),
             # The resident image runs as root (no USER: the vault and key mounts are
             # root-owned), and the claude CLI refuses `--permission-mode
             # bypassPermissions` for root — "cannot be used with root/sudo privileges" —
@@ -371,6 +376,7 @@ def render_compose(
         "volumes": [
             f"./memory:{memory_path}",
             "./claude:/root/.claude",
+            *(["./codex:/root/.codex"] if resident.manifest.runner.kind == "codex" else []),
             *(
                 f"{resolve_mount_host_path(mount.host, burrow_home)}:{mount.container}"
                 + (":ro" if mount.mode == "ro" else "")
@@ -384,6 +390,18 @@ def render_compose(
         "extra_hosts": ["dockerhost:host-gateway"],
         "command": list(target.command),
     }
+    if resident.manifest.runner.kind == "codex":
+        # Bubblewrap needs nested namespaces and mounts. Keep Docker's syscall filter
+        # with only those operations added, and no privilege gain or added capabilities.
+        # Docker's AppArmor mount deny also blocks bubblewrap inside its own userns.
+        service["security_opt"] = [
+            "no-new-privileges=true",
+            "apparmor=unconfined",
+            "seccomp=./codex-seccomp.json",
+        ]
+        # A changed policy file must recreate the container even when its filename
+        # stays the same; Compose otherwise sees an unchanged service declaration.
+        service["labels"] = {"steward.codex-seccomp": hashlib.sha256(_CODEX_SECCOMP).hexdigest()}
     document = {"services": {target.service: service}}
     body = yaml.safe_dump(document, default_flow_style=False, sort_keys=True)
     return COMPOSE_HEADER + body
@@ -469,8 +487,9 @@ def bundle_for(
 
     Everything the container needs and nothing it does not: the compose fragment, the
     ``.env`` steward writes from its own environment, the manifest and soul so the machine
-    carries the same declaration git does, and two empty directories for the volumes so
-    docker does not create them as root.
+    carries the same declaration git does, and empty directories for the managed volumes.
+    The entrypoint protects the Codex credential directory without seeding or replacing
+    its contents.
     """
     files: dict[str, bytes] = {
         COMPOSE_FILENAME: render_compose(resident, target, host_env).encode("utf-8"),
@@ -479,6 +498,9 @@ def bundle_for(
         "memory/.keep": b"",
         "claude/.keep": b"",
     }
+    if resident.manifest.runner.kind == "codex":
+        files["codex/.keep"] = b""
+        files["codex-seccomp.json"] = _CODEX_SECCOMP
     soul_path = resident.directory / resident.manifest.soul.file
     if soul_path.is_file():
         files[SOUL_FILENAME] = soul_path.read_bytes()
@@ -496,6 +518,13 @@ BUNDLE_NAMES: tuple[str, ...] = (
     "memory/.keep",
     "claude/.keep",
 )
+
+
+def bundle_names(resident: Resident) -> tuple[str, ...]:
+    """List staged files, including the selected runner's persistent login directory."""
+    return BUNDLE_NAMES + (
+        ("codex/.keep", "codex-seccomp.json") if resident.manifest.runner.kind == "codex" else ()
+    )
 
 
 def bundle_changes(transport: Transport, files: Mapping[str, bytes], path: str) -> tuple[str, ...]:

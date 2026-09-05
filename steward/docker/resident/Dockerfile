@@ -83,6 +83,7 @@
 FROM node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
 
 ARG CLAUDE_VERSION=2.1.243
+ARG CODEX_VERSION=0.153.4
 ARG DEBIAN_FRONTEND=noninteractive
 
 # What commit this image was built from. `make image` passes the real one; the default is
@@ -91,7 +92,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG IMAGE_REVISION=unknown
 
 LABEL org.opencontainers.image.title="steward-resident"
-LABEL org.opencontainers.image.description="Runtime for a steward resident: claude CLI plus chronicle's hook emitter."
+LABEL org.opencontainers.image.description="Runtime for a steward resident: Claude and Codex CLIs plus chronicle's hook emitter."
 LABEL org.opencontainers.image.source="https://github.com/0xCommanderKeen/warren"
 LABEL org.opencontainers.image.revision="${IMAGE_REVISION}"
 
@@ -114,9 +115,10 @@ RUN apt-get update \
 
 # Pinned, and asked for its version immediately: a build that produced an image whose
 # claude does not run should fail here, not three days later inside a routine at 07:00.
-RUN npm install -g --no-fund --no-audit "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
+RUN npm install -g --no-fund --no-audit "@anthropic-ai/claude-code@${CLAUDE_VERSION}" "@openai/codex@${CODEX_VERSION}" \
     && npm cache clean --force \
-    && claude --version
+    && claude --version \
+    && codex --version
 
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false \
     # The pin above is the whole point; a CLI that updated itself in place would quietly

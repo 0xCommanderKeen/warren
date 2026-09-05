@@ -25,6 +25,7 @@ GET /transport/status exposes bounded ingest-deduplication and knock-forwarding
 pressure for the browser's live transport status.
 """
 
+import telemetry
 import collections
 import dataclasses
 import datetime
@@ -51,7 +52,7 @@ from fastapi import APIRouter, FastAPI, Header, Query, Request
 from fastapi.openapi.utils import get_openapi
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
-from pydantic import BaseModel, ConfigDict, JsonValue, RootModel, model_validator
+from pydantic import Field, BaseModel, ConfigDict, JsonValue, RootModel, model_validator
 from sse_starlette import EventSourceResponse, ServerSentEvent
 
 import artifact_preview
@@ -520,6 +521,7 @@ class VillagerWire(BaseModel):
     history: list[ProtocolEvent]
     mood: dict[str, JsonValue]
     pending_approval_ids: list[str]
+    presence: telemetry.PresenceWire | None = None
 
 
 class ResidentWire(BaseModel):
@@ -654,7 +656,7 @@ class VillageState(BaseModel):
     """Complete browser snapshot wire contract."""
 
     model_config = ConfigDict(extra="forbid")
-    schema_version: Literal[1]
+    schema_version: Literal[2]
     generation: int
     cursor: str
     log_generation: int
@@ -670,6 +672,7 @@ class VillageState(BaseModel):
     diagnostics: list[DiagnosticWire]
     capacity: ProjectionCapacity
     capabilities: dict[str, bool]
+    producer_health: list[telemetry.HealthWire] = Field(default_factory=list)
 
 
 class StateEnvelope(BaseModel):
@@ -745,6 +748,7 @@ class Runtime:
         self.event_log = event_log.EventLog(
             config, self.notification_store, self.count_ingest_duplicate
         )
+        self.telemetry = telemetry.TelemetryStore(str(config.events) + ".telemetry.json")
         self.state_coordinator = StateCoordinator(
             self.projection_inputs,
             functools.partial(read_residents, config.villagers_dir),
@@ -755,6 +759,7 @@ class Runtime:
                 "routines": True,
             },
             read_updates=self.event_log.projection_updates,
+            apply_telemetry=self.telemetry.apply,
         )
 
     def projection_inputs(self):
@@ -824,7 +829,7 @@ PLAIN_ERROR_RESPONSES = {
 
 async def guard_event_ingest(request: Request, call_next):
     """Reject framing and auth before FastAPI consumes the JSON body."""
-    if request.method != "POST" or request.url.path != "/events":
+    if request.method != "POST" or request.url.path not in {"/events", "/events/batch", "/telemetry"}:
         return await call_next(request)
     if request.headers.get("transfer-encoding"):
         return _error(400, "unsupported transfer encoding")
@@ -837,7 +842,12 @@ async def guard_event_ingest(request: Request, call_next):
     ):
         return _error(400, "invalid content length")
     config = request.app.state.config
-    if int(lengths[0]) > config.max_event_bytes:
+    limit = max(config.max_event_bytes, 512 * 1024) if request.url.path == "/telemetry" else config.max_event_bytes
+    if request.url.path == "/events/batch":
+        # One legacy event at its existing limit still fits after adding an ID
+        # and batch framing. Each event is separately bounded below.
+        limit += 1024
+    if int(lengths[0]) > limit:
         return _error(413, "event too large")
     presented = request.headers.get("x-burrow-token") or ""
     scheme, _, value = (request.headers.get("authorization") or "").partition(" ")
@@ -861,6 +871,10 @@ async def ingest_event(
     event_wire: ProtocolEvent,
     x_burrow_delivery_id: str | None = Header(None),
 ):
+    return await _ingest_record(request, event_wire, x_burrow_delivery_id)
+
+
+async def _ingest_record(request, event_wire, x_burrow_delivery_id, *, project=True):
     event = event_wire.model_dump(mode="python", exclude_unset=True)
     error = validate_event(event)
     if error:
@@ -877,7 +891,54 @@ async def ingest_event(
         return _error(503, "notification queue unavailable")
     if await anyio.to_thread.run_sync(claim_knock, event, runtime):
         await anyio.to_thread.run_sync(notify_async, event, runtime)
+    if project:
+        await anyio.to_thread.run_sync(runtime.state_coordinator.evaluate)
+    return Response(status_code=204)
+
+
+@router.post("/telemetry", status_code=204)
+async def ingest_telemetry(request: Request, report: telemetry.TelemetryReport):
+    runtime = _runtime(request)
+    try:
+        await anyio.to_thread.run_sync(runtime.telemetry.accept, report)
+    except ValueError:
+        return _error(400, "invalid observation time")
     await anyio.to_thread.run_sync(runtime.state_coordinator.evaluate)
+    return Response(status_code=204)
+
+
+class DeliveryRecord(BaseModel):
+    delivery_id: str = Field(min_length=1, max_length=128)
+    event: ProtocolEvent
+
+
+class DeliveryBatch(BaseModel):
+    records: list[DeliveryRecord] = Field(min_length=1, max_length=32)
+
+
+@router.post("/events/batch", status_code=204)
+async def ingest_batch(request: Request, batch: DeliveryBatch):
+    """Validate the entire batch before committing its ordered, idempotent prefix.
+
+    A failure after an append is ambiguous to the sender. Retrying the same IDs
+    uses the same event and notification dedupe authorities as /events.
+    """
+    for record in batch.records:
+        encoded = json.dumps(record.event.model_dump(exclude_unset=True), ensure_ascii=False).encode("utf-8")
+        if len(encoded) > request.app.state.config.max_event_bytes:
+            return _error(413, "event too large")
+        if not _delivery_id_pattern.fullmatch(record.delivery_id):
+            return _error(400, "invalid delivery id")
+        error = validate_event(record.event.model_dump(exclude_unset=True))
+        if error:
+            return _error(400, error)
+    for record in batch.records:
+        response = await _ingest_record(request, record.event, record.delivery_id, project=False)
+        if response.status_code != 204:
+            return response
+    # One projection per batch keeps server CPU work from multiplying the network
+    # budget. Concurrent snapshot readers may still observe a committed prefix.
+    await anyio.to_thread.run_sync(_runtime(request).state_coordinator.evaluate)
     return Response(status_code=204)
 
 

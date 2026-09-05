@@ -7,7 +7,7 @@
 #   docker exec steward-<id> steward-smoke
 #
 # Four checks, in the order they can fail:
-#   1. the claude CLI is installed and answers --version
+#   1. the Claude and Codex CLIs are installed and answer --version
 #   2. python3 and the vendored chronicle emitter are where settings.json says they are
 #   3. a direct POST to the village's /events comes back 204
 #   4. the emitter itself, fed a real hook payload on stdin, delivers the same way
@@ -49,7 +49,12 @@ failed=0
 say() { echo "smoke: $*"; }
 fail() { echo "smoke: FAIL $*"; failed=1; }
 
-# ---------------------------------------------------------------- 1. the brain is here
+# ---------------------------------------------------------------- 1. the brains are here
+if version=$(codex --version 2>&1); then
+    say "ok   codex $version"
+else
+    fail "codex CLI unavailable: $version"
+fi
 if version=$(claude --version 2>&1); then
     say "ok   claude $version"
 else

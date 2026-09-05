@@ -32,7 +32,7 @@ function eventSources() {
 describe("read-only Chronicle transport", () => {
   it("validates the complete versioned snapshot", () => {
     expect(validateSnapshot(fixture.snapshot)).toBeNull();
-    expect(validateSnapshot({ ...fixture.snapshot, schema_version: 2 })).toBe("unsupported snapshot schema");
+    expect(validateSnapshot({ ...fixture.snapshot, schema_version: 3 })).toBe("unsupported snapshot schema");
   });
 
   it("polls only the public state endpoint", async () => {

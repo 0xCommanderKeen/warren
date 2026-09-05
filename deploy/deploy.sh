@@ -4,7 +4,7 @@
 #
 #   deploy/deploy.sh chronicle            # one service
 #   deploy/deploy.sh arcadia townhall     # several, in the order given
-#   deploy/deploy.sh all                  # chronicle, arcadia, townhall, steward — in that
+#   deploy/deploy.sh all                  # arcadia, townhall, chronicle, steward — in that
 #                                         # order, because the clients validate chronicle's
 #                                         # contract and nginx's route table derives from
 #                                         # steward's (warren#242)
@@ -424,7 +424,7 @@ $SSH "$NAS" true 2>/dev/null || die "cannot ssh to $NAS non-interactively (key n
 
 for target in "$@"; do
     case "$target" in
-        all) deploy_chronicle; deploy_arcadia; deploy_townhall; deploy_steward ;;
+        all) deploy_arcadia; deploy_townhall; deploy_chronicle; deploy_steward ;;
         chronicle) deploy_chronicle ;;
         arcadia) deploy_arcadia ;;
         townhall) deploy_townhall ;;
