@@ -232,22 +232,21 @@ describe("the credential never leaves this origin", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("sends no Authorization header anywhere but this origin, on any route", async () => {
-    shipped();
-    const fetch = vi.fn().mockResolvedValue(answer(200, {}));
-    const hostile = ["https://evil.tld", "//evil.tld", "http://127.0.0.1:8801", "https://evil.tld:443/x"];
-
-    for (const baseUrl of hostile) {
+  it.each(["https://evil.tld", "//evil.tld", "http://127.0.0.1:8801", "https://evil.tld:443/x"])(
+    "rejects reads and writes to %s before fetch", async (baseUrl) => {
+      shipped();
+      const fetch = vi.fn().mockResolvedValue(answer(200, {}));
       const client = createStewardClient({ baseUrl, credential: held(), fetch });
-      await client.listResidents().catch(() => {});
-      await client.createSkill({ name: "x" }).catch(() => {});
-      await client.reload().catch(() => {});
-    }
-
-    expect(fetch).not.toHaveBeenCalled();
-    const headersSent = fetch.mock.calls.map(([, init]) => init?.headers?.Authorization);
-    expect(headersSent).not.toContain("Bearer s3cret");
-  });
+      for (const request of [
+        () => client.listResidents(),
+        () => client.createSkill({ name: "x" }),
+        () => client.reload(),
+      ]) {
+        await expect(request()).rejects.toMatchObject({ code: "cross_origin_base" });
+        expect(fetch).not.toHaveBeenCalled();
+      }
+    },
+  );
 
   it("still calls this origin, by empty base or by bare path", async () => {
     shipped();

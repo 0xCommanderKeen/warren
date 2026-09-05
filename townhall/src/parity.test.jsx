@@ -6,7 +6,7 @@
  * Each of those has a test here that fails if the bug is reintroduced.
  */
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NavigationProvider } from "./navigation.jsx";
 import { StewardProvider } from "./steward/context.jsx";
@@ -15,6 +15,12 @@ import ResidentsPage from "./pages/ResidentsPage.jsx";
 import RoutinesPage from "./pages/RoutinesPage.jsx";
 import ApprovalsPage from "./pages/ApprovalsPage.jsx";
 import BoardPage from "./pages/BoardPage.jsx";
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
 
 function memoryStorage() {
   const map = new Map();
@@ -372,6 +378,33 @@ describe("running a routine now", () => {
     vi.useRealTimers();
   });
 
+  it("keeps a run unconfirmed while its request read is unresolved", async () => {
+    vi.useFakeTimers();
+    const read = deferred();
+    const log = vi.fn(() => read.promise);
+    mount(<RoutinesPage />, {
+      fetch: router({
+        "/routines": json(200, ROUTINES),
+        "POST /residents/hob/routines/daily-summary/run": accepted,
+        "/requests/req-1": log,
+      }),
+    });
+
+    await vi.waitFor(() => expect(screen.getByRole("button", { name: /run now/i })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: /run now/i }));
+    await vi.waitFor(() => expect(screen.getByText("accepted")).toBeTruthy());
+
+    await vi.waitFor(() => expect(log).toHaveBeenCalled());
+    await act(() => vi.advanceTimersByTimeAsync(6000));
+    expect(screen.getByText("accepted")).toBeTruthy();
+    expect(screen.queryByText("confirmed")).toBeNull();
+    await act(async () => read.resolve(json(200, { request_id: "req-1", outcome: "ran", detail: { run_id: "run-9" } })));
+    await vi.waitFor(() => expect(screen.getByText("confirmed")).toBeTruthy());
+
+    expect(screen.getByText(/steward's log: ran \(run run-9\)/)).toBeTruthy();
+    vi.useRealTimers();
+  });
+
   it("stops polling the moment a ticket is dismissed (#153)", async () => {
     vi.useFakeTimers();
     const log = vi.fn().mockResolvedValue(json(200, { request_id: "req-1", outcome: "queued" }));
@@ -582,6 +615,38 @@ describe("deciding an approval", () => {
     vi.useRealTimers();
   });
 
+  it("keeps a decision unconfirmed while its request read is unresolved", async () => {
+    vi.useFakeTimers();
+    const read = deferred();
+    const log = vi.fn(() => read.promise);
+    mount(<ApprovalsPage />, {
+      fetch: router({
+        ...approvalStubs(),
+        "POST /approvals/ap-1": json(202, {
+          request_id: "req-9",
+          status: "recorded_announcement_pending",
+          message: "recorded; announcement pending",
+        }),
+        "/requests/req-9": log,
+      }),
+    });
+
+    await vi.waitFor(() => expect(screen.getByRole("button", { name: /approve/i })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: /approve/i }));
+    await vi.waitFor(() => expect(screen.getByText("accepted")).toBeTruthy());
+    expect(screen.getByRole("button", { name: /approve/i }).disabled).toBe(true);
+    expect(screen.getByRole("button", { name: /^deny$/i }).disabled).toBe(true);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(screen.queryByText("confirmed")).toBeNull();
+
+    expect(log).toHaveBeenCalled();
+    expect(screen.getByText("accepted")).toBeTruthy();
+    await act(async () => read.resolve(json(200, { request_id: "req-9", outcome: "recorded" })));
+    await vi.advanceTimersByTimeAsync(3000);
+    await vi.waitFor(() => expect(screen.getByText("confirmed")).toBeTruthy());
+    vi.useRealTimers();
+  });
+
   it("names the operator who decided, in the audit row", async () => {
     mount(<ApprovalsPage />, {
       fetch: router(
@@ -701,6 +766,40 @@ describe("posting a job", () => {
     vi.useRealTimers();
   });
 
+  it("keeps a post unconfirmed while its board read is unresolved", async () => {
+    vi.useFakeTimers();
+    const read = deferred();
+    const board = vi.fn().mockResolvedValueOnce(json(200, { jobs: [] })).mockImplementation(() => read.promise);
+    mount(<BoardPage />, {
+      fetch: router({
+        "/jobs": (url, init) =>
+          init?.method === "POST"
+            ? json(202, { request_id: "req-3", task_id: "task-5", message: "queued on the board" })
+            : board(),
+        "/skills": json(200, { skills: [], errors: [] }),
+        "/residents": json(200, { residents: [], errors: [] }),
+      }),
+    });
+
+    await vi.waitFor(() => expect(screen.getByPlaceholderText("Research X")).toBeTruthy());
+    fireEvent.change(screen.getByPlaceholderText("Research X"), { target: { value: "Fix it" } });
+    fireEvent.click(screen.getByRole("button", { name: /post to the board/i }));
+    await vi.waitFor(() => expect(screen.getByText("accepted")).toBeTruthy());
+
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(screen.queryByText("confirmed")).toBeNull();
+
+    expect(board).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("accepted")).toBeTruthy();
+    await act(async () => read.resolve(json(200, { jobs: [{ task_id: "task-5", title: "Fix it", status: "open", posted_by: "Miha" }] })));
+    await vi.advanceTimersByTimeAsync(3000);
+    await vi.waitFor(() => expect(screen.getByText("confirmed")).toBeTruthy());
+
+    // And the truth about dispatch, which is the thing operators get wrong.
+    expect(screen.getByText(/No resident has been prompted/)).toBeTruthy();
+    vi.useRealTimers();
+  });
+
   it("sends the required skills a claimant must hold", async () => {
     const fetch = router(boardStubs());
     mount(<BoardPage />, { fetch });
@@ -757,7 +856,10 @@ describe("declaring a resident", () => {
     expect(fetch.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
   });
 
-  it("shows the commit steward made, the way the editors do", async () => {
+  it("shows the commit receipt but confirms only after reading the declared resident back", async () => {
+    vi.useFakeTimers();
+    const read = deferred();
+    const listing = vi.fn(() => read.promise);
     // #235 made this endpoint commit; the receipt has to say so or the operator is left
     // wondering whether they still have to.
     const fetch = router({
@@ -777,16 +879,22 @@ describe("declaring a resident", () => {
           note: "committed as 9f1c0a7",
         },
       }),
-      "/residents": json(200, { residents: [], errors: [] }),
+      "/residents": listing,
     });
     mount(<ResidentsPage page="residentNew" params={{}} />, { fetch });
 
-    await screen.findByPlaceholderText("note-keeper");
+    await vi.waitFor(() => expect(screen.getByPlaceholderText("note-keeper")).toBeTruthy());
     fill();
     fireEvent.click(screen.getByRole("button", { name: /declare resident/i }));
 
-    expect(await screen.findByText("9f1c0a77bb")).toBeTruthy();
+    await vi.waitFor(() => expect(screen.getByText("9f1c0a77bb")).toBeTruthy());
     expect(screen.getByText(/feat\(residents\): declare quill via the API/)).toBeTruthy();
+    await vi.waitFor(() => expect(listing).toHaveBeenCalled());
+    await act(() => vi.advanceTimersByTimeAsync(6000));
+    expect(within(screen.getByLabelText("Pending actions")).getByText("accepted")).toBeTruthy();
+    expect(screen.queryByText("confirmed")).toBeNull();
+    await act(async () => read.resolve(json(200, { residents: [{ id: "quill" }], errors: [] })));
+    await vi.waitFor(() => expect(screen.getByText("confirmed")).toBeTruthy());
   });
 
   it("sends deploy as a boolean and never grants a library default", async () => {
