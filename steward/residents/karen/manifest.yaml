@@ -72,9 +72,14 @@ app_grants: []
 tools: unrestricted
 workspace: []
 runner:
-  kind: claude
+  kind: codex
   placement: container
-  model: claude-opus-5
+  model: gpt-6-astra
+  codex_pricing:
+    model: gpt-6-astra
+    input_usd_per_million: 10
+    cached_input_usd_per_million: 1
+    output_usd_per_million: 50
 routines: []
 board:
   claim: false
