@@ -6,6 +6,7 @@ itself.
 """
 
 import copy
+import fcntl
 import os
 import re
 import stat
@@ -1194,8 +1195,53 @@ def test_success_preserves_same_target_staging(fleet: ScratchRepo, stage_timing:
     )
 
 
+@pytest.fixture
+def contended_authoring_lock(monkeypatch: pytest.MonkeyPatch) -> threading.Event:
+    """Report a real failed flock acquisition, then let the writer wait on that lock."""
+    contended = threading.Event()
+    flock = fcntl.flock
+
+    def observed_flock(fd: int, operation: int) -> None:
+        if operation == fcntl.LOCK_EX:
+            try:
+                flock(fd, operation | fcntl.LOCK_NB)
+            except BlockingIOError:
+                contended.set()
+            else:
+                return
+        flock(fd, operation)
+
+    monkeypatch.setattr(au.fcntl, "flock", observed_flock)
+    return contended
+
+
+def race_writers(
+    first: threading.Thread,
+    second: threading.Thread,
+    entered_commit: threading.Event,
+    release_commit: threading.Event,
+    contended: threading.Event,
+) -> None:
+    """Keep the first commit held until the other writer has contested its lock."""
+    first.start()
+    try:
+        assert entered_commit.wait(timeout=5), "first writer never entered commit"
+        second.start()
+        assert contended.wait(timeout=5), "second writer never contested the authoring lock"
+    finally:
+        release_commit.set()
+        first.join(timeout=10)
+        if second.ident is not None:
+            second.join(timeout=10)
+        assert not first.is_alive()
+        assert not second.is_alive()
+
+
+@pytest.mark.parametrize("worker_delay", [0, 0.3])
 def test_concurrent_declaration_writers_serialize_revision_through_commit(
     fleet: ScratchRepo,
+    contended_authoring_lock: threading.Event,
+    worker_delay: float,
 ) -> None:
     """Only one request made against one revision may write and commit its bytes."""
     paths = au.declaration_paths(fleet.residents, "test-agent", "soul.md")
@@ -1206,13 +1252,15 @@ def test_concurrent_declaration_writers_serialize_revision_through_commit(
     def slow_first_git(argv: list[str]) -> CommandOutcome:
         if threading.current_thread().name == "first" and "commit-tree" in argv:
             entered_commit.set()
-            assert release_commit.wait(timeout=5)
+            assert release_commit.wait(timeout=15)
         return au.run_argv(argv)
 
     outcomes: dict[str, object] = {}
 
     def writer(name: str, summary: str, git=au.run_argv) -> None:  # type: ignore[no-untyped-def]
         try:
+            if name == "second":
+                time.sleep(worker_delay)  # deliberately exceed the former 0.2s assumption
             outcomes[name] = au.write_declaration(
                 fleet.residents,
                 "test-agent",
@@ -1227,19 +1275,13 @@ def test_concurrent_declaration_writers_serialize_revision_through_commit(
             outcomes[name] = exc
 
     first = threading.Thread(
-        target=writer, args=("first", "First bytes.", slow_first_git), name="first"
+        target=writer, args=("first", "First bytes.", slow_first_git), name="first", daemon=True
     )
-    second = threading.Thread(target=writer, args=("second", "Second bytes."), name="second")
-    first.start()
-    assert entered_commit.wait(timeout=5)
-    second.start()
-    time.sleep(0.2)
-    release_commit.set()
-    first.join(timeout=5)
-    second.join(timeout=5)
+    second = threading.Thread(
+        target=writer, args=("second", "Second bytes."), name="second", daemon=True
+    )
+    race_writers(first, second, entered_commit, release_commit, contended_authoring_lock)
 
-    assert not first.is_alive()
-    assert not second.is_alive()
     assert isinstance(outcomes["first"], au.WriteResult)
     assert isinstance(outcomes["second"], au.AuthoringError)
     assert outcomes["second"].reason == "stale_revision"  # type: ignore[union-attr]
@@ -1247,7 +1289,12 @@ def test_concurrent_declaration_writers_serialize_revision_through_commit(
     assert "req-first" in fleet.git("log", "-1", "--format=%b").stdout
 
 
-def test_concurrent_skill_writers_serialize_revision_through_commit(fleet: ScratchRepo) -> None:
+@pytest.mark.parametrize("worker_delay", [0, 0.3])
+def test_concurrent_skill_writers_serialize_revision_through_commit(
+    fleet: ScratchRepo,
+    contended_authoring_lock: threading.Event,
+    worker_delay: float,
+) -> None:
     """Skill replacement has the same one-revision/one-commit boundary as declarations."""
     path = fleet.skills / "daily-summary" / "SKILL.md"
     revision = au.revision_of(path)
@@ -1257,13 +1304,15 @@ def test_concurrent_skill_writers_serialize_revision_through_commit(fleet: Scrat
     def slow_first_git(argv: list[str]) -> CommandOutcome:
         if threading.current_thread().name == "first-skill" and "commit-tree" in argv:
             entered_commit.set()
-            assert release_commit.wait(timeout=5)
+            assert release_commit.wait(timeout=15)
         return au.run_argv(argv)
 
     outcomes: dict[str, object] = {}
 
     def writer(name: str, description: str, git=au.run_argv) -> None:  # type: ignore[no-untyped-def]
         try:
+            if name == "second":
+                time.sleep(worker_delay)  # deliberately exceed the former 0.2s assumption
             outcomes[name] = au.write_skill(
                 fleet.residents,
                 fleet.skills,
@@ -1278,16 +1327,13 @@ def test_concurrent_skill_writers_serialize_revision_through_commit(fleet: Scrat
             outcomes[name] = exc
 
     first = threading.Thread(
-        target=writer, args=("first", "First skill bytes.", slow_first_git), name="first-skill"
+        target=writer,
+        args=("first", "First skill bytes.", slow_first_git),
+        name="first-skill",
+        daemon=True,
     )
-    second = threading.Thread(target=writer, args=("second", "Second skill bytes."))
-    first.start()
-    assert entered_commit.wait(timeout=5)
-    second.start()
-    time.sleep(0.2)
-    release_commit.set()
-    first.join(timeout=5)
-    second.join(timeout=5)
+    second = threading.Thread(target=writer, args=("second", "Second skill bytes."), daemon=True)
+    race_writers(first, second, entered_commit, release_commit, contended_authoring_lock)
 
     assert isinstance(outcomes["first"], au.WriteResult)
     assert isinstance(outcomes["second"], au.AuthoringError)
