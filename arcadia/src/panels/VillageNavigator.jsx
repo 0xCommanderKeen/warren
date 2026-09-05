@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import "./village-navigator.css";
 
 export function VillageNavigator({
+  active = true,
   world,
   selection,
   onSelect,
@@ -21,6 +22,7 @@ export function VillageNavigator({
     building: world.buildings.find((building) => building.kind === item.kind),
   }));
   useEffect(() => {
+    if (!active) return;
     function keydown(event) {
       const target = event.target;
       if (
@@ -54,7 +56,7 @@ export function VillageNavigator({
     }
     window.addEventListener("keydown", keydown);
     return () => window.removeEventListener("keydown", keydown);
-  }, [world, onSelect, onOverview]);
+  }, [active, world, onSelect, onOverview]);
   const showMap = visible ?? (Boolean(roomId) || camera?.zoom > 1.4);
   const { minX, maxX, minZ, maxZ } = world.bounds;
   const selectedAgent =

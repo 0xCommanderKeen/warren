@@ -344,7 +344,7 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
   function animate() {
     if (disposed) return;
     frame = requestAnimationFrame(animate);
-    if (document.hidden) return;
+    if (document.hidden || !host.clientWidth || !host.clientHeight) return;
     try {
       controls.update();
       if (!needsRender) return;
@@ -369,6 +369,7 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
       renderer.render(scene, camera);
       canvas.dataset.visibleDecorations = String(root.children.filter(mesh => mesh.userData.detailOnly && mesh.visible).reduce((total, mesh) => total + (mesh.count || 1), 0));
       canvas.dataset.drawCalls = String(renderer.info.render.calls);
+      canvas.dataset.camera = JSON.stringify({ zoom: camera.zoom, position: camera.position.toArray(), target: controls.target.toArray() });
       needsRender = false;
     } catch (error) { cancelAnimationFrame(frame); onError?.(error); }
   }
