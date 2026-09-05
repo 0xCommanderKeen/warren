@@ -110,7 +110,11 @@ result = subprocess.run(
     argv, cwd="/memory", capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL
 )
 assert result.returncode == 0, result.stdout + result.stderr
-assert Path("/memory/probe").exists(), result.stdout + result.stderr
+tool_outputs = [
+    item for body in requests for item in body.get("input", [])
+    if item.get("type") == "function_call_output"
+]
+assert Path("/memory/probe").exists(), result.stdout + result.stderr + json.dumps(tool_outputs)
 assert Path("/memory/probe").read_text() == "persisted"
 assert api_calls == [("/skills", "Bearer probe-session-only")]
 assert len(requests) == 2
