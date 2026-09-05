@@ -29,10 +29,10 @@ function acceptsNull(schema) {
 }
 
 describe("parseSnapshot", () => {
-  it("accepts Chronicle's complete version 1 fixture", () => {
+  it("accepts Chronicle's complete version 2 fixture", () => {
     const snapshot = parseSnapshot(fixture);
 
-    expect(snapshot.schema_version).toBe(1);
+    expect(snapshot.schema_version).toBe(2);
     expect(snapshot.villagers).toEqual([
       expect.objectContaining({ id: "claude:keeper", name: "Keeper" }),
     ]);

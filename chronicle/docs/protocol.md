@@ -4,7 +4,11 @@ Agents (or adapters wrapping them) append one JSON object per line to the event
 log. This v0 event protocol is the ingestion and audit contract only. Python
 validates and projects that evidence; the production browser never consumes it.
 
-## Projected-state delivery — v1
+Managed hook delivery, installation, limits, session ordering and uncertainty thresholds
+are specified in [Independent emitter delivery](delivery-worker.md). The synchronous
+transport below remains the compatibility path for hosts without an installed worker.
+
+## Projected-state delivery — v2
 
 `GET /state` returns an envelope containing one complete, bounded Village State.
 The snapshot carries `schema_version`, `generation`, `cursor`, `evaluated_at`,

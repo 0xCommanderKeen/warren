@@ -619,6 +619,7 @@ class ASGITransportContractTests(unittest.TestCase):
                 "diagnostics",
                 "capacity",
                 "capabilities",
+                "producer_health",
             },
             set(state_schema["properties"]),
         )

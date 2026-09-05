@@ -541,12 +541,12 @@ describe("createStateTransport", () => {
     await transport.start();
     const stream = FakeEventSource.instances[0];
     stream.emit("snapshot", envelope(1, "cursor:1"));
-    stream.emit("snapshot", envelope(2, "cursor:2", { schema_version: 2 }));
+    stream.emit("snapshot", envelope(2, "cursor:2", { schema_version: 3 }));
 
     expect(onEnvelope).toHaveBeenCalledTimes(1);
-    expect(transport.snapshot()).toMatchObject({ generation: 1, schema_version: 1 });
+    expect(transport.snapshot()).toMatchObject({ generation: 1, schema_version: 2 });
     expect(onError).toHaveBeenCalledWith(
-      expect.objectContaining({ message: "Unsupported village schema version: 2" }),
+      expect.objectContaining({ message: "Unsupported village schema version: 3" }),
     );
   });
 

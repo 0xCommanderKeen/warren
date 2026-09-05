@@ -1295,8 +1295,21 @@ class CodexRunner(_ProcessRunner):
     env_names: ClassVar[tuple[str, ...]] = CODEX_ENV_NAMES
 
     def argv(self, request: RunRequest) -> list[str]:
-        """Build the codex headless argv."""
-        argv = [self.binary, "exec", "--json"]
+        """Run unattended in memory, with API access and no saved approval-rule widening."""
+        argv = [
+            self.binary,
+            "exec",
+            "--json",
+            "--skip-git-repo-check",
+            "--ignore-user-config",
+            "--ignore-rules",
+            "--sandbox",
+            "workspace-write",
+            "--config",
+            'approval_policy="never"',
+            "--config",
+            "sandbox_workspace_write.network_access=true",
+        ]
         model = request.model or self.spec.model
         if model:
             argv += ["--model", model]
@@ -1572,8 +1585,8 @@ def check_runner(spec: RunnerSpec, placement: Placement | None = None) -> str | 
         return str(exc)
 
 
-def _cli_help(binary: str, placement: Placement) -> str | None:
-    """Return ``<binary> --help``, or ``None`` when the binary would not answer.
+def _cli_help(binary: str, placement: Placement, subcommand: tuple[str, ...] = ()) -> str | None:
+    """Return the CLI or subcommand help, or ``None`` when the binary would not answer.
 
     Asked *where the sessions run*: on this host's PATH for a local placement, and inside
     the container for a container one — which is the whole point of the probe, since the
@@ -1586,9 +1599,9 @@ def _cli_help(binary: str, placement: Placement) -> str | None:
     PATH lookup is a stale answer waiting to be given to somebody who just upgraded.
     """
     argv = (
-        ["docker", "exec", placement.container_name, binary, "--help"]
+        ["docker", "exec", placement.container_name, binary, *subcommand, "--help"]
         if placement.is_container
-        else [binary, "--help"]
+        else [binary, *subcommand, "--help"]
     )
     outcome = run_argv(argv)
     if not outcome.ok:
@@ -1604,8 +1617,8 @@ def required_flags(
 ) -> tuple[str, ...]:
     """Return the CLI flags a session for this manifest is launched with, in argv order.
 
-    Empty for a kind that compiles none — which, for both declarations, is a kind
-    validation refuses to pair with the declaration in the first place.
+    Empty for mock and command runners. Codex always carries its unattended policy;
+    the probe asks its exec subcommand for those flags.
 
     Never empty for ``claude``, though nothing may be declared at all:
     :data:`SETTING_SOURCES` is on every claude argv rather than compiled from a
@@ -1617,6 +1630,15 @@ def required_flags(
     that asked for it unconditionally would fail a perfectly good local host that names no
     emitter and therefore never sends the flag.
     """
+    if spec.kind == CodexRunner.kind:
+        return (
+            "--json",
+            "--skip-git-repo-check",
+            "--ignore-user-config",
+            "--ignore-rules",
+            "--sandbox",
+            "--config",
+        )
     if spec.kind != ClaudeRunner.kind:
         return ()
     setting_sources_flag, _value = SETTING_SOURCES
@@ -1787,8 +1809,12 @@ def check_cli_support(
     needed = required_flags(spec, tools, workspace, resolved)
     if not needed:
         return None
-    binary = ClaudeRunner.binary
-    help_text = _cli_help(binary, resolved)
+    binary = CodexRunner.binary if spec.kind == CodexRunner.kind else ClaudeRunner.binary
+    help_text = (
+        _cli_help(binary, resolved, ("exec",))
+        if spec.kind == CodexRunner.kind
+        else _cli_help(binary, resolved)
+    )
     if help_text is None:
         where = f" inside {resolved.describe()}" if resolved.is_container else ""
         return (

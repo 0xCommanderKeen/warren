@@ -75,6 +75,8 @@ def _check_workspace_is_reachable(manifest: ResidentManifest, source: Path) -> l
 def _check_mount_collisions(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
     """Refuse extra mounts that mask Steward-managed container directories."""
     managed = (manifest.memory.path, "/root/.claude")
+    if manifest.runner.kind == "codex":
+        managed += ("/root/.codex",)
     diagnostics = []
     for index, mount in enumerate(manifest.deploy.mounts):
         collides = any(
@@ -88,7 +90,7 @@ def _check_mount_collisions(manifest: ResidentManifest, source: Path) -> list[Di
                     field_path=f"deploy.mounts[{index}].container",
                     problem=(
                         f"container path {mount.container!r} collides with a Steward-managed "
-                        "memory or Claude configuration mount"
+                        "memory or runner configuration mount"
                     ),
                     example="choose a separate container path such as /vault",
                 )

@@ -16,7 +16,7 @@ from mood_policy import MOOD_FAILURE_TYPES, MOOD_TERMINAL_TYPES, MOOD_WORK_WEIGH
 from protocol import validate_event
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 #: Events filed under a villager that are somebody *else's* action, recorded against the
 #: door they knocked on. They ride along in that villager's history and are never
 #: evidence it is alive, present, or doing anything: they cannot create a villager, keep
@@ -804,7 +804,7 @@ def project_village(
                 "home": None,
                 "base": "lodge",
                 "resident_file": None,
-                "state": state,
+                "state": "stale" if last.get("telemetry_managed") else state,
                 "project": last["project"],
                 "cwd": last.get("cwd", ""),
                 "last_ts": last["ts"],

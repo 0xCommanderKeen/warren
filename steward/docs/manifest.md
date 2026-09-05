@@ -681,7 +681,7 @@ that must commit and push — Hob and its vault — has today no narrower mode t
 | kind | what it runs |
 |---|---|
 | `claude` | `claude -p <prompt> --output-format json --setting-sources "" [--settings <json>] --model <model>`, in the session's working directory. The JSON result carries usage and cost, so a claude run feeds the budget ledger for free; [`--setting-sources ""`](#what-a-session-loads-from-disk-nothing) is on every session and [`--settings`](#what-steward-declares-instead-six-hooks-and-nothing-else) on every session that has an emitter to name — both come from no declaration. |
-| `codex` | `codex exec --json [--model <model>] <prompt>`. Extracts the reply and token usage; explicit `codex_pricing` enables estimated dollar accounting. |
+| `codex` | `codex exec --json … [--model <model>] <prompt>` with the unattended policy below. Extracts the reply and token usage; explicit `codex_pricing` enables estimated dollar accounting. |
 | `command` | The argv template below, for anything else. |
 | `mock` | Deterministic, offline, no subprocess. Used by tests and `--dry-run`. |
 
@@ -1158,6 +1158,75 @@ input, cached-input and output tokens through `codex exec --json`; its dollar am
 an **API-equivalent estimate**, calculated only when the declaration supplies a rate card.
 The ledger retains the counts and rates in `cost_estimate`; aggregate views carry
 `estimated_cost_runs`, and the CLI and Townhall label totals that include estimates.
+
+### Codex resident runtime
+
+The resident image includes Codex CLI **0.153.4**, pinned in the Dockerfile and Makefile.
+Rebuild and ship the image before provisioning a Codex resident; `steward doctor` checks
+`codex exec --help` inside its declared placement for the flags the runner needs.
+
+Codex sessions start in the resident's memory directory, which need not be a Git repository.
+Steward passes `--skip-git-repo-check`, `--sandbox workspace-write`,
+`--config approval_policy="never"`, and
+`--config sandbox_workspace_write.network_access=true`. Shell tools can write memory and
+scratch files and call the API; writes outside the sandbox are refused without waiting for
+a person. This does not implement a Codex tool allowlist or additional workspace grants.
+`--ignore-user-config` and `--ignore-rules` keep persisted user settings and saved approval
+rules from changing the unattended policy. Authentication still uses Codex's credential store.
+
+The container must permit Codex's nested user/PID/mount namespaces. Docker's default
+seccomp and AppArmor profiles block these on Linux, including dxp2800. Codex compose
+plans therefore declare `no-new-privileges=true`, `apparmor=unconfined`, and
+`seccomp=./codex-seccomp.json`. The bundled seccomp profile is Docker's upstream default
+at commit `61eaf32614c7c71b60bd8927d3e6a4ffc8ff1f31`, with only `clone`, `unshare`,
+`setns`, `mount`, `umount2`, and `pivot_root` allowed additionally. Docker capabilities
+are not expanded and the container is not privileged. Codex still enforces its workspace
+filesystem boundary. This trades Docker's outer AppArmor confinement for the nested
+sandbox; review these explicit settings in the provision plan. No host sysctl or global
+security policy is changed. Existing containers must be reprovisioned to receive them.
+The profile's source and Apache-2.0 license are retained under `src/steward/templates/`.
+The host must also permit unprivileged user namespaces and UID mapping. Hardened hosts
+(such as Ubuntu 24.04 with AppArmor user-namespace restrictions) can still reject this
+configuration; Steward does not relax host policy automatically. The image CI job uses
+Ubuntu 22.04, and the full probe was also verified on dxp2800. See
+[Ubuntu's namespace restrictions](https://documentation.ubuntu.com/security/security-features/privilege-restriction/apparmor/).
+
+A Codex container gets its own `./codex:/root/.codex` bind mount and
+`CODEX_HOME=/root/.codex`. The provisioning plan lists `codex/.keep` and `codex-seccomp.json`; the entrypoint makes
+the directory private (0700) and preserves its contents. Reprovisioning and image upgrades
+retain login credentials. The bundle never contains credentials or a generated user config.
+Extra mounts cannot mask this managed directory.
+
+After reviewing the actual provision plan and creating the container, first check the
+sandbox on that host without starting a model session (Docker uses the configured memory
+working directory):
+
+```sh
+docker exec steward-karen codex sandbox -c 'sandbox_mode="workspace-write"' -c sandbox_workspace_write.network_access=true -- true
+```
+
+Resolve any namespace or UID-mapping refusal before login and the paid session. An operator
+can then log in:
+
+```sh
+docker exec -it steward-karen codex login --device-auth
+docker exec steward-karen codex login status
+```
+
+Complete the browser/device authorization yourself. Login is per resident; it is not copied
+from a laptop or another resident. `steward-smoke` checks both CLI versions and Chronicle
+connectivity; it does not prove Codex authentication or run a model. Follow login with a
+small Steward session that reads `/skills`, then inspect its result and usage receipt.
+Choose the model and its rate card explicitly before using a daily dollar cap.
+
+The image CI job runs the actual Codex executable against a local synthetic Responses
+server, with external networking disabled. It exercises non-Git startup, a shell write,
+the session-scoped API credential, refusal of writes outside memory, and parsing the final
+JSONL usage receipt. Run it locally after `make image` with:
+
+```sh
+CODEX_RUNTIME_IMAGE=steward-resident:latest uv run pytest tests/test_codex_runtime.py --no-cov
+```
 
 ### Codex cost accounting
 
