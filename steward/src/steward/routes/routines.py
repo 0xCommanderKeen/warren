@@ -8,6 +8,7 @@ from fastapi import APIRouter, Request
 from steward.budgets import PAUSED_ERROR
 from steward.manifest import Resident, retired_complaint, validate_path
 from steward.routes.deps import Deps, _refuse
+from steward.routes.responses import RefusalResponse, RoutineListResponse, RoutineRunReceipt
 from steward.runs import AlreadyRunningError
 from steward.scheduler import (
     TRIGGER_MANUAL,
@@ -43,9 +44,9 @@ def _refuse_if_retired(resident: Resident) -> None:
 
 def router(deps: Deps) -> APIRouter:
     """Build the routines router over one application collaborator graph."""
-    routes = APIRouter()
+    routes = APIRouter(responses={401: {"model": RefusalResponse}})
 
-    @routes.get("/routines")
+    @routes.get("/routines", response_model=RoutineListResponse)
     def list_routines() -> dict[str, Any]:
         """Every routine of every valid resident: the fleet-wide standing-work ledger.
 
@@ -128,7 +129,16 @@ def router(deps: Deps) -> APIRouter:
             "errors": [diagnostic.render() for diagnostic in result.errors],
         }
 
-    @routes.post("/residents/{resident_id}/routines/{routine_id}/run", status_code=202)
+    @routes.post(
+        "/residents/{resident_id}/routines/{routine_id}/run",
+        status_code=202,
+        response_model=RoutineRunReceipt,
+        responses={
+            403: {"model": RefusalResponse},
+            404: {"model": RefusalResponse},
+            409: {"model": RefusalResponse},
+        },
+    )
     def run_routine(resident_id: str, routine_id: str, request: Request) -> dict[str, Any]:
         """Ask for one run of one routine, right now, and acknowledge only that."""
         result = validate_path(deps.residents_dir, deps.settings.skills_dir)

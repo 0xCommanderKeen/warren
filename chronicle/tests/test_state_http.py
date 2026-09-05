@@ -1,3 +1,5 @@
+from pathlib import Path
+from config import Config
 import concurrent.futures
 import datetime as dt
 import http.client
@@ -20,14 +22,6 @@ class StateHTTPTests(unittest.TestCase):
         self.events = os.path.join(self.tmp.name, "events.jsonl")
         self.villagers = os.path.join(self.tmp.name, "villagers")
         os.mkdir(self.villagers)
-        self.patchers = [
-            mock.patch.object(serve, "EVENTS", self.events),
-            mock.patch.object(serve, "VILLAGERS_DIR", self.villagers),
-            mock.patch.object(serve, "MAX_LOG_BYTES", 0),
-        ]
-        for patcher in self.patchers:
-            patcher.start()
-            self.addCleanup(patcher.stop)
         initial_event = event("tool_called", tool="Read")
         initial_event["ts"] = (
             dt.datetime.now(dt.UTC)
@@ -36,7 +30,15 @@ class StateHTTPTests(unittest.TestCase):
         )
         with open(self.events, "w", encoding="utf-8") as stream:
             stream.write(json.dumps(initial_event) + "\n")
-        self.running = RunningServer(serve)
+        self.running = RunningServer(
+            serve.create_app(
+                Config(
+                    events=Path(self.events),
+                    villagers_dir=Path(self.villagers),
+                    max_log_bytes=0,
+                )
+            )
+        )
         self.addCleanup(self.running.stop)
 
     def request(self, path):

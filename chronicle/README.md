@@ -468,6 +468,13 @@ with status labels. The convention, for humans and agents alike:
 
 Remove the status label when the issue closes.
 
+Application tests construct `create_app(Config(...))`; direct storage and projection
+checks construct `Runtime(Config(...))`. Each runtime owns its event log, notification
+store, counters, workers and configured resident reader. The `serve:app` entry point
+uses that same factory with `Config.from_env(os.environ)`; the CLI passes its explicitly
+parsed configuration to it. Settings are immutable values, so tests supply paths and
+limits when constructing a fixture rather than changing server module globals.
+
 Tests are plain scripts throughout the repository. For example, the root-level
 server test can be run directly with `uv run --frozen python test_serve.py`.
 

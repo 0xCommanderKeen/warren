@@ -1,3 +1,5 @@
+from pathlib import Path
+from config import Config
 import copy
 import json
 import http.client
@@ -136,13 +138,11 @@ class JournalObservationTest(unittest.TestCase):
 class JournalIngestTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.previous = serve.EVENTS
-        serve.EVENTS = os.path.join(self.tmp.name, "events.jsonl")
-        self.running = RunningServer(serve)
+        self.events = os.path.join(self.tmp.name, "events.jsonl")
+        self.running = RunningServer(serve.create_app(Config(events=Path(self.events))))
 
     def tearDown(self):
         self.running.stop()
-        serve.EVENTS = self.previous
         self.tmp.cleanup()
 
     def post(self, event):
@@ -168,7 +168,7 @@ class JournalIngestTest(unittest.TestCase):
                 with self.subTest(case["name"]):
                     self.assertEqual(self.post(case["event"]), 400)
             notify.assert_not_called()
-        with open(serve.EVENTS, encoding="utf-8") as stream:
+        with open(self.events, encoding="utf-8") as stream:
             self.assertEqual([json.loads(line) for line in stream], [valid])
 
 

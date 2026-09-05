@@ -148,3 +148,8 @@ against Chronicle's own contract fixture, read in-tree at
 impossible by construction.
 
 The write paths are steward's documented API — see [`steward/docs/api.md`](../steward/docs/api.md).
+
+The routine rendering fixtures and run-now → request-ledger client round trip are checked
+against Steward's committed `docs/openapi.json`, including nullable fields and refusals.
+Untyped response endpoints remain in Steward's [migration inventory](../steward/docs/response-migration.md);
+passing an arbitrary object through an open schema is not counted as response coverage.

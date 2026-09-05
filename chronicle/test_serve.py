@@ -1,3 +1,5 @@
+import dataclasses
+from config import Config
 import collections
 import functools
 import glob
@@ -22,9 +24,9 @@ with mock.patch.object(sys, "argv", ["serve.py"]):
     import serve
 
 
-def _append_same_deliveries(events, delivery_ids, barrier):
-    serve.EVENTS = events
-    serve._store().reset_process_state()
+def _append_same_deliveries(config, delivery_ids, barrier):
+    runtime = serve.Runtime(config)
+    runtime.notification_store.reset_process_state()
     for delivery_id in delivery_ids:
         event = {
             "v": 0,
@@ -38,20 +40,20 @@ def _append_same_deliveries(events, delivery_ids, barrier):
             "delivery_id": delivery_id,
         }
         barrier.wait()
-        serve.append_event(event)
+        runtime.event_log.append(event)
 
 
-def _remember_ledger_keys(events, kind, keys, barrier):
-    serve.EVENTS = events
+def _remember_ledger_keys(config, kind, keys, barrier):
+    runtime = serve.Runtime(config)
     barrier.wait()
     for key in keys:
-        serve._store().remember(kind, key)
+        runtime.notification_store.remember(kind, key)
 
 
-def _remember_ledger_batch(events, keys, barrier):
-    serve.EVENTS = events
+def _remember_ledger_batch(config, keys, barrier):
+    runtime = serve.Runtime(config)
     barrier.wait()
-    serve._store().remember_batch("notified", keys)
+    runtime.notification_store.remember_batch("notified", keys)
 
 
 class NotificationTests(unittest.TestCase):
@@ -61,15 +63,10 @@ class NotificationTests(unittest.TestCase):
         self.events = os.path.join(self.tmp.name, "events.jsonl")
         self.villagers = os.path.join(self.tmp.name, "villagers")
         os.mkdir(self.villagers)
-        self.patches = [
-            mock.patch.object(serve, "EVENTS", self.events),
-            mock.patch.object(serve, "VILLAGERS_DIR", self.villagers),
-            mock.patch.object(serve, "NOTIFY_URL", "https://notify.invalid/topic"),
-        ]
-        for patcher in self.patches:
-            patcher.start()
-            self.addCleanup(patcher.stop)
-        self.runtime = serve.Runtime(serve._legacy_config())
+        self.runtime = serve.Runtime(Config(
+            events=pathlib.Path(self.events), villagers_dir=pathlib.Path(self.villagers),
+            notify_url="https://notify.invalid/topic",
+        ))
         self.addCleanup(serve.stop_knock_workers, self.runtime)
         for name in (
             "claim_knock",
@@ -404,8 +401,8 @@ class NotificationTests(unittest.TestCase):
             .sha256(v2.encode("utf-8", "surrogatepass"))
             .hexdigest()
         )
-        serve._store().remember(serve.LEDGER_NOTIFIED, legacy)
-        serve._store().remember(serve.LEDGER_NOTIFIED, v2)
+        self.runtime.notification_store.remember(serve.LEDGER_NOTIFIED, legacy)
+        self.runtime.notification_store.remember(serve.LEDGER_NOTIFIED, v2)
         self.assertEqual(knocks.terminal_keys(event), (knocks.terminal_key(event),))
         self.assertTrue(
             self.claim_knock(event),
@@ -415,7 +412,7 @@ class NotificationTests(unittest.TestCase):
     def test_plain_legacy_terminal_key_still_suppresses_exact_plain_replay(self):
         event = self.event(ts="2026-08-24T12:00:00.000Z")
         key = knocks.terminal_key(event)
-        serve._store().remember(serve.LEDGER_NOTIFIED, key)
+        self.runtime.notification_store.remember(serve.LEDGER_NOTIFIED, key)
         self.assertEqual(knocks.terminal_keys(event), (key,))
         self.assertFalse(self.claim_knock(event))
 
@@ -452,7 +449,7 @@ class NotificationTests(unittest.TestCase):
             self.assertTrue(self.deliver_knock(replay))
         self.runtime.notified.clear()
         self.runtime.notifying.clear()
-        serve._store().reset_process_state()
+        self.runtime.notification_store.reset_process_state()
         self.assertFalse(
             self.claim_knock(event), "durable exact replay stays claimed once"
         )
@@ -531,12 +528,12 @@ class NotificationTests(unittest.TestCase):
         self.write_events(first, second)
 
         self.assertEqual(
-            {"a": "Hazel", "q": "Juniper"}, serve.villager_names([first, second])
+            {"a": "Hazel", "q": "Juniper"}, serve.villager_names([first, second], villagers_dir=self.villagers)
         )
 
     def test_fallback_identity_hashes_non_bmp_agent_ids_as_utf8(self):
         event = self.event(agent_id="agent-U0001f407")
-        self.assertEqual("Thistle", serve.villager_names([event])["agent-U0001f407"])
+        self.assertEqual("Thistle", serve.villager_names([event], villagers_dir=self.villagers)["agent-U0001f407"])
 
     def test_exact_resident_is_not_reused_by_another_agent(self):
         self.write_resident(
@@ -548,7 +545,7 @@ class NotificationTests(unittest.TestCase):
         resident = self.event(agent_id="resident", ts="2026-08-24T12:00:01Z")
         self.write_events(ephemeral, resident)
 
-        names = serve.villager_names([ephemeral, resident])
+        names = serve.villager_names([ephemeral, resident], villagers_dir=self.villagers)
         self.assertNotEqual(PROJECT_AGENT["soul"]["name"], names["ephemeral"])
         self.assertEqual(PROJECT_AGENT["soul"]["name"], names["resident"])
 
@@ -556,7 +553,7 @@ class NotificationTests(unittest.TestCase):
         self.write_resident("resident.resident.json", {"agent_id": "shared"})
         self.write_soul("legacy.md", agent_id="shared", name="Legacy")
 
-        names = serve.villager_names([self.event(agent_id="shared")])
+        names = serve.villager_names([self.event(agent_id="shared")], villagers_dir=self.villagers)
 
         self.assertEqual("Resident", names["shared"])
 
@@ -564,7 +561,7 @@ class NotificationTests(unittest.TestCase):
         self.write_resident("resident.resident.json", {"project": "burrow"})
         self.write_soul("legacy.md", project="burrow", name="Legacy")
 
-        names = serve.villager_names([self.event(agent_id="visitor")])
+        names = serve.villager_names([self.event(agent_id="visitor")], villagers_dir=self.villagers)
 
         self.assertEqual("Resident", names["visitor"])
 
@@ -577,10 +574,10 @@ class NotificationTests(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as stream:
             json.dump(manifest, stream)
 
-        report = serve.read_residents()
+        report = serve.read_residents(self.villagers)
         self.assertEqual(report["residents"], [])
         self.assertEqual(len(report["diagnostic_residents"]), 1)
-        self.assertEqual(serve.read_villagers(), [])
+        self.assertEqual(serve.read_villagers(self.villagers), [])
         rendered = json.dumps(report)
         self.assertNotIn("do-not-leak-this-secret", rendered)
         self.assertNotIn('"password": "', rendered)
@@ -610,7 +607,7 @@ class NotificationTests(unittest.TestCase):
         child_knock = self.event(agent_id="a-child", project=project)
         self.write_events(child_start, child_tool, parent)
 
-        names = serve.villager_names([child_start, child_tool, parent, child_knock])
+        names = serve.villager_names([child_start, child_tool, parent, child_knock], villagers_dir=self.villagers)
         self.assertEqual(PROJECT_AGENT["soul"]["name"], names["z-parent"])
         self.assertNotEqual(PROJECT_AGENT["soul"]["name"], names["a-child"])
         self.assertEqual(names["a-child"], self.villager_name(child_knock))
@@ -697,7 +694,7 @@ class NotificationTests(unittest.TestCase):
             self.deliver_knock(event)
         self.runtime.notified.clear()
         self.runtime.notifying.clear()
-        serve._store().reset_process_state()
+        self.runtime.notification_store.reset_process_state()
         self.write_events()
         self.assertFalse(self.claim_knock(event))
 
@@ -835,10 +832,10 @@ class NotificationTests(unittest.TestCase):
             self._recover_knocks()
         generations = glob.glob(self.events + ".knocks.replay.*")
         self.assertEqual(len(generations), 1)
-        serve._store().remember("notified", knocks.terminal_key(delivered))
+        self.runtime.notification_store.remember("notified", knocks.terminal_key(delivered))
         self._recover_knocks()
         self.assertTrue(os.path.exists(generations[0]))
-        serve._store().remember("notify-dropped", knocks.terminal_key(dropped))
+        self.runtime.notification_store.remember("notify-dropped", knocks.terminal_key(dropped))
         self._recover_knocks()
         self.assertFalse(os.path.exists(generations[0]))
 
@@ -850,7 +847,7 @@ class NotificationTests(unittest.TestCase):
         with (
             mock.patch.object(serve, "ensure_knock_workers") as ensure,
             mock.patch.object(serve, "stop_knock_workers") as stop,
-            TestClient(serve.app),
+            TestClient(serve.create_app(self.runtime.config)),
         ):
             pass
         ensure.assert_called_once()
@@ -877,7 +874,7 @@ class NotificationTests(unittest.TestCase):
         status = self.transport_status()["notifications"]
         self.assertGreaterEqual(status["retried"], 2)
         self.assertGreaterEqual(status["dropped"], 1)
-        serve._store().reset_process_state()
+        self.runtime.notification_store.reset_process_state()
         self.assertFalse(self.claim_knock(event))
 
     def test_failed_attempts_survive_restart_and_reach_terminal_drop(self):
@@ -894,7 +891,7 @@ class NotificationTests(unittest.TestCase):
             self._process_knock(first_queue.get_nowait())
 
         self.runtime.notifying.clear()
-        serve._store().reset_process_state()
+        self.runtime.notification_store.reset_process_state()
         restarted = serve.queue.Queue(maxsize=4)
         with mock.patch.object(self.runtime, "knock_queue", restarted):
             self._recover_knocks()
@@ -906,7 +903,7 @@ class NotificationTests(unittest.TestCase):
             self._process_knock(restarted.get_nowait())
             self._process_knock(restarted.get_nowait())
 
-        serve._store().reset_process_state()
+        self.runtime.notification_store.reset_process_state()
         self.assertFalse(self.claim_knock(event))
         self.assertTrue(os.path.exists(self.events + ".notify-dropped"))
 
@@ -916,10 +913,10 @@ class TransportDiagnosticsTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.events = os.path.join(self.tmp.name, "events.jsonl")
-        self.patch = mock.patch.object(serve, "EVENTS", self.events)
-        self.patch.start()
-        self.addCleanup(self.patch.stop)
-        serve._store().reset_process_state()
+        self.reset_notification_runtime()
+
+    def reset_notification_runtime(self, **changes):
+        self.runtime = serve.Runtime(Config(events=pathlib.Path(self.events), **changes))
 
     @staticmethod
     def event(delivery_id):
@@ -937,31 +934,31 @@ class TransportDiagnosticsTests(unittest.TestCase):
 
     def test_retried_delivery_is_appended_exactly_once_within_dedupe_window(self):
         event = self.event("a" * 32)
-        self.assertTrue(serve.append_event(event))
-        self.assertFalse(serve.append_event(event))
+        self.assertTrue(self.runtime.event_log.append(event))
+        self.assertFalse(self.runtime.event_log.append(event))
         with open(self.events, encoding="utf-8") as stream:
             self.assertEqual(sum(1 for line in stream if line.strip()), 1)
-        self.assertGreaterEqual(serve._transport_counters["ingest_duplicates"], 1)
+        self.assertGreaterEqual(self.runtime.transport_counters["ingest_duplicates"], 1)
 
     def test_delivery_id_dedupe_survives_restart_and_live_log_retention(self):
         event = self.event("persistent-delivery-0001")
-        self.assertTrue(serve.append_event(event))
+        self.assertTrue(self.runtime.event_log.append(event))
         with open(self.events, "w", encoding="utf-8"):
             pass
-        serve._store().reset_process_state()
-        self.assertFalse(serve.append_event(event))
+        self.runtime.notification_store.reset_process_state()
+        self.assertFalse(self.runtime.event_log.append(event))
         with open(self.events, encoding="utf-8") as stream:
             self.assertEqual(stream.read(), "")
 
     def test_event_log_repairs_crash_between_event_fsync_and_delivery_ledger(self):
         event = self.event("crash-window-delivery-0001")
         with mock.patch.object(
-            serve._store(), "remember", side_effect=OSError("crash after event fsync")
+            self.runtime.notification_store, "remember", side_effect=OSError("crash after event fsync")
         ):
             with self.assertRaises(OSError):
-                serve.append_event(event)
-        serve._store().reset_process_state()
-        self.assertFalse(serve.append_event(event))
+                self.runtime.event_log.append(event)
+        self.runtime.notification_store.reset_process_state()
+        self.assertFalse(self.runtime.event_log.append(event))
         with open(self.events, encoding="utf-8") as stream:
             self.assertEqual(sum(1 for line in stream if line.strip()), 1)
 
@@ -972,7 +969,7 @@ class TransportDiagnosticsTests(unittest.TestCase):
         processes = [
             context.Process(
                 target=_append_same_deliveries,
-                args=(self.events, delivery_ids, barrier),
+                args=(self.runtime.config, delivery_ids, barrier),
             )
             for _ in range(2)
         ]
@@ -989,66 +986,55 @@ class TransportDiagnosticsTests(unittest.TestCase):
         self.assertEqual(counts, collections.Counter({key: 1 for key in delivery_ids}))
 
     def test_auxiliary_ledger_is_bounded_by_records_and_bytes_after_restart(self):
-        with (
-            mock.patch.object(serve, "LEDGER_RECORDS", 4),
-            mock.patch.object(serve, "LEDGER_BYTES", 24),
-        ):
-            for index in range(10):
-                serve._store().remember("delivery-ids", f"key-{index}")
-            serve._store().reset_process_state()
-            remembered = serve._store().load_ledger("delivery-ids")
+        self.reset_notification_runtime(ledger_records=4, ledger_bytes=24)
+        for index in range(10):
+            self.runtime.notification_store.remember("delivery-ids", f"key-{index}")
+        self.runtime.notification_store.reset_process_state()
+        remembered = self.runtime.notification_store.load_ledger("delivery-ids")
         self.assertEqual(remembered, {"key-6", "key-7", "key-8", "key-9"})
         self.assertLessEqual(os.path.getsize(self.events + ".delivery-ids"), 24)
 
     def test_existing_ledger_key_refreshes_newest_retention(self):
-        with (
-            mock.patch.object(serve, "LEDGER_RECORDS", 2),
-            mock.patch.object(serve, "LEDGER_BYTES", 4096),
-        ):
-            serve._store().remember_batch("notified", ("A", "B"))
-            serve._store().remember("notified", "A")
-            serve._store().remember("notified", "C")
+        self.reset_notification_runtime(ledger_records=2, ledger_bytes=4096)
+        self.runtime.notification_store.remember_batch("notified", ("A", "B"))
+        self.runtime.notification_store.remember("notified", "A")
+        self.runtime.notification_store.remember("notified", "C")
         with open(self.events + ".notified", encoding="utf-8") as stream:
             self.assertEqual(stream.read().splitlines(), ["A", "C"])
 
     def test_multiprocess_batch_refresh_preserves_atomic_order(self):
-        with (
-            mock.patch.object(serve, "LEDGER_RECORDS", 3),
-            mock.patch.object(serve, "LEDGER_BYTES", 4096),
-        ):
-            serve._store().remember_batch("notified", ("A", "B", "C"))
-            context = multiprocessing.get_context("fork")
-            gate = context.Barrier(2)
-            processes = [
-                context.Process(
-                    target=_remember_ledger_batch, args=(self.events, keys, gate)
-                )
-                for keys in (("A",), ("D",))
-            ]
-            for process in processes:
-                process.start()
-            for process in processes:
-                process.join(10)
-                self.assertEqual(process.exitcode, 0)
+        self.reset_notification_runtime(ledger_records=3, ledger_bytes=4096)
+        self.runtime.notification_store.remember_batch("notified", ("A", "B", "C"))
+        context = multiprocessing.get_context("fork")
+        gate = context.Barrier(2)
+        processes = [
+            context.Process(
+                target=_remember_ledger_batch, args=(self.runtime.config, keys, gate)
+            )
+            for keys in (("A",), ("D",))
+        ]
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(10)
+            self.assertEqual(process.exitcode, 0)
         with open(self.events + ".notified", encoding="utf-8") as stream:
             retained = stream.read().splitlines()
         self.assertEqual(set(retained), {"A", "C", "D"})
         self.assertEqual(retained[-1], "D" if retained[-2] == "A" else "A")
 
     def test_evicted_delivery_id_still_deduplicates_from_retained_event_authority(self):
+        self.reset_notification_runtime(ledger_records=2, ledger_bytes=4096)
         events = [self.event(f"retained-delivery-{index:04d}") for index in range(3)]
-        with (
-            mock.patch.object(serve, "LEDGER_RECORDS", 2),
-            mock.patch.object(serve, "LEDGER_BYTES", 4096),
-        ):
-            for event in events:
-                self.assertTrue(serve.append_event(event))
-            serve._store().reset_process_state()
-            self.assertFalse(serve.append_event(events[0]))
+        for event in events:
+            self.assertTrue(self.runtime.event_log.append(event))
+        self.runtime.notification_store.reset_process_state()
+        self.assertFalse(self.runtime.event_log.append(events[0]))
         with open(self.events, encoding="utf-8") as stream:
             self.assertEqual(sum(1 for line in stream if line.strip()), 3)
 
     def test_multiprocess_ledger_compaction_loses_no_retained_writes(self):
+        self.reset_notification_runtime(ledger_records=64, ledger_bytes=4096)
         context = multiprocessing.get_context("fork")
         barrier = context.Barrier(2)
         first = [f"first-{index}" for index in range(20)]
@@ -1056,24 +1042,20 @@ class TransportDiagnosticsTests(unittest.TestCase):
         processes = [
             context.Process(
                 target=_remember_ledger_keys,
-                args=(self.events, "notified", first, barrier),
+                args=(self.runtime.config, "notified", first, barrier),
             ),
             context.Process(
                 target=_remember_ledger_keys,
-                args=(self.events, "notified", second, barrier),
+                args=(self.runtime.config, "notified", second, barrier),
             ),
         ]
-        with (
-            mock.patch.object(serve, "LEDGER_RECORDS", 64),
-            mock.patch.object(serve, "LEDGER_BYTES", 4096),
-        ):
-            for process in processes:
-                process.start()
-            for process in processes:
-                process.join(10)
-                self.assertEqual(process.exitcode, 0)
-        serve._store().reset_process_state()
-        remembered = serve._store().load_ledger("notified")
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(10)
+            self.assertEqual(process.exitcode, 0)
+        self.runtime.notification_store.reset_process_state()
+        remembered = self.runtime.notification_store.load_ledger("notified")
         self.assertEqual(remembered, set(first + second))
 
 
