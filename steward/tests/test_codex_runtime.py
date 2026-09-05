@@ -22,6 +22,7 @@ import os
 import subprocess
 import sys
 import threading
+import tomllib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -119,6 +120,13 @@ assert Path("/memory/probe").read_text() == "persisted"
 assert api_calls == [("/skills", "Bearer probe-session-only")]
 assert len(requests) == 2
 assert "probe-passed" in json.dumps(requests[-1]["input"])
+# Codex may rewrite config.toml privately as container root. Verify persistence
+# from the account that owns the runtime, not the host's unrelated runner UID.
+assert Path("/root/.codex/auth.json").read_text() == '{"OPENAI_API_KEY":"synthetic-test-key"}'
+saved_config = tomllib.loads(Path("/root/.codex/config.toml").read_text())
+assert saved_config["sandbox_mode"] == "danger-full-access"
+assert saved_config["approval_policy"] == "on-request"
+assert Path("/root/.codex").stat().st_mode & 0o777 == 0o700
 print("CODEX_RECEIPT_START")
 print(result.stdout, end="")
 """
@@ -177,9 +185,6 @@ def test_codex_exec_uses_memory_api_token_and_returns_usage(
         timeout_s=90,
     )
     assert result.ok, result.stdout + result.stderr
-    assert auth.read_text() == '{"OPENAI_API_KEY":"synthetic-test-key"}'
-    assert config.read_text().startswith('sandbox_mode="danger-full-access"')
-    assert tmp_path.stat().st_mode & 0o777 == 0o700
     assert "CODEX_RECEIPT_START\n" in result.stdout
     usage = read_usage(result.stdout.split("CODEX_RECEIPT_START\n", 1)[1], None)
     assert usage.output == "probe complete"
