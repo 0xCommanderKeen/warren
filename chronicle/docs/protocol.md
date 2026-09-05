@@ -854,41 +854,66 @@ across wall-clock ticks, and events for another agent cannot age a mood. Ambient
 events are excluded for the same reason they decide no state: a stranger knocking is
 not this agent's evidence, so it neither anchors nor ages the reading.
 
-The reducer observes exactly four operational signals. Its rolling terminal
-stream uses `(A-24h,A]`, append order, failures `tool_failed`, `routine_failed`,
-and `task_failed`, and successes `heartbeat`, `routine_finished`, and
-`task_done`; the trailing failure streak saturates at three, while the separate
-failure count counts every rolling-window failure and displays three or more as
-`3+`.
-Work density is the sum of one maximum-weight witness in UTC quarter-hour
-buckets `floor(A/15m)-7..floor(A/15m)`: task/routine starts and claims weigh 3,
-artifacts and journals 2, and tool calls and heartbeats 1. Human interaction is
-the append-newest authoritative exact approval close or root `task_started`
-from `claude-code`/`codex` with no `parent_agent_id`. The fourth signal is the
-oldest unresolved canonical structured approval (collisions remain unresolved)
-or plain/fallback knock not superseded by a later ordinary lifecycle event.
-Mood evaluates canonical requests independently of the approval panel's
-40-request presentation capacity, so an older pending request cannot disappear
-behind newer questions.
-Orphans, jobs, routines, journals, child/custom starts, and invalid v0 records
-do not acquire meanings outside those exact lists.
+The reducer observes exactly four operational signals, using the outcome types
+and work weights shared with retention in `mood_policy.py`:
 
-Enough evidence means an unresolved need, a failure streak of at least two, or
-six distinct signal witnesses spanning at least 30 log-minutes with at least
-two of failure, workload, and interaction observed. Scores are: failure
-`unobserved=0, 0=+2, 1=-1, 2=-3, 3=-5`; workload `active=+2,
-saturated=-2`, otherwise zero; interaction `recent=+1, old=-1`, otherwise zero;
-and unresolved age `≤1h=-1, >1–6h=-3, >6h=-5`. Equality stays in the named
-lower-risk range. Precedence is insufficient `?`, need older than 6h `!`,
-failure streak 3 `×`, saturated work `▲`, then total `≥4` steady `●`, `1..3`
-active `◆`, or `≤0` watchful `◇`.
+- Failure: terminal events in `(A-24h,A]`, in append order. Failures are
+  `tool_failed`, `routine_failed`, and `task_failed`; successes are `heartbeat`,
+  `routine_finished`, and `task_done`. The trailing failure streak and the
+  separate total failure count both saturate at three. `failuresLabel` is
+  `"3"` for three or more, not `"3+"`; without outcomes it is `"unobserved"`.
+- Workload: sum of one maximum-weight witness per UTC quarter-hour bucket in
+  `floor(A/15m)-7..floor(A/15m)`. `task_started`, `task_claimed`, and
+  `routine_started` weigh 3; `artifact_produced` and `journal_written` weigh 2;
+  `tool_called` and `heartbeat` weigh 1. No buckets means `unobserved`;
+  density 1–6 is `light`, 7–14 `active`, 15–20 `heavy`, and above 20 `saturated`.
+- Interaction: the append-newest root `task_started` from `claude-code` or
+  `codex` with no `parent_agent_id`. Log age ≤1h is `recent`, otherwise `old`;
+  without a root prompt it is `unobserved`. Approval closes do not count.
+- Unresolved need: the structured approval with the oldest `opened_at` among
+  this agent's `pending` records. Resolved and collision records are excluded.
+  Plain/fallback `needs_human` knocks do not set this signal, although they can
+  still set villager state to `knocking` and contribute to the count and anchor.
+  The reducer receives approvals before the panel's 40-request presentation
+  limit, so an older pending request cannot disappear behind newer questions.
+
+Enough evidence means a pending structured request, a failure streak of at
+least two, or at least six input events. There is no minimum time span,
+distinct-witness rule, or requirement to observe multiple signals.
+`evidence.count` is `min(6, len(events))`; `evidence.spanMs` is always `0`.
+Other valid non-ambient events can contribute to the count and anchor without
+contributing to a signal. Invalid v0 records are excluded.
+
+Scores are: failure `unobserved=0, streak 0=+2, 1=-1, 2=-3, 3=-5`;
+workload `active=+2, saturated=-2`, otherwise zero; interaction `recent=+1`,
+otherwise zero (including `old`); unresolved age `≤1h=-1, >1–6h=-3, >6h=-5`,
+or zero without a pending request. Equality stays in the lower-risk range.
+Precedence is insufficient `?`, need older than 6h `!`, failure streak 3 `×`,
+saturated work `▲`, then total `≥4` steady `●`, `1..3` active `◆`, or `≤0`
+watchful `◇`. The score is returned even when evidence is insufficient.
+
+Current test anchors: `test_village_state.py`'s
+`test_projects_task_approval_journal_routine_mood_and_diagnostics` pins a
+pending structured approval alongside one observed failure;
+`test_discord_events_render_lines_without_changing_villager_state_or_mood`
+pins ambient-event neutrality. `test_retention_vectors.py` exercises
+`mood-lifecycle-adversarial.json` for retained collision/lifecycle evidence,
+not projected glyph values. Its module docstring lists the older mood vectors
+that are still unused; those fixtures do not establish current glyph or
+sufficiency expectations.
+
+The retention machinery below preserves legacy browser mood authority. Its
+plain-knock, distinct-witness, collision, and overflow rules are storage
+behavior, not additional rules applied by `_mood()`. The current projection
+always returns `authority.complete=true`; it does not turn capsule overflow
+into an uncertain glyph.
 
 `retention.carry_forward(...).witnesses["moods"]` preserves
 the anchor, the complete append-ordered terminal frontier currently in
 `(A-24h,A]`, one maximum-weight event per relevant bucket, latest interaction,
 approval/plain-knock authority, and six threshold witnesses selected from the
-reducer's same deduplicated contributing set in append order. The complete
-frontier is necessary because a timestamp-disordered future anchor may expire
+legacy retention selector's deduplicated contributing set in append order. The
+complete frontier is necessary because a timestamp-disordered future anchor may expire
 an append-later success and expose any earlier outcome. They also retain a
 backup six-witness selection with unresolved
 plain, fallback, and structured needs excluded, so a future superseder or exact
@@ -896,15 +921,15 @@ close cannot consume the only evidence-threshold witness. Resolved structured
 approvals cannot be made exact forever in
 fixed space: unrestricted request IDs let a future incompatible append
 invalidate any chosen suffix and reveal an arbitrarily old decision. Chronicle
-therefore makes that information limit explicit. Full-log and retained-log
-reduction both admit at most 256 irreducible approval facts plus the latest
+therefore makes that information limit explicit. The retention authority fold
+admits at most 256 irreducible approval facts plus the latest
 root prompt per agent, and the encoded capsule is capped at 32 KiB. Replayed immutable knocks, orphan closes, and superseded
 roots are folded away before this bound is evaluated. Within
 those count and byte bounds they are exact. Crossing either sets a durable global `overflow` bit,
-discards all authority, copy, and order manifests, and renders `? authority history
-uncertain` with `authority.complete=false`; it never presents a guessed suffix
-or retained partial signal/score as exact. Once a request ID collides, every
-candidate remains unresolved and every close for that ID is ignored for Mood
+discards all authority, copy, and order manifests, and records uncertainty in
+the capsule. This is not currently reflected in the projected glyph. Once a
+request ID collides, every
+candidate remains unresolved and every close for that ID is ignored by mood retention
 through the rest of the source epoch. An archive can retain the raw history, but exact answers after
 unbounded future ID reuse require an external unbounded index or a bounded
 request-ID namespace.
@@ -961,12 +986,12 @@ capsules are ignored atomically and cannot suppress public evidence. Recognized
 internal markers never become public rejection diagnostics. The
 capsule is transport metadata, not a v0 event: ingestion rejects it,
 projections and boards never count it as an event or rejection, and it cannot
-create or refresh presence. Browser compaction and Python rotation replace it
-atomically. The canonical union of the terminal frontier and every other
+create or refresh presence. Python rotation replaces it atomically. The
+canonical union of the terminal frontier and every other
 ordinary Mood witness is bounded to 160 records per agent. A 161st required
 record enters the same durable global authority-overflow state as the authority
-count or byte limits; full-log derivation applies this decision too, so it never
-presents signals that rotation cannot preserve exactly. The lower 24-hour
+count or byte limits in retention; this bound is not an evidence gate in
+`village_state._mood()`. The lower 24-hour
 boundary is open and the upper boundary closed. Overflow clears only when a
 genuinely new complete source epoch replaces the retained history.
 The `observed` field records the compact authority cardinality (or the
