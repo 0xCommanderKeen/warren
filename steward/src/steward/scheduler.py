@@ -401,6 +401,18 @@ class FireReport:
     #: What became of the final message, when the routine says where it goes. ``None``
     #: for a routine that delivers nowhere, and for a run that did not finish ``ok``.
     delivery: Delivery | None = None
+    #: A session that lost terminal authority keeps its raw result, but cannot report success.
+    terminal_error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        """True when the session succeeded and retained authority to report that outcome."""
+        return (
+            self.fired
+            and self.terminal_error is None
+            and self.result is not None
+            and self.result.ok
+        )
 
     @property
     def routine_id(self) -> str:
@@ -1319,10 +1331,11 @@ class Scheduler:
                         duration_s=result.duration_s,
                     )
                 )
+                terminal_claimed = not watched
                 if not watched:
                     self.emitter.emit(terminal)
                 elif self.run_transitions is not None:
-                    self.run_transitions.session_claim(
+                    terminal_claimed = self.run_transitions.session_claim(
                         run_id,
                         terminal,
                         owner_token=owner_token,
@@ -1334,7 +1347,7 @@ class Scheduler:
             # After the terminal transition, so a routine the village saw finish is the
             # one whose message goes out — and a delivery that fails changes nothing
             # the village was told.
-            delivery = self._deliver(item, run_id, result)
+            delivery = self._deliver(item, run_id, result) if terminal_claimed else None
         finally:
             admission.close()
         return FireReport(
@@ -1345,6 +1358,9 @@ class Scheduler:
             prompt=session.prompt,
             journal_path=session.journal_path,
             delivery=delivery,
+            terminal_error=(
+                None if terminal_claimed else "run ownership lost: terminal outcome already chosen"
+            ),
         )
 
     def _deliver(self, item: ScheduledRoutine, run_id: str, result: RunResult) -> Delivery | None:

@@ -1365,10 +1365,12 @@ def _report_fires(reports: Sequence[FireReport], *, dry_run: bool) -> None:
             click.echo("")
         elif not report.fired:
             click.secho(f"skipped {report.scheduled.key}: {report.skipped_reason}", fg="yellow")
-        elif report.result is not None and report.result.ok:
+        elif report.result is not None and report.ok:
             click.secho(f"ok {report.scheduled.key} in {report.result.duration_s:.1f}s", fg="green")
         else:
-            detail = report.result.summary() if report.result else "no result"
+            detail = report.terminal_error or (
+                report.result.summary() if report.result else "no result"
+            )
             click.secho(f"failed {report.scheduled.key}: {detail}", fg="red", err=True)
 
 
@@ -1378,9 +1380,7 @@ def _fires_failed(reports: Sequence[FireReport]) -> bool:
     A skip is an honest scheduling decision (overlap, pause, or catch-up policy), not a
     process failure.  Dry runs never reach this predicate.
     """
-    return any(
-        report.fired and (report.result is None or not report.result.ok) for report in reports
-    )
+    return any(report.fired and not report.ok for report in reports)
 
 
 @scheduler.command("tick")
