@@ -106,7 +106,8 @@ minted for its own run and may reach very little. See
 - An empty or whitespace-only value **counts as unset**. Unset means the server
   refuses to start, naming the variable, unless `--allow-open` says out loud that this
   is local development.
-- Anything else is `401`, and nothing is queued, stored, or emitted.
+- Invalid credentials receive `401`, then `429` when their source exhausts its failure allowance.
+  No work is queued; bounded authentication summaries enter the request log.
 - Exactly one `Authorization` header is required. Duplicate fields are `401`, even when
   one or both values contain the right token, so intermediaries cannot disagree about
   which credential wins.
@@ -1496,3 +1497,32 @@ Operator credentials and session grants are unchanged. Both accepted master toke
 identical approval-body guards. Token values and token-derived identifiers are never included
 in rotation audit output. This runbook is an operational procedure; passing implementation
 checks does not mean a live rotation has been performed.
+
+### Failed authentication
+
+Each API worker permits five immediate failed authentications per peer address and refills
+one allowance every 12 seconds. Exhausted callers receive `429 auth_throttled` and an integer
+`Retry-After` in seconds. Valid master, operator and session credentials remain usable from
+the same address; session authorization refusals are still 403 and do not consume allowance.
+This limits failure responses, not TCP connections or the cost of checking valid credentials.
+
+Buckets are process-local, synchronized, expire after five idle minutes, and retain at most
+1,024 sources with least-recently-used eviction. Restarting a worker or evicting a source
+resets that source's allowance. Multi-worker limits are per worker, not fleet-wide.
+The policy is injectable through `ApiConfig.auth_failure_policy` for embedded callers.
+
+The key is the ASGI peer address, never a header read by the auth gate. The checked-in NAS
+nginx proxy forwards no client-IP header, so proxied callers share its peer bucket. Direct
+callers behind the same NAT also share a bucket. To enable finer attribution, configure the
+proxy to replace forwarding headers with its observed peer and configure Uvicorn to trust
+only that proxy's address; never use wildcard trusted proxies on an externally reachable
+API. This change does not enable forwarded-header trust or change network deployment.
+
+The request log now also contains `method: AUTH`, `path: /auth`, `outcome: auth_failures`
+summary rows. These are diagnostics, not accepted mutations: `detail.failed`,
+`detail.throttled`, `detail.window_seconds`, and `detail.sources_sample` describe aggregated
+failures. The sample holds at most 32 normalized addresses. No actual request path, query,
+body, header or bearer value is persisted. The first failure is recorded immediately;
+subsequent failures trigger at most one aggregate write per minute across the whole worker.
+Graceful shutdown flushes the last aggregate; abrupt termination can lose that last window.
+Existing request-history retention applies. A summary may contain failures from many sources.

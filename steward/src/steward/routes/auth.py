@@ -7,6 +7,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from steward.auth_failures import AuthFailures
 from steward.input_bounds import (
     APPROVAL_BODY_MAX_BYTES,
     EDIT_MAX_DEPTH,
@@ -219,6 +220,7 @@ def _auth_dependency(  # noqa: PLR0913 — explicit auth collaborators
     compare_token: TokenComparator = compare_digest,
     *,
     master_tokens: MasterTokens | None = None,
+    failures: AuthFailures | None = None,
 ) -> Callable[[Request], None]:
     """Build the gate every endpoint hangs off, and record who got through it.
 
@@ -260,6 +262,18 @@ def _auth_dependency(  # noqa: PLR0913 — explicit auth collaborators
         presented = _presented_session_credential(headers)
         principal = principal_for(presented) if presented else None
         if principal is None:
+            retry = (
+                failures.refuse(request.client.host if request.client else None) if failures else 0
+            )
+            if retry:
+                raise HTTPException(
+                    status_code=429,
+                    detail={
+                        "error": "auth_throttled",
+                        "message": "too many failed authentication attempts",
+                    },
+                    headers={"Retry-After": str(retry)},
+                )
             raise HTTPException(
                 status_code=401,
                 detail={

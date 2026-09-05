@@ -1,4 +1,4 @@
-"""Every accepted mutating API request and how it turned out.
+"""Accepted mutations and bounded AUTH failure summaries.
 
 A queued action that later failed is traceable rather than silently gone.
 """
@@ -16,7 +16,7 @@ from steward.store.schema import _REQUEST_RESIDENT
 
 
 class _RequestTables(_Connection):
-    """The accepted request log."""
+    """The request and authentication-summary log."""
 
     # -- the request log -------------------------------------------------------------
 
