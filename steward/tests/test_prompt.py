@@ -634,7 +634,7 @@ def test_both_vault_skills_fit_beside_the_default_set_without_truncation() -> No
 
 def hr_prompt() -> tuple[list[Skill], str]:
     """Resolve a resident granting both of HR's crafts and assemble its preamble."""
-    return prompt_granting("write-skill", "raise-resident")
+    return prompt_granting("write-skill", "raise-resident", "grant-skill")
 
 
 def test_write_skill_reaches_the_prompt_with_the_pointer_the_defaults_and_the_receipt() -> None:
@@ -645,7 +645,7 @@ def test_write_skill_reaches_the_prompt_with_the_pointer_the_defaults_and_the_re
     person who asked for it.
     """
     resolved, text = hr_prompt()
-    assert [s.name for s in resolved][-2:] == ["write-skill", "raise-resident"]
+    assert [s.name for s in resolved][-3:] == ["write-skill", "raise-resident", "grant-skill"]
     section = skills_section(text)
 
     # the description is a pointer, and a pointer says when to reach the material
@@ -709,7 +709,7 @@ def test_both_hr_skills_fit_beside_the_default_set_without_truncation() -> None:
     resolved, text = hr_prompt()
     rendered = p.render_skills(resolved)
     assert len(rendered) <= p.SKILLS_MAX_CHARS, (
-        f"the default set plus write-skill and raise-resident renders at {len(rendered)} "
+        f"the default set plus HR's three skills renders at {len(rendered)} "
         f"characters; the injection cap is {p.SKILLS_MAX_CHARS}"
     )
     # `write-skill`'s body quotes the marker as prose, so a bare substring check would

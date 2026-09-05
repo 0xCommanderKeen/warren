@@ -461,6 +461,7 @@ def test_the_shipped_library_parses_and_has_a_default_set() -> None:
         "morning-digest",
         "write-skill",
         "raise-resident",
+        "grant-skill",
     } <= set(loaded.names)
 
 
@@ -522,28 +523,35 @@ def test_hrs_two_crafts_are_granted_not_default() -> None:
     own rule on the way in.
     """
     loaded = sk.load_library(LIBRARY)
-    for name in ("write-skill", "raise-resident"):
+    for name in ("write-skill", "raise-resident", "grant-skill"):
         skill = loaded.get(name)
         assert skill is not None, f"{name} is not in the shipped library"
         assert not skill.default, f"{name} must be granted, not handed to every resident"
         assert skill.description, f"{name} needs a description; it is what triggers it"
 
 
-@pytest.mark.parametrize("name", ["write-skill", "raise-resident"])
-def test_hrs_skill_grant_knock_spells_what_the_write_door_matches_on(name: str) -> None:
-    """The literals in these bodies are a contract with `steward.approved_edits`.
+def test_grant_skills_knock_spells_what_the_write_door_matches_on() -> None:
+    """The literals in this body are a contract with `steward.approved_edits`.
 
     A session writes what the skill told it to write, and steward matches the action slug
     and the two detail keys exactly (warren#437). Rename either side alone and every knock
     Karen raises is refused at the door for a reason nobody can see from the skill — so the
     drift has to be a red test rather than a discovery.
     """
-    skill = sk.load_library(LIBRARY).get(name)
+    skill = sk.load_library(LIBRARY).get("grant-skill")
     assert skill is not None
     assert f'action="{ap.GRANT_SKILL_ACTION}"' in skill.body
     for key in ("resident", "skill"):
         assert f'"{key}"' in skill.body, f"the knock must name {key} in its detail"
     assert "approval_request_id" in skill.body, "and the edit is made against the decision"
+    # the two crafts hand the knock to grant-skill rather than carrying their own copy,
+    # so there is exactly one body for the door's literals to drift from
+    for craft in ("write-skill", "raise-resident"):
+        held = sk.load_library(LIBRARY).get(craft)
+        assert held is not None
+        body = held.body
+        assert "grant-skill" in body, f"{craft} must point at grant-skill"
+        assert f'action="{ap.GRANT_SKILL_ACTION}"' not in body, f"{craft} still carries the knock"
 
 
 def test_vault_keeper_points_at_the_vaults_own_conventions_rather_than_copying_them() -> None:
