@@ -719,6 +719,28 @@ finished goes back to `open` loudly, and a request nobody answered is a `deny`, 
 quiet yes. A restart is announced, a run that never reported back is buried out loud, and
 a resident that has spent its day stops and says which number stopped it.
 
+### Manifest module boundaries
+
+`steward.manifest` remains the public import surface and the single ordered validation
+coordinator. Existing callers need no import changes. Its implementation is divided by concern:
+
+| Module | Responsibility |
+|---|---|
+| `manifest_models` | Frozen declaration models, resident values and schema vocabulary |
+| `diagnostics` | Diagnostic values, spelling suggestions and Pydantic error presentation |
+| `credential_policy` | Credential scanning and output redaction |
+| `soul` | Soul parsing and shared Markdown frontmatter splitting |
+| `manifest_policy` | Cross-field capability, route, budget and identity checks |
+| `schedule_policy` | Cron analysis and close-of-day checks |
+| `deployment_policy` | Placement, workspace, mount and container clock checks |
+| `fleet_policy` | Cross-resident identity, journal and mount-writer checks |
+| `deployment_rules` | Deployment defaults, host-home/path resolution and container clock rules shared with rendering |
+
+The skills library imports foundational modules directly; only the coordinator loads the
+library. Policy modules return diagnostics without loading the fleet or choosing check order.
+Deployment rendering and validation both depend on `deployment_rules`, which imports models
+and never imports either caller.
+
 ### Response contracts
 
 The request ledger, routine list and run-now receipt publish response models in the
