@@ -23,6 +23,7 @@ import pathlib
 import unittest
 
 import retention
+from retention_approvals import _paired_approval_keep_indexes
 
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
@@ -102,6 +103,14 @@ class ApprovalLifecycleVectorTests(unittest.TestCase):
                 # Every approval record stays isolated from ordinary villager
                 # retention whether or not it is carried forward.
                 self.assertEqual(set(range(len(events))), isolated)
+                # Every co-retained request variant must bring the same canonical
+                # first close/collision evidence, even outside the panel budget.
+                for index, item in enumerate(events):
+                    if item["type"] == "needs_human":
+                        paired = _paired_approval_keep_indexes(
+                            list(enumerate(events)), {index}
+                        )
+                        self.assertTrue(keep <= paired | {index})
 
 
 if __name__ == "__main__":

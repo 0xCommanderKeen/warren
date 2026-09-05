@@ -17,7 +17,7 @@ The app loads `/state`, then opens `/state/stream` from the returned generation 
 
 [`src/steward/StewardClient.js`](src/steward/StewardClient.js) is Arcadia's only Steward write boundary. It owns job posts, approval decisions, resident declarations, and manual routine runs. Feature code supplies declarations or decisions to that client; it must not call Steward directly.
 
-The Steward URL is supplied when the client is created. **The shipped client is same-origin, always**: `?steward=` and `VITE_STEWARD_URL` are read only under `import.meta.env.DEV`, so Vite eliminates both from a built bundle, and the client refuses to send credentials to a base that is not this origin anyway (warren#256). A deployed Arcadia needs neither — `deploy/nginx.conf` proxies Steward's write routes behind the deployed origin. In `pnpm dev` they are how you reach a Steward at all, since the dev server proxies Chronicle but not Steward. The approval prompt hands its bearer token to `setCredentials`; the value can be replaced or cleared at runtime and lives only inside that client instance. Arcadia never writes it to web storage, markup, URLs, or logs. A `401` clears the rejected token and reopens the prompt so an operator can replace it without reloading the page.
+The Steward URL is supplied when the client is created. **The shipped client is same-origin, always**: `?steward=` and `VITE_STEWARD_URL` are read only under `import.meta.env.DEV`, so Vite eliminates both from a built bundle, and the client refuses to send credentials to a base that is not this origin anyway (warren#256). A deployed Arcadia needs neither — `deploy/nginx.conf` proxies Steward's write routes behind the deployed origin. In `pnpm dev`, the dev server proxies the same Steward routes using `STEWARD_URL` (default `http://127.0.0.1:8801`). The browser can therefore use its own origin; the development-only URL overrides remain available. The approval prompt hands its bearer token to `setCredentials`; the value can be replaced or cleared at runtime and lives only inside that client instance. Arcadia never writes it to web storage, markup, URLs, or logs. A `401` clears the rejected token and reopens the prompt so an operator can replace it without reloading the page.
 
 Writes are deliberately non-optimistic. A valid Steward receipt leaves the client in `awaiting_confirmation`; the village continues to render Chronicle's last complete snapshot. Pass later Chronicle snapshots to `confirm`. Only the matching projected job, approval, routine run, or resident appearance releases the write lock. The client never reads Chronicle's internal `/events` endpoint.
 
@@ -39,7 +39,7 @@ pnpm dev
 The running app loads live Chronicle state; compatibility fixtures are never bundled as village activity. To preview another Chronicle instance:
 
 ```sh
-CHRONICLE_URL=http://dxp2800:8738 pnpm dev --host 127.0.0.1
+CHRONICLE_URL=http://dxp2800:8738 STEWARD_URL=http://dxp2800:8802 pnpm dev --host 127.0.0.1
 ```
 
 ## Village interface

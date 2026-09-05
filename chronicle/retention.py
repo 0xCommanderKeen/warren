@@ -20,6 +20,7 @@ from protocol import validate_event
 from retention_approvals import (
     _approval_keep_indexes,
     _journal_approval_keep_indexes,
+    _paired_approval_keep_indexes,
 )
 from retention_ledger import _paired_transition_keep_indexes, _task_keep_indexes
 from retention_mood import (
@@ -561,6 +562,11 @@ def carry_forward(lines, now_ms, policy):
     paired_transition_keep = _paired_transition_keep_indexes(full_parsed, set(keep))
     task_keep |= paired_transition_keep
     keep.extend(paired_transition_keep)
+    # Any family can retain a structured knock. Its first matching close and
+    # collision evidence are indivisible even outside the ordinary raw tail.
+    paired_approval_keep = _paired_approval_keep_indexes(full_parsed, set(keep))
+    approval_keep |= paired_approval_keep
+    keep.extend(paired_approval_keep)
     kept_indexes = sorted(set(keep))
     full_by_index = dict(full_parsed)
     retained_parsed = [
