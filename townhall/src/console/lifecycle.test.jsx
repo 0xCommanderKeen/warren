@@ -6,11 +6,12 @@
  * a repeated keypress or a test that stopped reading halfway cannot stop a container.
  */
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { NavigationProvider } from "../navigation.jsx";
+import { NavigationProvider, useNavigation } from "../navigation.jsx";
 import { StewardProvider } from "../steward/context.jsx";
 import ResidentDetail from "../pages/ResidentDetail.jsx";
+import ResidentsPage from "../pages/ResidentsPage.jsx";
 
 function memoryStorage() {
   const map = new Map();
@@ -276,5 +277,118 @@ describe("a retired resident's record", () => {
     // `residents/<id>/manifest.yaml` off the disk and a uid names no directory.
     expect(posted(fetch, "/residents/hob/provision")).toHaveLength(1);
     expect(screen.getByText("Miha@dxp2800:~/docker/warren/residents/hob")).toBeTruthy();
+  });
+});
+
+// Exercise the production route switch: it used to retain Hob's lifecycle state for Pip.
+function ResidentRoute() {
+  const { page, params } = useNavigation();
+  return <ResidentsPage page={page} params={params} />;
+}
+
+function mountRoute(fetch) {
+  window.history.replaceState({}, "", "/residents/0198-uid");
+  const storage = memoryStorage();
+  storage.setItem("townhall.steward.operator", "operator-token");
+  return render(
+    <NavigationProvider base="/">
+      <StewardProvider storage={storage} fetch={fetch}>
+        <ResidentRoute />
+      </StewardProvider>
+    </NavigationProvider>,
+  );
+}
+
+function navigateResident(uid) {
+  act(() => {
+    window.history.pushState({}, "", `/residents/${uid}`);
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
+}
+
+function routeSteward(posts) {
+  const pip = { ...RESIDENT, id: "pip", uid: "pip-uid", soul: { ...RESIDENT.soul, name: "Pip" } };
+  const hobFetch = steward({ posts });
+  const pipFetch = steward({ resident: pip, posts });
+  return vi.fn((url, init) =>
+    String(url).includes("/pip") ? pipFetch(url, init) : hobFetch(url, init),
+  );
+}
+
+describe("lifecycle identity across resident routes", () => {
+  it.each(["provision", "retire"])("requires Pip's own %s rehearsal after showing Hob's plan", async (kind) => {
+    const plan = kind === "provision" ? PROVISION_PLAN : RETIRE_PLAN;
+    const fetch = routeSteward({
+      [`/residents/hob/${kind}`]: json(200, plan),
+      [`/residents/pip/${kind}`]: json(200, { ...plan, resident: "pip" }),
+    });
+    mountRoute(fetch);
+    fireEvent.click(await screen.findByRole("button", { name: new RegExp(`^${kind}…$`, "i") }));
+    await screen.findByRole("button", { name: new RegExp(`${kind} Hob for real`, "i") });
+
+    navigateResident("pip-uid");
+    await screen.findByRole("heading", { name: "Pip" });
+    expect(screen.queryByRole("button", { name: /for real/i })).toBeNull();
+    expect(posted(fetch, `/residents/pip/${kind}`)).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: new RegExp(`^${kind}…$`, "i") }));
+    fireEvent.click(await screen.findByRole("button", { name: new RegExp(`${kind} Pip for real`, "i") }));
+    await waitFor(() => expect(posted(fetch, `/residents/pip/${kind}`)).toHaveLength(2));
+    expect(JSON.parse(posted(fetch, `/residents/pip/${kind}`)[0][1].body)).toEqual({ dry_run: true });
+  });
+});
+
+
+describe("responses from a previous resident route", () => {
+  it.each(["provision", "retire"])("ignores an in-flight %s rehearsal even after returning to Hob", async (kind) => {
+    let resolvePlan;
+    const pending = new Promise((resolve) => { resolvePlan = resolve; });
+    const fetch = routeSteward({ [`/residents/hob/${kind}`]: () => pending });
+    mountRoute(fetch);
+    fireEvent.click(await screen.findByRole("button", { name: new RegExp(`^${kind}…$`, "i") }));
+    await waitFor(() => expect(posted(fetch, `/residents/hob/${kind}`)).toHaveLength(1));
+    navigateResident("pip-uid");
+    // Navigation invalidates the plan immediately, even before Pip's record loads.
+    expect(screen.queryByRole("button", { name: /for real/i })).toBeNull();
+    await screen.findByRole("heading", { name: "Pip" });
+    await act(async () => resolvePlan(json(200, kind === "provision" ? PROVISION_PLAN : RETIRE_PLAN)));
+    expect(screen.queryByRole("button", { name: /for real/i })).toBeNull();
+    expect(posted(fetch, `/residents/pip/${kind}`)).toHaveLength(0);
+    navigateResident(RESIDENT.uid);
+    await screen.findByRole("heading", { name: "Hob" });
+    expect(screen.queryByRole("button", { name: /for real/i })).toBeNull();
+  });
+
+  it.each([false, true])("clears Hob's receipt across navigation (response pending: %s)", async (pending) => {
+    let resolveDone;
+    const done = { ...PROVISION_PLAN, dry_run: false, message: "Hob provisioning completed" };
+    const response = new Promise((resolve) => { resolveDone = resolve; });
+    const fetch = routeSteward({
+      "/residents/hob/provision": (body) => body.dry_run ? json(200, PROVISION_PLAN) : response,
+    });
+    mountRoute(fetch);
+    fireEvent.click(await screen.findByRole("button", { name: /^provision…$/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /provision hob for real/i }));
+    await waitFor(() => expect(posted(fetch, "/residents/hob/provision")).toHaveLength(2));
+    if (!pending) {
+      await act(async () => resolveDone(json(200, done)));
+      await screen.findByText(done.message);
+    }
+    navigateResident("pip-uid");
+    await screen.findByRole("heading", { name: "Pip" });
+    const readsBefore = fetch.mock.calls.length;
+    if (pending) await act(async () => resolveDone(json(200, done)));
+    expect(screen.queryByText(done.message)).toBeNull();
+    expect(fetch.mock.calls).toHaveLength(readsBefore);
+    expect(posted(fetch, "/residents/pip/provision")).toHaveLength(0);
+  });
+
+  it("refuses a rehearsal response naming a different target", async () => {
+    const fetch = routeSteward({ "/residents/hob/provision": json(200, { ...PROVISION_PLAN, resident: "pip" }) });
+    mountRoute(fetch);
+    fireEvent.click(await screen.findByRole("button", { name: /^provision…$/i }));
+    await screen.findByText(/plan names a different resident/);
+    expect(screen.queryByRole("button", { name: /for real/i })).toBeNull();
+    expect(posted(fetch, "/residents/hob/provision")).toHaveLength(1);
   });
 });

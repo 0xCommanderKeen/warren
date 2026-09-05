@@ -56,7 +56,7 @@ export default function ResidentsPage({ page, params, model }) {
       ) : page === "residentNew" ? (
         <ResidentNew />
       ) : page === "resident" ? (
-        <ResidentDetail id={params.id} model={model} />
+        <ResidentDetail key={params.id} id={params.id} model={model} />
       ) : (
         <>
           <ResidentList />
