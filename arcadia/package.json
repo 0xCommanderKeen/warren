@@ -10,9 +10,9 @@
     "test:browser": "playwright test"
   },
   "dependencies": {
-    "phaser": "3.90.0",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "three": "0.185.1"
   },
   "devDependencies": {
     "@playwright/test": "1.62.1",

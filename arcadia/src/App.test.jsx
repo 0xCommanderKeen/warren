@@ -7,8 +7,8 @@ import fixture from "./contract/fixtures/complete-v1.js";
 import { createStewardClient } from "./steward/StewardClient.js";
 import { createStateTransport } from "./transport/createStateTransport.js";
 
-vi.mock("./game/PhaserGame.jsx", () => ({
-  PhaserGame: () => <div data-testid="village-canvas" />,
+vi.mock("./world/VillageWorld.jsx", () => ({
+  VillageWorld: () => <div data-testid="village-canvas" />,
 }));
 
 afterEach(() => {

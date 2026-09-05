@@ -1,0 +1,763 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { VillageWorld } from "../world/VillageWorld.jsx";
+import { createVillageLayout } from "../world/layout.js";
+import { daylightAt } from "../world/daylight.js";
+import { pendingApprovals } from "../contract/approvals.js";
+import "./village-experience.css";
+
+const purposes = {
+  home: "A permanent home for a resident of Warren.",
+  workshop: "A shared place for agents working on this project.",
+  lodge: "A place for visiting agent sessions to gather.",
+  square: "The heart of the village. Requests for your attention arrive here.",
+  archive: "The village's recorded artifacts, journals, and routines.",
+  noticeboard: "Available jobs and recorded work across Warren.",
+};
+const stateLabel = (state) =>
+  state === "knocking" ? "Needs you" : state?.replaceAll("_", " ") || "Unknown";
+const timeLabel = (ts) =>
+  ts && !Number.isNaN(Date.parse(ts))
+    ? new Date(ts).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : "Unknown time";
+
+function Portrait({ agent, large = false }) {
+  return (
+    <span
+      className={`ve-portrait ${large ? "ve-portrait-large" : ""}`}
+      style={{
+        "--coat": agent.appearance?.body || agent.accent || "#678477",
+        "--skin": agent.appearance?.skin || "#d5ac86",
+        "--hat": agent.appearance?.hat || "#74523c",
+      }}
+      aria-hidden="true"
+    >
+      <i className="ve-portrait-body" />
+      <i className="ve-portrait-face" />
+      <i className="ve-portrait-hat" />
+    </span>
+  );
+}
+
+function Records({ title, items, children }) {
+  return (
+    <section className="ve-detail-records">
+      <h4>
+        {title}
+        <span>{items.length}</span>
+      </h4>
+      {items.length ? (
+        <ul>{items.slice(0, 8).map(children)}</ul>
+      ) : (
+        <p className="ve-muted">Nothing recorded.</p>
+      )}
+      {items.length > 8 && <a href="#records">See all records →</a>}
+    </section>
+  );
+}
+
+function AgentDetails({
+  agent,
+  snapshot,
+  follow,
+  setFollow,
+  onClose,
+  detailRef,
+}) {
+  const charter = snapshot.residents.find(
+    (r) => r.file === agent.resident_file,
+  );
+  const tasks = snapshot.tasks
+    .filter((t) => t.claimant === agent.id || t.assignee === agent.id)
+    .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  const routines = snapshot.routines
+    .filter((r) => r.agent_id === agent.id)
+    .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  const artifacts = snapshot.artifacts
+    .filter((a) => a.agent_id === agent.id)
+    .sort((a, b) => b.ts.localeCompare(a.ts));
+  return (
+    <section
+      ref={detailRef}
+      className="ve-dossier"
+      aria-label="Selected villager"
+    >
+      <div className="ve-detail-heading">
+        <Portrait agent={agent} large />
+        <button
+          className="ve-icon-button"
+          onClick={onClose}
+          aria-label="Close villager details"
+        >
+          ×
+        </button>
+      </div>
+      <p className="ve-kicker">
+        {agent.residency === "resident" ? "Village resident" : "Visiting agent"}
+      </p>
+      <h3>{agent.name}</h3>
+      {charter?.meta.role && <p className="ve-role">{charter.meta.role}</p>}
+      <div className="ve-detail-status">
+        <span className="ve-state" data-state={agent.state}>
+          {stateLabel(agent.state)}
+        </span>
+        <button
+          className="ve-text-button"
+          aria-pressed={follow}
+          onClick={() => setFollow(!follow)}
+        >
+          {follow ? "Following · stop" : "Follow agent ↗"}
+        </button>
+      </div>
+      <p className="ve-current">
+        {agent.last_line || "No recent activity recorded."}
+      </p>
+      <dl className="ve-facts">
+        <dt>Project</dt>
+        <dd>{agent.project || "None"}</dd>
+        <dt>Last seen</dt>
+        <dd>
+          {agent.last_ts ? (
+            <time
+              dateTime={agent.last_ts}
+              title={new Date(agent.last_ts).toLocaleString()}
+            >
+              {new Date(agent.last_ts).toLocaleString()}
+            </time>
+          ) : (
+            "Unknown"
+          )}
+        </dd>
+      </dl>
+      {charter?.body && (
+        <details className="ve-charter">
+          <summary>About this resident</summary>
+          <p>{charter.body}</p>
+          {Object.keys(charter.capabilities || {}).length > 0 && (
+            <dl className="ve-facts">
+              {Object.entries(charter.capabilities).map(([key, value]) => (
+                <div key={key}>
+                  <dt>{key}</dt>
+                  <dd>
+                    {Array.isArray(value)
+                      ? value.join(", ")
+                      : JSON.stringify(value)}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          )}
+        </details>
+      )}
+      <Records title="Tasks" items={tasks}>
+        {(t) => (
+          <li key={t.id}>
+            <strong>{t.title}</strong>
+            <small>{t.state}</small>
+          </li>
+        )}
+      </Records>
+      <Records title="Routine runs" items={routines}>
+        {(r) => (
+          <li key={r.run_id}>
+            <strong>{r.routine}</strong>
+            <small>
+              {r.state}
+              {r.outcome ? ` · ${r.outcome}` : ""}
+            </small>
+          </li>
+        )}
+      </Records>
+      <Records title="Artifacts" items={artifacts}>
+        {(a, i) => (
+          <li key={`${a.ts}:${i}`}>
+            <strong title={a.artifact}>{a.artifact}</strong>
+            <small>{timeLabel(a.ts)}</small>
+          </li>
+        )}
+      </Records>
+      <Records
+        title="Recent observations"
+        items={[...(agent.history || [])].sort((a, b) =>
+          b.ts.localeCompare(a.ts),
+        )}
+      >
+        {(e, i) => (
+          <li key={`${e.ts}:${i}`}>
+            <strong>{e.type.replaceAll("_", " ")}</strong>
+            <small>{timeLabel(e.ts)}</small>
+          </li>
+        )}
+      </Records>
+    </section>
+  );
+}
+
+export function VillageExperience({ snapshot }) {
+  const layout = useRef(null);
+  if (!layout.current) {
+    let savedLayout = null;
+    try {
+      savedLayout = JSON.parse(
+        localStorage.getItem("arcadia:village-layout:v1"),
+      );
+    } catch {
+      // Storage can be disabled, full, or left with an invalid old value.
+    }
+    layout.current = createVillageLayout(savedLayout);
+  }
+  const world = useMemo(() => layout.current.update(snapshot), [snapshot]);
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        "arcadia:village-layout:v1",
+        JSON.stringify(layout.current.serialize()),
+      );
+    } catch {
+      // Persistence is optional: the live village still works without storage.
+    }
+  }, [world]);
+  const [selection, setSelection] = useState(null);
+  const detailRef = useRef(null);
+  useEffect(() => {
+    if (!selection || !globalThis.matchMedia?.("(max-width: 800px)").matches)
+      return;
+    detailRef.current?.scrollIntoView?.({
+      behavior: globalThis.matchMedia?.("(prefers-reduced-motion: reduce)")
+        .matches
+        ? "auto"
+        : "smooth",
+      block: "nearest",
+    });
+  }, [selection?.kind, selection?.id]);
+  const [query, setQuery] = useState("");
+  const [tab, setTab] = useState("people");
+  const [filter, setFilter] = useState("all");
+  const [paused, setPaused] = useState(
+    () =>
+      globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches ??
+      false,
+  );
+  const [quality, setQuality] = useState("high");
+  const [follow, setFollow] = useState(false);
+  const [cameraCommand, setCameraCommand] = useState(null);
+  const [ready, setReady] = useState(false);
+  const [error, setError] = useState(null);
+  const [feedOpen, setFeedOpen] = useState(false);
+  const [localTime, setLocalTime] = useState(() => new Date());
+  const [announcement, setAnnouncement] = useState(null);
+  const observed = useRef(null);
+  useEffect(() => {
+    const timer = setInterval(() => setLocalTime(new Date()), 60_000);
+    return () => clearInterval(timer);
+  }, []);
+  useEffect(() => {
+    const previous = observed.current;
+    const baseline = {
+      generation: snapshot.generation,
+      logGeneration: snapshot.log_generation,
+      agentIds: new Set(world.agents.map((agent) => agent.id)),
+      tasks: new Map(snapshot.tasks.map((task) => [task.id, task.state])),
+    };
+    // A fresh page or a replaced Chronicle log establishes a quiet baseline.
+    if (
+      !previous ||
+      snapshot.generation < previous.generation ||
+      snapshot.log_generation !== previous.logGeneration
+    ) {
+      observed.current = baseline;
+      setAnnouncement(null);
+      return;
+    }
+    if (snapshot.generation === previous.generation) return;
+    const arrivals = world.agents.filter(
+      (agent) => !previous.agentIds.has(agent.id),
+    );
+    const completed = snapshot.tasks.filter(
+      (task) =>
+        task.state === "done" &&
+        previous.tasks.has(task.id) &&
+        previous.tasks.get(task.id) !== "done",
+    );
+    baseline.agentIds = new Set([...previous.agentIds, ...baseline.agentIds]);
+    observed.current = baseline;
+    const messages = [];
+    if (arrivals.length)
+      messages.push(
+        arrivals.length === 1
+          ? `${arrivals[0].name} arrived in the village.`
+          : `${arrivals.length} agents arrived in the village.`,
+      );
+    if (completed.length)
+      messages.push(
+        completed.length === 1
+          ? `Task completed: ${completed[0].title}.`
+          : `${completed.length} tasks completed.`,
+      );
+    if (messages.length)
+      setAnnouncement({
+        generation: snapshot.generation,
+        text: messages.join(" "),
+      });
+  }, [snapshot, world]);
+  useEffect(() => {
+    if (!announcement) return;
+    const timer = setTimeout(() => setAnnouncement(null), 9_000);
+    return () => clearTimeout(timer);
+  }, [announcement]);
+  const onReady = useCallback(() => {
+    setReady(true);
+    setError(null);
+  }, []);
+  const onError = useCallback((e) => {
+    setError(e?.message || "3D rendering is unavailable.");
+  }, []);
+  const command = (type) => {
+    if (type === "reset") setFollow(false);
+    setCameraCommand((previous) => ({
+      type,
+      nonce: (previous?.nonce || 0) + 1,
+    }));
+  };
+  const select = useCallback((next) => {
+    setSelection(next);
+    setFollow(false);
+  }, []);
+  const selectedAgent =
+    selection?.kind === "agent"
+      ? world.agents.find((a) => a.id === selection.id)
+      : null;
+  const selectedBuilding =
+    selection?.kind === "building"
+      ? world.buildings.find((b) => b.id === selection.id)
+      : null;
+  useEffect(() => {
+    if (selection && !selectedAgent && !selectedBuilding) {
+      setSelection(null);
+      setFollow(false);
+    }
+  }, [selection, selectedAgent, selectedBuilding]);
+  const projects = world.buildings.filter((b) => b.kind === "workshop");
+  const search = query.toLowerCase().trim();
+  const people = world.agents
+    .filter(
+      (a) =>
+        `${a.name} ${a.project || ""} ${a.state}`
+          .toLowerCase()
+          .includes(search) &&
+        (filter === "all" ||
+          (filter === "residents"
+            ? a.residency === "resident"
+            : a.state === "working")),
+    )
+    .sort(
+      (a, b) =>
+        Number(b.residency === "resident") -
+          Number(a.residency === "resident") ||
+        a.name.localeCompare(b.name) ||
+        a.id.localeCompare(b.id),
+    );
+  const visibleProjects = projects.filter((p) =>
+    `${p.name} ${p.project || ""}`.toLowerCase().includes(search),
+  );
+  const approvals = pendingApprovals(snapshot.approvals);
+  const events = useMemo(
+    () =>
+      snapshot.villagers
+        .flatMap((a) =>
+          (a.history || []).map((event, index) => ({
+            ...event,
+            agentName: a.name,
+            agentId: a.id,
+            key: `${a.id}:${index}:${event.ts}`,
+          })),
+        )
+        .sort((a, b) => b.ts.localeCompare(a.ts))
+        .slice(0, 12),
+    [snapshot],
+  );
+  const working = world.agents.filter((a) => a.state === "working").length;
+  return (
+    <div id="village" className="ve-experience">
+      <header className="ve-introduction">
+        <h2>The clearing</h2>
+        <p>
+          {world.agents.length} {world.agents.length === 1 ? "agent" : "agents"}
+          <span> / </span>
+          {projects.length} {projects.length === 1 ? "project" : "projects"}
+          <span> / </span>
+          {working} working
+        </p>
+      </header>
+      <div className="ve-main">
+        <section className="ve-world-panel" aria-label="Village">
+          <div className="ve-world-heading">
+            <span className="ve-map-label">
+              <i />
+              WARREN · THE CLEARING
+            </span>
+            <span className="ve-world-note">A home for every agent</span>
+          </div>
+          <div className="ve-canvas">
+            <VillageWorld
+              world={world}
+              selection={selection}
+              onSelect={select}
+              paused={paused}
+              quality={quality}
+              follow={follow}
+              cameraCommand={cameraCommand}
+              onReady={onReady}
+              onError={onError}
+            />
+            {!ready && !error && (
+              <div className="ve-scene-message">Opening the village…</div>
+            )}
+            {error && (
+              <div className="ve-scene-message ve-scene-error" role="status">
+                <strong>The village view couldn't open.</strong>
+                <p>Everyone is still available in the directory.</p>
+                <details>
+                  <summary>Rendering details</summary>
+                  {error}
+                </details>
+              </div>
+            )}
+          </div>
+          {announcement && (
+            <div
+              className="ve-announcement"
+              role="status"
+              aria-label="Village update"
+            >
+              <span>{announcement.text}</span>
+              <button
+                onClick={() => setAnnouncement(null)}
+                aria-label="Dismiss village update"
+              >
+                ×
+              </button>
+            </div>
+          )}
+          <div className="ve-map-overlay">
+            <div className="ve-camera" aria-label="Village camera controls">
+              {[
+                ["zoom-in", "+", "Zoom in"],
+                ["zoom-out", "−", "Zoom out"],
+                ["rotate-left", "↶", "Rotate left"],
+                ["rotate-right", "↷", "Rotate right"],
+                ["reset", "⌂", "Reset camera"],
+              ].map(([type, icon, label]) => (
+                <button
+                  key={type}
+                  type="button"
+                  aria-label={label}
+                  title={label}
+                  onClick={() => command(type)}
+                >
+                  {icon}
+                </button>
+              ))}
+            </div>
+          </div>
+          {approvals.length > 0 && (
+            <div className="ve-attention">
+              <span className="ve-attention-mark">!</span>
+              <div>
+                <strong>
+                  {approvals.length}{" "}
+                  {approvals.length === 1 ? "request needs" : "requests need"}{" "}
+                  your attention
+                </strong>
+                <span>Waiting in the village square</span>
+              </div>
+              <button
+                onClick={() => {
+                  const agent = world.agents.find(
+                    (a) => a.id === approvals[0].agent_id,
+                  );
+                  select(
+                    agent
+                      ? { kind: "agent", id: agent.id }
+                      : {
+                          kind: "building",
+                          id: world.buildings.find((b) => b.kind === "square")
+                            ?.id,
+                        },
+                  );
+                }}
+                aria-label="Locate agent needing attention"
+              >
+                Locate ↗
+              </button>
+              <a href="#approvals">Review →</a>
+            </div>
+          )}
+          <footer className="ve-world-footer">
+            <time
+              className="ve-local-time"
+              dateTime={localTime.toISOString()}
+              title="Your local time"
+            >
+              {daylightAt(localTime).phase} ·{" "}
+              {timeLabel(localTime.toISOString())} local
+            </time>
+            <span className="ve-navigation-hint">
+              Drag to explore · scroll to zoom
+            </span>
+            <div>
+              <button aria-pressed={paused} onClick={() => setPaused(!paused)}>
+                {paused ? "Resume motion" : "Pause motion"}
+              </button>
+              <label className="ve-quality">
+                <span className="sr-only">Rendering quality</span>
+                <select
+                  aria-label="Rendering quality"
+                  value={quality}
+                  onChange={(e) => setQuality(e.target.value)}
+                >
+                  <option value="high">Full detail</option>
+                  <option value="low">Light detail</option>
+                </select>
+              </label>
+            </div>
+          </footer>
+        </section>
+        <aside className="ve-sidebar" aria-label="Villagers">
+          <header className="ve-directory-heading">
+            <p className="ve-kicker">Around the village</p>
+            <div className="ve-tabs" aria-label="Village directory">
+              <button
+                aria-pressed={tab === "people"}
+                onClick={() => setTab("people")}
+              >
+                People <span>{world.agents.length}</span>
+              </button>
+              <button
+                aria-pressed={tab === "projects"}
+                onClick={() => setTab("projects")}
+              >
+                Projects <span>{projects.length}</span>
+              </button>
+            </div>
+          </header>
+          <label className="ve-search">
+            <span aria-hidden="true">⌕</span>
+            <span className="sr-only">Find a villager</span>
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Find an agent or project…"
+            />
+          </label>
+          {tab === "people" && (
+            <div className="ve-filters" aria-label="Filter villagers">
+              {[
+                ["all", "Everyone"],
+                ["residents", "Residents"],
+                ["working", "Working"],
+              ].map(([value, label]) => (
+                <button
+                  key={value}
+                  aria-pressed={filter === value}
+                  onClick={() => setFilter(value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+          <div
+            className={`ve-directory ${selection ? "ve-directory-compact" : ""}`}
+          >
+            {tab === "people"
+              ? people.map((a) => (
+                  <button
+                    className="person ve-person"
+                    key={a.id}
+                    aria-pressed={selectedAgent?.id === a.id}
+                    onClick={() =>
+                      select(
+                        selectedAgent?.id === a.id
+                          ? null
+                          : { kind: "agent", id: a.id },
+                      )
+                    }
+                  >
+                    <Portrait agent={a} />
+                    <span className="ve-person-copy">
+                      <strong>{a.name}</strong>
+                      <small>
+                        {a.project ||
+                          (a.residency === "resident"
+                            ? "At home"
+                            : "Visitor lodge")}
+                      </small>
+                    </span>
+                    <span className="ve-person-state" data-state={a.state}>
+                      <i />
+                      {stateLabel(a.state)}
+                    </span>
+                  </button>
+                ))
+              : visibleProjects.map((b) => (
+                  <button
+                    className="ve-project"
+                    aria-label={`${b.project || b.name} ${b.agentIds.length} ${b.agentIds.length === 1 ? "agent" : "agents"} · Workshop`}
+                    key={b.id}
+                    aria-pressed={selectedBuilding?.id === b.id}
+                    onClick={() => select({ kind: "building", id: b.id })}
+                  >
+                    <span className="ve-building-icon" aria-hidden="true">
+                      ⌂
+                    </span>
+                    <span>
+                      <strong>{b.project || b.name}</strong>
+                      <small>
+                        {b.agentIds.length}{" "}
+                        {b.agentIds.length === 1 ? "agent" : "agents"} ·
+                        Workshop
+                      </small>
+                    </span>
+                    <span aria-hidden="true">↗</span>
+                  </button>
+                ))}
+            {tab === "people" && !people.length && (
+              <p className="ve-empty">
+                {world.agents.length
+                  ? "No villagers match this view."
+                  : "The village is quiet. Residents will appear here when Chronicle observes them."}
+              </p>
+            )}
+            {tab === "projects" && !visibleProjects.length && (
+              <p className="ve-empty">
+                {projects.length
+                  ? "No projects match this search."
+                  : "Workshops appear when agents have a project."}
+              </p>
+            )}
+          </div>
+          <nav className="ve-places" aria-label="Village places">
+            {world.buildings
+              .filter((b) =>
+                ["square", "lodge", "archive", "noticeboard"].includes(b.kind),
+              )
+              .map((b) => (
+                <button
+                  key={b.id}
+                  aria-pressed={selectedBuilding?.id === b.id}
+                  onClick={() => select({ kind: "building", id: b.id })}
+                >
+                  {b.name}
+                </button>
+              ))}
+          </nav>
+          {selectedAgent ? (
+            <AgentDetails
+              detailRef={detailRef}
+              agent={selectedAgent}
+              snapshot={snapshot}
+              follow={follow}
+              setFollow={setFollow}
+              onClose={() => select(null)}
+            />
+          ) : selectedBuilding ? (
+            <section
+              ref={detailRef}
+              className="ve-dossier"
+              aria-label="Selected building"
+            >
+              <div className="ve-detail-heading">
+                <span className="ve-building-icon" aria-hidden="true">
+                  ⌂
+                </span>
+                <button
+                  className="ve-icon-button"
+                  onClick={() => select(null)}
+                  aria-label="Close building details"
+                >
+                  ×
+                </button>
+              </div>
+              <p className="ve-kicker">{selectedBuilding.kind}</p>
+              <h3>{selectedBuilding.name}</h3>
+              <p className="ve-current">{purposes[selectedBuilding.kind]}</p>
+              {world.agents
+                .filter((a) => selectedBuilding.agentIds.includes(a.id))
+                .map((a) => (
+                  <button
+                    className="ve-occupant"
+                    key={a.id}
+                    onClick={() => select({ kind: "agent", id: a.id })}
+                  >
+                    <Portrait agent={a} />
+                    <span>{a.name}</span>
+                    <span>↗</span>
+                  </button>
+                ))}
+              {selectedBuilding.kind === "square" ? (
+                <a className="ve-dossier-link" href="#approvals">
+                  {approvals.length} pending requests →
+                </a>
+              ) : (
+                <a className="ve-dossier-link" href="#records">
+                  Open village records →
+                </a>
+              )}
+            </section>
+          ) : (
+            <div className="ve-explore-note">
+              <span aria-hidden="true">⌂</span>
+              <p>
+                <strong>Come a little closer.</strong>Select a person or a
+                building to discover what's happening.
+              </p>
+            </div>
+          )}
+        </aside>
+      </div>
+      <section className="ve-activity" aria-label="Village activity">
+        <button
+          className="ve-activity-toggle"
+          aria-expanded={feedOpen}
+          onClick={() => setFeedOpen(!feedOpen)}
+        >
+          <span>
+            <i className="ve-activity-dot" />
+            Village journal <small>Recent observations</small>
+          </span>
+          <span>{feedOpen ? "Close −" : "Open +"}</span>
+        </button>
+        {feedOpen && (
+          <div className="ve-feed">
+            {events.length ? (
+              events.map((event) => (
+                <button
+                  key={event.key}
+                  aria-label={`${timeLabel(event.ts)} ${event.agentName} ${event.type.replaceAll("_", " ")}`}
+                  onClick={() => select({ kind: "agent", id: event.agentId })}
+                >
+                  <time dateTime={event.ts} title={event.ts}>
+                    {timeLabel(event.ts)}
+                  </time>
+                  <strong>{event.agentName}</strong>
+                  <span>{event.type.replaceAll("_", " ")}</span>
+                  <span aria-hidden="true">↗</span>
+                </button>
+              ))
+            ) : (
+              <p className="ve-empty">No recent observations recorded.</p>
+            )}
+            <p className="ve-feed-note">
+              Recorded activity from Chronicle. Movement through the village
+              illustrates agent state.
+            </p>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}

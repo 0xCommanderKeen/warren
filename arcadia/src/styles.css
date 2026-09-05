@@ -44,16 +44,16 @@ button:disabled {
   outline-offset: 4px;
 }
 .arcadia-shell {
-  max-width: 1600px;
+  max-width: 1800px;
   margin: auto;
-  padding: 0 44px;
+  padding: 0 30px;
 }
 .masthead {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 20px;
-  padding: 23px 0;
+  padding: 15px 0;
   border-bottom: 1px solid var(--line);
   font:
     11px Cousine,
@@ -88,7 +88,7 @@ button:disabled {
   align-items: end;
   justify-content: space-between;
   gap: 20px;
-  padding: 36px 0 30px;
+  padding: 18px 0 20px;
 }
 .eyebrow {
   font:
@@ -99,11 +99,11 @@ button:disabled {
   color: #6b765e;
 }
 .village-intro h1 {
-  font-size: clamp(48px, 5vw, 74px);
+  font-size: 42px;
   font-weight: normal;
   line-height: 1.05;
   letter-spacing: -0.055em;
-  margin: 8px 0 12px;
+  margin: 5px 0 8px;
 }
 .village-intro > div > p:last-child {
   font-size: 15px;
@@ -144,276 +144,6 @@ button:disabled {
 .village-summary p span {
   color: #c1bfac;
   margin: 0 6px;
-}
-.village-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 310px;
-  align-items: start;
-  gap: 20px;
-}
-.village-map-panel {
-  overflow: hidden;
-  border: 1px solid #b7bda5;
-  border-radius: 7px;
-  background: #dae0b7;
-  box-shadow: 0 5px 14px #293b2110;
-}
-.map-toolbar {
-  min-height: 60px;
-  padding: 14px 20px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  background: #fbfaf0;
-  border-bottom: 1px solid #c8ceaf;
-}
-.map-toolbar > div {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-.map-caption {
-  color: #90947c;
-  font-style: italic;
-  font-size: 13px;
-}
-.map-toolbar button {
-  border: 1px solid #cdd0ba;
-  border-radius: 3px;
-  background: transparent;
-  padding: 7px 10px;
-  color: #5b654d;
-  font:
-    10px Cousine,
-    monospace;
-}
-.map-toolbar button:hover {
-  background: #e9ecd9;
-}
-.village-canvas {
-  position: relative;
-  aspect-ratio: 5 / 3;
-  width: 100%;
-}
-.map-legend {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 18px;
-  padding: 14px 18px;
-  background: #f7f7e9;
-  font:
-    9px Cousine,
-    monospace;
-  color: #636e55;
-  border-top: 1px solid #c8ceaf;
-}
-.map-legend > span {
-  display: flex;
-  gap: 5px;
-  align-items: center;
-}
-.map-hint {
-  margin-left: auto;
-  opacity: 0.8;
-}
-.state-dot {
-  display: inline-block;
-  flex-shrink: 0;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #9ba695;
-}
-.state-dot[data-state="working"] {
-  background: #588655;
-}
-.state-dot[data-state="resting"],
-.state-dot[data-state="idle"] {
-  background: #829cb0;
-}
-.state-dot[data-state="knocking"] {
-  background: #cc8644;
-}
-.state-dot[data-state="failed"] {
-  background: #b65039;
-}
-.state-dot[data-state="stale"] {
-  background: #aaa99d;
-}
-.villager-sidebar {
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--paper);
-  overflow: hidden;
-}
-.villager-sidebar > header {
-  padding: 20px 20px 12px;
-}
-.villager-sidebar h2 {
-  font-size: 25px;
-  font-weight: normal;
-  margin: 5px 0 0;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-.villager-sidebar h2 > span {
-  font:
-    11px Cousine,
-    monospace;
-  color: #88907a;
-}
-.search-field {
-  display: block;
-  margin: 0 16px;
-}
-.search-field input {
-  width: 100%;
-  padding: 10px 11px;
-  background: #f4f3e9;
-  border: 1px solid #e3e3d5;
-  border-radius: 4px;
-  font:
-    11px Cousine,
-    monospace;
-}
-.people-filters {
-  display: flex;
-  gap: 4px;
-  padding: 12px 16px;
-}
-.people-filters button {
-  border: 0;
-  padding: 6px 8px;
-  border-radius: 3px;
-  color: #747d6b;
-  background: transparent;
-  font:
-    10px Cousine,
-    monospace;
-}
-.people-filters button[aria-pressed="true"] {
-  background: #e7ecd9;
-  color: #3c5834;
-}
-.people-list {
-  max-height: 338px;
-  overflow-y: auto;
-  scrollbar-width: thin;
-}
-.person {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 17px;
-  border: 0;
-  border-top: 1px solid #eeeee2;
-  width: 100%;
-  text-align: left;
-  background: transparent;
-}
-.person:hover,
-.person[aria-pressed="true"] {
-  background: #eef1e1;
-}
-.portrait {
-  flex: 0 0 32px;
-  width: 32px;
-  height: 32px;
-  background-size: 128px 32px;
-  image-rendering: pixelated;
-  background-repeat: no-repeat;
-}
-.person-copy {
-  min-width: 0;
-  flex: 1;
-}
-.person-copy strong {
-  display: block;
-  font-size: 15px;
-  font-weight: normal;
-}
-.person-copy small {
-  display: inline-block;
-  margin-left: 6px;
-  font:
-    8px Cousine,
-    monospace;
-  color: #8d947e;
-}
-.person-copy > span {
-  display: block;
-  margin-top: 4px;
-  font:
-    9px Cousine,
-    monospace;
-  color: #868c7b;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-.person-state {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font:
-    8px Cousine,
-    monospace;
-  color: #747d66;
-}
-.sidebar-note,
-.people-empty {
-  font:
-    11px/1.8 Cousine,
-    monospace;
-  color: #858a78;
-  padding: 17px 20px;
-  border-top: 1px solid #eeeee2;
-}
-.person-detail {
-  position: relative;
-  background: #eaf0dc;
-  border-top: 1px solid #d2dabf;
-  padding: 20px;
-  overflow-wrap: anywhere;
-}
-.person-detail h3 {
-  font-size: 24px;
-  margin: 8px 0;
-  font-weight: normal;
-}
-.person-detail > p:not(.eyebrow) {
-  font:
-    11px/1.6 Cousine,
-    monospace;
-}
-.person-detail dl {
-  display: grid;
-  grid-template-columns: 65px 1fr;
-  gap: 8px;
-  font:
-    10px/1.5 Cousine,
-    monospace;
-  margin-top: 15px;
-}
-.person-detail dt {
-  color: #768363;
-}
-.person-detail dd {
-  margin: 0;
-}
-.close-detail {
-  position: absolute;
-  right: 10px;
-  top: 8px;
-  background: transparent;
-  border: 0;
-  font-size: 24px;
-  color: #758361;
-  width: 32px;
-  height: 32px;
 }
 .approval-knocks {
   margin-top: 24px;
@@ -526,37 +256,18 @@ button:disabled {
     monospace;
   color: #909681;
 }
-@media (min-width: 1600px) {
-  .people-list {
-    max-height: 430px;
-  }
+.artifact-path {
+  color: #89907d;
+  font:
+    9px/1.6 Cousine,
+    monospace;
+  overflow-wrap: anywhere;
 }
-@media (max-width: 1100px) {
-  .arcadia-shell {
-    padding: 0 24px;
-  }
-  .village-layout {
-    grid-template-columns: minmax(0, 1fr) 280px;
-    gap: 14px;
-  }
-  .map-caption,
-  .map-hint {
-    display: none;
-  }
-  .person-state > span {
-    display: none;
-  }
+.artifact-path span {
+  display: block;
+  margin: 6px 0;
 }
 @media (max-width: 850px) {
-  .village-layout {
-    grid-template-columns: 1fr;
-  }
-  .people-list {
-    max-height: 240px;
-  }
-  .person-state > span {
-    display: inline;
-  }
   .record-panel {
     grid-column: span 3;
   }
@@ -564,12 +275,16 @@ button:disabled {
     max-width: 210px;
   }
 }
-@media (max-width: 540px) {
+@media (max-width: 600px) {
   .arcadia-shell {
-    padding: 0 14px;
+    padding: 0 12px;
   }
+  .village-intro {
+    gap: 12px;
+  }
+}
+@media (max-width: 540px) {
   .masthead {
-    padding: 14px 0;
     flex-wrap: wrap;
     gap: 12px;
   }
@@ -580,25 +295,13 @@ button:disabled {
   .village-intro {
     align-items: start;
     flex-direction: column;
-    padding: 28px 0 22px;
   }
   .village-summary {
     text-align: left;
     max-width: none;
   }
-  .village-intro h1 {
-    font-size: 56px;
-  }
   .village-intro > div > p:last-child {
     font-size: 14px;
-  }
-  .map-toolbar {
-    padding: 12px;
-  }
-  .map-legend {
-    gap: 12px;
-    padding: 12px;
-    font-size: 8px;
   }
   .section-heading {
     align-items: start;
@@ -614,31 +317,12 @@ button:disabled {
     flex-direction: column;
     gap: 8px;
   }
+  .approval-knocks button {
+    min-height: 40px;
+  }
 }
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;
-  }
-}
-
-.artifact-path {
-  color: #89907d;
-  font:
-    9px/1.6 Cousine,
-    monospace;
-  overflow-wrap: anywhere;
-}
-.artifact-path span {
-  display: block;
-  margin: 6px 0;
-}
-
-@media (max-width: 540px) {
-  .people-filters button,
-  .map-toolbar button {
-    min-height: 40px;
-  }
-  .approval-knocks button {
-    min-height: 40px;
   }
 }

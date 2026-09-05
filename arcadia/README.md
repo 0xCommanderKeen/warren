@@ -1,6 +1,6 @@
 # Arcadia
 
-Arcadia is the village client for [Chronicle](https://github.com/0xCommanderKeen/burrow). React owns the interface and Phaser owns the canvas, connected through the EventBus bridge supplied by `phaserjs/template-react`.
+Arcadia is the village client for [Chronicle](https://github.com/0xCommanderKeen/burrow). React owns the interface; a small Three.js renderer presents an original, expandable miniature village. Buildings, people, paths, and scenery are generated from geometry in this repository.
 
 Arcadia consumes Chronicle's complete, versioned `StateEnvelope` contract. The compatibility fixture is Chronicle's own [`complete-v1.json`](../chronicle/tests/fixtures/state-contract/complete-v1.json), read in-tree through [`src/contract/fixtures/complete-v1.js`](src/contract/fixtures/complete-v1.js) — Arcadia keeps no copy of it, so it cannot drift. Arcadia accepts `snapshot` and `reset` envelopes whose `snapshot.schema_version` is `1`, then renders `snapshot.villagers` directly. It rejects unsupported schema versions before applying any state.
 
@@ -25,9 +25,7 @@ Only Steward's pre-mutation `401` and `422` refusals release the lock for retry.
 
 ## Time of day
 
-**Not rebuilt yet.** The retired in-tree viewer tinted the village and Arcadia has not reimplemented it. The rule is kept here because Arcadia is where the village is drawn: Chronicle has no part in it, and no phase, tint or clock reaches a client through the state contract.
-
-The village is tinted by the **real local time of the machine viewing it** — dawn, day, dusk and night, interpolated so there is never a jump. It is a projection of the clock and nothing else: no weather, no seasons, no simulated sky. After dark, a house's windows and doorway light up only while its villager is genuinely home, your porch lights only while somebody is actually knocking, and the working glow, the knock orange and the stale fade all stay legible. Any development override says so on screen, so a pinned tint never passes as the real thing.
+Lighting follows the viewing machine's real local clock, blending dawn, day, dusk, and night. It is presentation only: Chronicle supplies no simulated weather or clock. Working or resting occupants illuminate their buildings after dark; labels and state indicators remain readable. Reduced-motion preferences pause movement by default.
 
 ## Development
 
@@ -38,13 +36,21 @@ pnpm install
 pnpm dev
 ```
 
-The running app always loads live Chronicle state; the contract fixture is compatibility test data only and is never bundled into the app. The village map is authored as a Tiled JSON export in `public/assets/village.tmj`; tile properties define collision, and the `Places` object layer defines homes, the shared visitor Lodge, street, and work anchors. The map provides terrain, collision, home and Lodge anchors, and scenery. The scene renders the bundled Ninja Adventure houses, trees and animated characters, and fits the complete 640×384 map to its container at every viewport width. Resident sprites and homes persist across snapshots; only added, removed, or moved villagers change their objects or routes.
+The running app loads live Chronicle state; compatibility fixtures are never bundled as village activity. To preview another Chronicle instance:
+
+```sh
+CHRONICLE_URL=http://dxp2800:8738 pnpm dev --host 127.0.0.1
+```
 
 ## Village interface
 
-The village map stays clear of the people list and approval prompts. Select a character on the map or a person in the searchable sidebar to see their latest activity. Filter the list by residents or working villagers. Pause motion from the map toolbar; reduced-motion preferences start it paused. Selection and paused motion survive snapshot updates.
+Residents have stable homes; visitors share expandable lodges and projects receive workshops. The square, archive, and noticeboard provide places to explore people, records, and attention requests. New neighborhoods expand the land without moving existing homes. Validated layout allocations persist locally; browser storage contains identifiers and plot positions, never credentials or event history.
 
-The connection badge distinguishes the live stream from reconnecting with the last snapshot. Approval answers still go through the non-optimistic Steward boundary below the village, with details expandable before deciding. Village records show recent work first and scroll inside bounded, keyboard-focusable panels; artifact filenames expand to reveal their full paths.
+Select an agent or building in the scene or accessible directory to inspect real work, routines, artifacts, and history. Search people and projects, follow an agent, reset or rotate the camera, pan and zoom, pause motion, or choose lighter rendering. Unsupported WebGL and context loss leave the directory and operational controls usable. Keyboard users can reach the same selections through the directory and civic navigation.
+
+Agents move along paths only when projected state changes their destination. Initial snapshots do not replay invented travel or announcements. Arrivals and completed-work notices derive from new Chronicle snapshot boundaries. Approval decisions still pass through the existing non-optimistic Steward boundary; presentation does not invent agent conversations or change authority.
+
+See [the village design and verification notes](docs/living-village.md) for module boundaries and performance evidence.
 
 ## Verification
 
@@ -55,7 +61,7 @@ pnpm exec playwright install chromium
 pnpm test:browser
 ```
 
-`pnpm test:browser` runs the production build at desktop, tablet, and phone widths, checks canvas fitting, overflow, resident selection, motion controls, stream updates, and the production backend restriction. Set `PLAYWRIGHT_CHANNEL=chrome` to use an installed Chrome locally. CI installs Chromium and runs both suites.
+`pnpm test:browser` runs the production build at desktop, tablet, and phone widths, checks canvas fitting, overflow, selection, motion controls, stream updates, populations of 0/5/25/100 agents, graphics-context failure, and the production backend restriction. Set `PLAYWRIGHT_CHANNEL=chrome` to use an installed Chrome locally. CI installs Chromium and runs both suites.
 
 `pnpm test` parses Chronicle's complete fixture and checks that an unsupported contract version produces a visible error instead of a partially rendered village.
 

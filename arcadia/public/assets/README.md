@@ -1,27 +1,7 @@
 # Arcadia assets
 
-Everything Vite copies verbatim into the build and Phaser loads at runtime from `/assets/`.
-
-## Pixel art — CC0, credit the author anyway
-
-Pixel art from the **Ninja Adventure Asset Pack** by [pixel-boy & AAA](https://pixel-boy.itch.io/ninja-adventure-asset-pack), licensed **CC0** (public domain). Thank you, pixel-boy — consider supporting the pack on itch.io.
-
-- `tilesets/` — ground, nature, and house tilesets (16×16)
-- `characters/<Name>-walk.png` — 64×64 sheets: 4 columns (facing down, up, left, right) × 4 walk frames
-- `characters/<Name>-idle.png` — 64×16: one standing frame per direction
-- `shadow.png` — blob shadow drawn under villagers
-
-These arrived here from Chronicle's retired in-tree viewer, which is where they were first
-used. CC0 asks for nothing, but the attribution travels with the files regardless.
+The village uses original procedural Three.js geometry in `src/world/art.js`, with layout and rendering in the adjacent modules. No external character sheets, tile sets, or fixed map are required. The original SVG favicon lives in `public/favicon.svg`.
 
 ## Font
 
-- `fonts/CousineSnapshot.ttf` — [Cousine](https://github.com/googlefonts/cousine), licensed
-  under the SIL Open Font License 1.1. `fonts/CousineSnapshot-LICENSE.txt` is that license
-  and must stay beside the font.
-
-## Map and terrain
-
-- `village.tmj` — the village map, authored as a Tiled JSON export. Arcadia's own.
-- `village-tiles.svg` — grass and path textures used by the terrain layer. Arcadia's own.
-  Buildings, characters and scenery use the CC0 pixel art above.
+`fonts/CousineSnapshot.ttf` is [Cousine](https://github.com/googlefonts/cousine), licensed under the SIL Open Font License 1.1. Keep `fonts/CousineSnapshot-LICENSE.txt` beside it.

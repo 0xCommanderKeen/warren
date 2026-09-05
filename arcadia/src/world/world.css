@@ -1,0 +1,7 @@
+.village-world { width:100%; height:100%; position:relative; overflow:hidden; touch-action:none; }
+.village-world canvas { width:100%; height:100%; display:block; outline:none; }
+.world-labels { position:absolute; inset:0; pointer-events:none; overflow:hidden; }
+.world-label { position:absolute; left:0; top:0; transform:translate(-50%,-100%); background:rgb(252 249 237 / 90%); color:#394a3a; padding:5px 9px; border:1px solid rgb(90 99 71 / 18%); border-radius:5px; box-shadow:0 3px 10px #20342615; white-space:nowrap; font:10px/1.3 Cousine,monospace; transition:opacity .18s; max-width:170px; overflow:hidden; text-overflow:ellipsis; }
+.world-label.selected { background:#284c3a; color:#fff5dd; border-color:#284c3a; z-index:2; font-size:11px; }
+.world-label.selected::after { content:''; position:absolute; bottom:-5px; left:calc(50% - 4px); border:4px solid transparent; border-top-color:#284c3a; border-bottom:0; }
+@media(max-width:600px) { .world-label { font-size:8px; padding:4px 6px; max-width:120px; } }

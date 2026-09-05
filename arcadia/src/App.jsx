@@ -3,7 +3,7 @@ import { pendingApprovals } from "./contract/approvals.js";
 import {
   ContractValidationError, parseSnapshot, UnsupportedSchemaVersionError,
 } from "./contract/parseSnapshot.js";
-import { VillageOverview } from "./panels/VillageOverview.jsx";
+import { VillageExperience } from "./panels/VillageExperience.jsx";
 import { ReadOnlyPanels } from "./panels/ReadOnlyPanels.jsx";
 import { createStateTransport } from "./transport/createStateTransport.js";
 
@@ -159,6 +159,7 @@ function ApprovalKnocks({ snapshot, stewardClient }) {
       aria-busy={submittedRequestId !== null}
       aria-label="Approval knocks"
       className="approval-knocks"
+      id="approvals"
     >
       {!credentialsReady ? (
         <form className="border-2 border-[#2a1817] bg-[#fff8e7] p-3 shadow-[5px_5px_0_#785a25]" onSubmit={unlock}>
@@ -243,13 +244,13 @@ export function App({ envelope, stewardClient = null, connectionStatus = "live" 
         <nav aria-label="Main navigation"><a href="#village">Village</a><a href="#records">Village records</a><a href="/observatory/">Townhall ↗</a></nav>
       </header>
       <section className="village-intro">
-        <div><p className="eyebrow">A little place for the work to happen</p><h1>Arcadia</h1><p>Your residents, their visitors, and the life between tasks.</p></div>
+        <div><h1>Arcadia</h1><p>Follow the work. Meet the people. Find your place in the village.</p></div>
         <div className="village-summary"><span className={`connection connection-${connectionStatus}`} role="status" aria-label="Village connection"><i />{connectionStatus === "live" ? "Live village" : "Reconnecting · showing last snapshot"}</span><p>{snapshot.villagers.filter(v => v.state === "working").length} working <span> / </span>{pendingApprovals(snapshot.approvals).length} awaiting an answer</p></div>
       </section>
-      <VillageOverview snapshot={snapshot} />
+      <VillageExperience snapshot={snapshot} />
       <ApprovalKnocks snapshot={snapshot} stewardClient={stewardClient} />
       <section id="records" className="records-section"><div className="section-heading"><div><p className="eyebrow">The village almanac</p><h2>What’s been happening</h2></div><p>Work, routines, and the things left behind.</p></div><ReadOnlyPanels snapshot={snapshot} /></section>
-      <footer className="village-footer"><span>Arcadia · a window into Warren</span><span>Pixel art by pixel-boy &amp; AAA · Ninja Adventure</span></footer>
+      <footer className="village-footer"><span>Arcadia · a window into Warren</span><span>An original miniature world · Powered by Warren</span></footer>
     </main>
   );
 }
