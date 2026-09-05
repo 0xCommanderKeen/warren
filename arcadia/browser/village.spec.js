@@ -250,3 +250,33 @@ test("homes and lodge open with their occupants and retain a directory on room g
   await expect(page.locator('canvas[data-renderer="three"]')).toBeVisible();
   clean(observed);
 });
+
+test("personal workstations stay put through departures, return navigation and reload", async ({ page }) => {
+  const envelope = population(3);
+  envelope.snapshot.villagers.forEach(agent => { agent.state = "working"; });
+  const observed = await load(page, envelope);
+  await ready(page, 3);
+  await page.getByRole("button", { name: "Workshop", exact: true }).click();
+  const room = page.getByTestId("interior-canvas");
+  const station = async () => {
+    const stations = JSON.parse(await room.getAttribute("data-stations"));
+    return stations.find(item => item.id === "claude:resident-1").position;
+  };
+  await expect(room).toHaveAttribute("data-agents", "3");
+  const original = await station();
+  envelope.snapshot.generation += 1;
+  envelope.snapshot.villagers.shift();
+  await page.evaluate(next => window.villageStream.listeners.snapshot({ data: JSON.stringify(next) }), envelope);
+  await expect(room).toHaveAttribute("data-agents", "2");
+  expect(await station()).toEqual(original);
+  await page.getByRole("button", { name: "Back to village", exact: true }).click();
+  await page.getByRole("button", { name: "Workshop", exact: true }).click();
+  await expect(room).toHaveAttribute("data-agents", "2");
+  expect(await station()).toEqual(original);
+  await page.reload();
+  await ready(page, 2);
+  await page.getByRole("button", { name: "Workshop", exact: true }).click();
+  await expect(room).toHaveAttribute("data-agents", "2");
+  expect(await station()).toEqual(original);
+  clean(observed);
+});

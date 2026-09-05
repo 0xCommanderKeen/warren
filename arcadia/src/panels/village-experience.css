@@ -1333,3 +1333,169 @@
   bottom: 18px;
   z-index: 2;
 }
+.ve-tabs {
+  gap: 12px;
+}
+.ve-tabs > button {
+  font-size: 18px;
+}
+.ve-tabs span {
+  font-size: 9px;
+  padding: 2px 3px;
+}
+.ve-room-roster {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr));
+  max-height: 220px;
+}
+.ve-room-roster > .ve-space-card {
+  display: flex;
+  align-items: stretch;
+  flex-direction: column;
+  gap: 7px;
+  padding: 12px;
+  border-radius: 11px;
+  min-width: 0;
+}
+.ve-space-person {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.ve-space-person > span:nth-child(2) {
+  flex: 1;
+  min-width: 0;
+}
+.ve-space-person .ve-person-state {
+  flex: none;
+  font-size: 8px;
+}
+.ve-room-roster .ve-space-person strong {
+  max-width: none;
+}
+.ve-space-task {
+  font-size: 11px;
+  color: #4e6545;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.ve-space-observation {
+  font-size: 10px;
+  line-height: 1.6;
+  color: #818971;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.ve-space-output {
+  font-size: 9px;
+  color: #9a855e;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-align: left;
+  border-top: 1px solid #ece8da;
+  padding-top: 6px;
+}
+.ve-building-preview {
+  border-bottom: 1px solid var(--ve-line);
+  padding: 2px 5px;
+}
+.ve-building-preview > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  padding: 10px 0;
+  list-style: none;
+}
+.ve-building-preview > summary::-webkit-details-marker {
+  display: none;
+}
+.ve-building-preview > summary:after {
+  content: "+";
+  margin-left: auto;
+  color: #91a17c;
+}
+.ve-building-preview[open] > summary:after {
+  content: "−";
+}
+.ve-building-preview > summary > span:nth-child(2) {
+  min-width: 0;
+}
+.ve-building-preview strong {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.ve-building-preview small {
+  display: block;
+  font-size: 10px;
+  color: #8b957c;
+  margin-top: 4px;
+}
+.ve-building-preview-body {
+  padding: 0 0 12px 48px;
+}
+.ve-building-preview-body ul {
+  list-style: none;
+  margin: 0 0 9px;
+  padding: 0;
+  max-height: 130px;
+  overflow: auto;
+}
+.ve-building-preview-body li {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  align-items: center;
+  padding: 5px 0;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.ve-building-preview-body li small {
+  flex-shrink: 0;
+  margin: 0;
+  font-size: 9px;
+}
+.ve-building-preview-body p {
+  font-size: 10px;
+  line-height: 1.7;
+  color: #879278;
+  margin: 0 0 9px;
+}
+.ve-building-preview-body button {
+  border: 0;
+  background: #e7eddd;
+  border-radius: 5px;
+  padding: 7px 9px;
+  color: #597349;
+  font-size: 10px;
+  text-align: left;
+}
+@media (max-width: 1100px) {
+  .ve-tabs {
+    gap: 8px;
+  }
+  .ve-tabs > button {
+    font-size: 16px;
+  }
+  .ve-tabs span {
+    font-size: 8px;
+    padding: 2px;
+  }
+}
+@media (max-width: 800px) {
+  .ve-directory:has(.ve-building-preview) {
+    display: block;
+  }
+  .ve-room-roster {
+    max-height: 240px;
+  }
+}

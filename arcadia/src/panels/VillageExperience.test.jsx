@@ -512,3 +512,70 @@ it("controls the room camera independently of the outdoor camera", () => {
   );
   expect(interiorProps.cameraCommand).toBeNull();
 });
+
+describe("personal work cards and building previews", () => {
+  function workingSnapshot() {
+    const data = snapshot();
+    data.villagers[0].state = "working";
+    data.villagers[0].pending_approval_ids = [];
+    data.approvals = [];
+    return data;
+  }
+  it("shows a claimed task and recorded activity on an agent's desk card, never history payload work", () => {
+    const data = workingSnapshot();
+    data.villagers[0].last_line = "Reading the latest report.";
+    data.villagers[0].history[0].payload.title =
+      "Invented historical assignment";
+    render(<VillageExperience snapshot={data} />);
+    fireEvent.click(
+      within(
+        screen.getByRole("navigation", { name: "Village places" }),
+      ).getByRole("button", { name: "Workshop" }),
+    );
+    const room = screen.getByRole("region", { name: "Building interior" });
+    const card = within(room).getByRole("button", {
+      name: /Keeper.*Desk.*Freeze contract/,
+    });
+    expect(card).toHaveTextContent("working");
+    expect(card).toHaveTextContent("Reading the latest report.");
+    expect(card).toHaveTextContent("Latest output · report.md");
+    expect(card).not.toHaveTextContent("Invented historical assignment");
+    expect(card).not.toHaveTextContent("Draft the letter");
+    fireEvent.click(card);
+    expect(
+      screen.getByRole("region", { name: "Selected villager" }),
+    ).toBeVisible();
+  });
+  it("previews actual occupancy and names without entering, then updates counts from the snapshot", () => {
+    const data = workingSnapshot();
+    const view = render(<VillageExperience snapshot={data} />);
+    fireEvent.click(screen.getByRole("button", { name: /Buildings/ }));
+    const home = [...document.querySelectorAll(".ve-building-preview")].find(
+      (item) => item.textContent.includes("Keeper’s home"),
+    );
+    const workshop = [
+      ...document.querySelectorAll(".ve-building-preview"),
+    ].find((item) => item.querySelector("strong").textContent === "Workshop");
+    expect(home).toHaveTextContent("0 inside");
+    expect(workshop).toHaveTextContent("1 working");
+    expect(workshop).toHaveTextContent("Keeper");
+    expect(
+      screen.queryByRole("region", { name: "Building interior" }),
+    ).toBeNull();
+    const next = workingSnapshot();
+    next.generation += 1;
+    next.villagers[0].state = "resting";
+    view.rerender(<VillageExperience snapshot={next} />);
+    expect(home).toHaveTextContent("1 inside");
+    expect(workshop).toHaveTextContent("0 working");
+    expect(workshop).not.toHaveTextContent("Keeper");
+    home.open = true;
+    fireEvent.click(
+      within(home).getByRole("button", { name: /Enter Keeper’s home/ }),
+    );
+    expect(
+      screen.getByRole("region", { name: "Building interior" }),
+    ).toHaveTextContent("Bed");
+    expect(interiorProps.agents[0].name).toBe("Keeper");
+  });
+});

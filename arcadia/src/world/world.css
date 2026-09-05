@@ -5,3 +5,5 @@
 .world-label.selected { background:#284c3a; color:#fff5dd; border-color:#284c3a; z-index:2; font-size:11px; }
 .world-label.selected::after { content:''; position:absolute; bottom:-5px; left:calc(50% - 4px); border:4px solid transparent; border-top-color:#284c3a; border-bottom:0; }
 @media(max-width:600px) { .world-label { font-size:8px; padding:4px 6px; max-width:120px; } }
+
+.world-label.selected { white-space:pre-line; max-width:230px; text-align:center; }

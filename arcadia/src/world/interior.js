@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { createArtKit } from "./art.js";
+import { createRoomLayout } from "./roomLayout.js";
 
 /** A furnished cutaway room. Furniture is illustrative; only supplied agents appear. */
 export function createInteriorRenderer(host, { onSelect, onError } = {}) {
@@ -48,6 +49,8 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
   const materials = new Map();
   const batchMaterials = new Map();
   const names = [];
+  const fallbackLayout = createRoomLayout();
+  const knownNames = new Map();
   let disposed = false, frame = 0, needsRender = true, signature = "", buildingId = null;
   let extent = { width: 16, depth: 13 }, state = null, lastCommand = null;
   const projected = new THREE.Vector3();
@@ -77,13 +80,14 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
     group.add(mesh);
     return mesh;
   }
-  function label(text, position, always = false) {
+  function label(text, position, always = false, compact = text, present = true) {
     const element = document.createElement("div");
     element.textContent = text;
+    element.title = text;
     element.style.cssText = "position:absolute;transform:translate(-50%,-100%);padding:4px 7px;border-radius:5px;background:#fcf8edee;color:#334d42;font:10px/1.3 Cousine,monospace;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid #5b6b4529;";
     if (always) element.style.cssText += "font-size:12px;background:#35594eee;color:#fff3d9;";
     labels.appendChild(element);
-    names.push({ element, position: new THREE.Vector3(...position), always });
+    names.push({ element, position: new THREE.Vector3(...position), always, text, compact, present });
   }
   function plant(group, x, z, size = 1) {
     part(group, "pot", [x, 0.22 * size, z], [0.5 * size, 0.44 * size, 0.5 * size], "cylinder");
@@ -138,17 +142,13 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
       mesh.computeBoundingSphere(); root.add(mesh);
     }
   }
-  function rebuild(building, occupants) {
+  function rebuild(building, occupants, layout) {
     root.children.forEach(mesh => mesh.dispose()); root.clear();
     names.splice(0).forEach(name => name.element.remove());
     const workshop = building.kind === "workshop";
     const sleeping = building.kind === "home" || building.kind === "lodge";
     const count = occupants.length;
-    const columns = Math.max(2, Math.ceil(Math.sqrt(Math.max(1, count) * 1.25)));
-    const rows = Math.max(1, Math.ceil(Math.max(1, count) / columns));
-    const cellW = 3.4, cellD = sleeping ? 3.6 : 3.4;
-    const width = Math.max(11, columns * cellW + 3.6);
-    const depth = Math.max(10, rows * cellD + 4.5);
+    const { width, depth } = layout;
     extent = { width, depth };
     const room = new THREE.Group();
     const objects = [room];
@@ -184,14 +184,27 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
     part(room, workshop ? "teal" : "cream", [0, 0.093, 0.3], [width - 3.15, 0.015, depth - 3.35]);
     label(building.name || "Inside the village", [0, 3.7, -depth / 2], true);
     // Empty rooms remain furnished, without inventing occupants or activity.
-    const stations = Math.max(1, count);
-    for (let i = 0; i < stations; i++) {
-      const col = i % columns, row = Math.floor(i / columns);
-      const x = (col - (columns - 1) / 2) * cellW;
-      const z = (row - (rows - 1) / 2) * cellD + 0.6;
-      const occupant = occupants[i];
-      if (sleeping) bed(room, x, z, occupant?.appearance?.body);
-      else desk(room, x, z);
+    const stations = layout.stations.length ? layout.stations : [{ id: null, slot: 0, position: [0, 0], agent: null }];
+    for (const station of stations) {
+      const [x, z] = station.position;
+      const occupant = station.agent;
+      const furniture = new THREE.Group();
+      if (occupant) furniture.userData.selection = { kind: "agent", id: occupant.id };
+      const seed = [...(station.id || "")].reduce((value, char) => (Math.imul(value, 31) + char.charCodeAt(0)) >>> 0, 0);
+      const accent = ["#668f87", "#b393be", "#c6a34f", "#ae696d"][seed % 4];
+      if (sleeping) bed(furniture, x, z, accent);
+      else {
+        desk(furniture, x, z);
+        part(furniture, accent, [x, 0.93, z + 0.06], [0.72, 0.025, 0.25]);
+      }
+      // The personal nameplate belongs to the pickable desk/bed, not the person mesh.
+      part(furniture, accent, [x, 0.97, z + (sleeping ? -1.12 : 0.93)], [0.8, 0.16, 0.055]);
+      objects.push(furniture);
+      if (occupant) knownNames.set(occupant.id, occupant.name || occupant.id);
+      const name = knownNames.get(station.id) || station.id;
+      const stateLabel = occupant?.pendingApproval ? "awaiting approval" : occupant?.state;
+      if (station.id) label(`${sleeping ? "Bed" : "Desk"} ${station.slot + 1} · ${name} · ${occupant ? stateLabel : "away"}`, [x, 1.75, z], false,
+        occupant ? name : `${sleeping ? "Bed" : "Desk"} ${station.slot + 1} · away`, Boolean(occupant));
       if (!occupant) continue;
       const person = art.agent(occupant);
       const standingX = sleeping ? x - 0.68 : x;
@@ -201,9 +214,10 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
       person.scale.setScalar(1.1);
       person.userData.selection = { kind: "agent", id: occupant.id };
       objects.push(person);
-      label(occupant.name || occupant.id, [standingX, 1.5, standingZ]);
+      const status = occupant.pendingApproval ? "#e4a151" : ({ working: "#578b61", resting: "#8fbaa4", stale: "#929690", failed: "#c16449", knocking: "#e4a151" }[occupant.state] || "#929690");
+      part(furniture, status, [x + 0.48, 1.08, z + (sleeping ? -1.1 : 0.92)], [0.16, 0.16, 0.16], "sphere");
     }
-    if (sleeping && count < 3) {
+    if (sleeping && layout.stations.length < 3) {
       part(room, "timber", [width / 2 - 2, 0.6, depth / 2 - 2], [1.55, 0.14, 1.0]);
       part(room, "trim", [width / 2 - 2, 0.3, depth / 2 - 2], [0.6, 0.6, 0.6]);
       lamp(room, width / 2 - 1.7, depth / 2 - 2, 0.69);
@@ -216,11 +230,11 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
     sun.position.set(width * 0.4, Math.max(width, depth), depth * 0.5);
     needsRender = true;
   }
-  function fit(reset = false) {
+  function fit(reset = false, preserveSpan = false) {
     const width = Math.max(1, host.clientWidth), height = Math.max(1, host.clientHeight);
     renderer.setSize(width, height, false);
     const aspect = width / height;
-    const span = Math.max((extent.width + extent.depth) * 0.52 + 4, (extent.width + extent.depth) * 0.74 / aspect) * 1.13;
+    const span = preserveSpan ? camera.top - camera.bottom : Math.max((extent.width + extent.depth) * 0.52 + 4, (extent.width + extent.depth) * 0.74 / aspect) * 1.13;
     camera.left = -span * aspect / 2; camera.right = span * aspect / 2;
     camera.top = span / 2; camera.bottom = -span / 2;
     if (reset) {
@@ -235,9 +249,10 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
     if (disposed || !next.building) return;
     state = next;
     const occupants = next.agents || [];
-    const nextSignature = JSON.stringify([next.building.id, next.building.kind, next.building.name, occupants.map(a => [a.id, a.name, a.appearance])]);
+    const room = next.room || fallbackLayout.update(next.building.id, occupants);
+    const nextSignature = JSON.stringify([next.building.id, next.building.kind, next.building.name, room.stations.map(s => [s.id, s.slot]), occupants.map(a => [a.id, a.name, a.appearance, a.state, a.pendingApproval])]);
     const changedBuilding = buildingId !== next.building.id;
-    if (signature !== nextSignature) { signature = nextSignature; rebuild(next.building, occupants); fit(changedBuilding); }
+    if (signature !== nextSignature) { signature = nextSignature; rebuild(next.building, occupants, room); fit(changedBuilding, !changedBuilding); }
     buildingId = next.building.id;
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, next.quality === "low" ? 1 : 1.75));
     renderer.shadowMap.enabled = next.quality !== "low";
@@ -252,6 +267,7 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
       }
     }
     canvas.dataset.agents = String(occupants.length);
+    canvas.dataset.stations = JSON.stringify(room.stations.map(({ id, slot, position, agent }) => ({ id, slot, position, present: Boolean(agent) })));
     canvas.dataset.building = next.building.id;
     canvas.dataset.paused = String(Boolean(next.paused));
     canvas.dataset.ready = "true";
@@ -287,12 +303,23 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
     try {
       controls.update();
       if (!needsRender) return;
-      for (const name of names) {
+      const overview = camera.zoom < 1.5;
+      const crowded = names.filter(name => !name.always).length > 20;
+      const occupiedLabels = [];
+      // Present people take precedence over reserved places when labels compete.
+      for (const name of [...names].sort((a, b) => Number(b.always) - Number(a.always) || Number(b.present) - Number(a.present))) {
+        name.element.textContent = overview ? name.compact : name.text;
         projected.copy(name.position).project(camera);
         const x = (projected.x * 0.5 + 0.5) * host.clientWidth;
         const y = (-projected.y * 0.5 + 0.5) * host.clientHeight;
-        name.element.hidden = (!name.always && (state?.agents?.length || 0) > 20 && camera.zoom < 1.5) || projected.z < -1 || projected.z > 1 || x < 0 || x > host.clientWidth || y < 0 || y > host.clientHeight;
+        name.element.hidden = (!name.always && !name.present && crowded && overview) || projected.z < -1 || projected.z > 1 || x < 0 || x > host.clientWidth || y < 0 || y > host.clientHeight;
         name.element.style.left = `${x}px`; name.element.style.top = `${y}px`;
+        if (!name.element.hidden) {
+          const width = name.element.offsetWidth, height = name.element.offsetHeight;
+          const box = { left: x - width / 2 - 3, right: x + width / 2 + 3, top: y - height - 3, bottom: y + 3 };
+          if (!name.always && occupiedLabels.some(other => box.left < other.right && box.right > other.left && box.top < other.bottom && box.bottom > other.top)) name.element.hidden = true;
+          else occupiedLabels.push(box);
+        }
       }
       renderer.render(scene, camera);
       canvas.dataset.drawCalls = String(renderer.info.render.calls);

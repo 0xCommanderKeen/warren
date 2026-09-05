@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { InteriorWorld } from "../world/InteriorWorld.jsx";
 import { VillageWorld } from "../world/VillageWorld.jsx";
 import { createVillageLayout } from "../world/layout.js";
+import { buildingOccupancy } from "../world/occupancy.js";
 import { daylightAt } from "../world/daylight.js";
 import { pendingApprovals } from "../contract/approvals.js";
 import "./village-experience.css";
@@ -39,6 +40,91 @@ function Portrait({ agent, large = false }) {
       <i className="ve-portrait-face" />
       <i className="ve-portrait-hat" />
     </span>
+  );
+}
+
+function PersonalSpace({ agent, room, snapshot, selected, onSelect }) {
+  const task = snapshot.tasks
+    .filter((task) => task.state === "claimed" && task.claimant === agent.id)
+    .sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0];
+  const artifact = snapshot.artifacts
+    .filter((item) => item.agent_id === agent.id)
+    .sort((a, b) => b.ts.localeCompare(a.ts))[0];
+  return (
+    <button
+      className="ve-space-card"
+      aria-pressed={selected}
+      onClick={onSelect}
+    >
+      <span className="ve-space-person">
+        <Portrait agent={agent} />
+        <span>
+          <strong>{agent.name}</strong>
+          <small>
+            {room.kind === "workshop" ? "Desk" : "Bed"} ·{" "}
+            {agent.project || "No project"}
+          </small>
+        </span>
+        <span className="ve-person-state" data-state={agent.state}>
+          <i />
+          {stateLabel(agent.state)}
+        </span>
+      </span>
+      <span className="ve-space-task">
+        {task ? task.title : "No claimed task recorded."}
+      </span>
+      <span className="ve-space-observation">
+        {agent.last_line || "No recent activity recorded."}
+      </span>
+      {artifact && (
+        <span className="ve-space-output" title={artifact.artifact}>
+          Latest output ·{" "}
+          {artifact.artifact.split("/").filter(Boolean).at(-1) ||
+            artifact.artifact}
+        </span>
+      )}
+    </button>
+  );
+}
+
+function BuildingPreview({ building, world, onSelect }) {
+  const enterable = ["home", "lodge", "workshop"].includes(building.kind);
+  const { agents: occupants, summary } = buildingOccupancy(world, building);
+  return (
+    <details className="ve-building-preview">
+      <summary>
+        <span className="ve-building-icon" aria-hidden="true">
+          ⌂
+        </span>
+        <span>
+          <strong>{building.name}</strong>
+          <small>
+            {summary} · {building.kind}
+          </small>
+        </span>
+      </summary>
+      <div className="ve-building-preview-body">
+        {occupants.length ? (
+          <ul>
+            {occupants.map((agent) => (
+              <li key={agent.id}>
+                <span>{agent.name}</span>
+                <small>{stateLabel(agent.state)}</small>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p>
+            {enterable
+              ? "Nobody is inside right now."
+              : "No agents here right now."}
+          </p>
+        )}
+        <button onClick={() => onSelect({ kind: "building", id: building.id })}>
+          {enterable ? "Enter" : "Inspect"} {building.name} →
+        </button>
+      </div>
+    </details>
   );
 }
 
@@ -548,19 +634,14 @@ export function VillageExperience({ snapshot }) {
               <div className="ve-room-roster" aria-label="People inside">
                 {roomAgents.length ? (
                   roomAgents.map((agent) => (
-                    <button
+                    <PersonalSpace
                       key={agent.id}
-                      aria-pressed={selectedAgent?.id === agent.id}
-                      onClick={() => select({ kind: "agent", id: agent.id })}
-                    >
-                      <Portrait agent={agent} />
-                      <span>
-                        <strong>{agent.name}</strong>
-                        <small>
-                          {agent.project || stateLabel(agent.state)}
-                        </small>
-                      </span>
-                    </button>
+                      agent={agent}
+                      room={room}
+                      snapshot={snapshot}
+                      selected={selectedAgent?.id === agent.id}
+                      onSelect={() => select({ kind: "agent", id: agent.id })}
+                    />
                   ))
                 ) : (
                   <p>No agents are inside right now.</p>
@@ -709,6 +790,12 @@ export function VillageExperience({ snapshot }) {
               >
                 Projects <span>{projects.length}</span>
               </button>
+              <button
+                aria-pressed={tab === "buildings"}
+                onClick={() => setTab("buildings")}
+              >
+                Buildings <span>{world.buildings.length}</span>
+              </button>
             </div>
           </header>
           <label className="ve-search">
@@ -718,7 +805,7 @@ export function VillageExperience({ snapshot }) {
               type="search"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Find an agent or project…"
+              placeholder="Find an agent, project, or building…"
             />
           </label>
           {tab === "people" && (
@@ -771,30 +858,52 @@ export function VillageExperience({ snapshot }) {
                     </span>
                   </button>
                 ))
-              : visibleProjects.map((b) => (
-                  <button
-                    className="ve-project"
-                    aria-label={`${b.project || b.name} ${b.agentIds.length} ${b.agentIds.length === 1 ? "agent" : "agents"} · Workshop`}
-                    key={b.id}
-                    aria-pressed={selectedBuilding?.id === workshop?.id}
-                    onClick={() =>
-                      workshop && select({ kind: "building", id: workshop.id })
-                    }
-                  >
-                    <span className="ve-building-icon" aria-hidden="true">
-                      ⌂
-                    </span>
-                    <span>
-                      <strong>{b.project || b.name}</strong>
-                      <small>
-                        {b.agentIds.length}{" "}
-                        {b.agentIds.length === 1 ? "agent" : "agents"} ·
-                        Workshop
-                      </small>
-                    </span>
-                    <span aria-hidden="true">↗</span>
-                  </button>
-                ))}
+              : tab === "projects"
+                ? visibleProjects.map((b) => (
+                    <button
+                      className="ve-project"
+                      aria-label={`${b.project || b.name} ${b.agentIds.length} ${b.agentIds.length === 1 ? "agent" : "agents"} · Workshop`}
+                      key={b.id}
+                      aria-pressed={selectedBuilding?.id === workshop?.id}
+                      onClick={() =>
+                        workshop &&
+                        select({ kind: "building", id: workshop.id })
+                      }
+                    >
+                      <span className="ve-building-icon" aria-hidden="true">
+                        ⌂
+                      </span>
+                      <span>
+                        <strong>{b.project || b.name}</strong>
+                        <small>
+                          {b.agentIds.length}{" "}
+                          {b.agentIds.length === 1 ? "agent" : "agents"} ·
+                          Workshop
+                        </small>
+                      </span>
+                      <span aria-hidden="true">↗</span>
+                    </button>
+                  ))
+                : world.buildings
+                    .filter((building) =>
+                      `${building.name} ${building.kind}`
+                        .toLowerCase()
+                        .includes(search),
+                    )
+                    .map((building) => (
+                      <BuildingPreview
+                        key={building.id}
+                        building={building}
+                        world={world}
+                        onSelect={select}
+                      />
+                    ))}
+            {tab === "buildings" &&
+              !world.buildings.some((building) =>
+                `${building.name} ${building.kind}`
+                  .toLowerCase()
+                  .includes(search),
+              ) && <p className="ve-empty">No buildings match this search.</p>}
             {tab === "people" && !people.length && (
               <p className="ve-empty">
                 {world.agents.length

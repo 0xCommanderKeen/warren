@@ -7,9 +7,11 @@ Arcadia presents Chronicle's real agents as a miniature village. Original geomet
 - `layout.js` allocates stable homes, one shared workshop, visitor lodges, civic buildings, and connected roads. Retired allocations and explored bounds remain stable during transitions. Its optional versioned serialization validates coordinates, slot uniqueness, bounds, and size before restoring a layout.
 - `motion.js` advances finite paths. Retargeting preserves the remaining road route before joining the new one; pause snaps to the current destination. It does not invent work or perpetual wandering.
 - `art.js` supplies reusable geometry and materials. Building factories fit their declared footprint, so new styles need no layout changes.
+- `roomLayout.js` allocates personal desks/beds on fixed rings and validates versioned ID/slot storage (`arcadia:room-layout:v1`). Existing coordinates stay fixed as capacity grows; absent places retain furniture without ghost occupants. Only current occupants make a station selectable.
+- `occupancy.js` derives building counts from current destinations rather than dwelling memberships. Scene labels and accessible building previews share this source.
 - `InteriorWorld.jsx` presents furnished cutaway rooms and the current occupants of a home, lodge, or shared workshop. Room occupants come from Chronicle destinations; empty rooms remain explorable. The exterior scene stays mounted while inside, preserving navigation.
 - `renderer.js` owns the WebGL scene, camera, picking, projected labels, instancing, and resource cleanup. `VillageWorld.jsx` is its React lifecycle boundary.
-- `VillageExperience.jsx` owns accessible selection, search, dossiers, attention, camera commands, and optional local persistence under `arcadia:village-layout:v1`. Storage failures are nonfatal. Chronicle and Steward remain the read and write authority boundaries.
+- `VillageExperience.jsx` owns accessible selection, search, dossiers, attention, camera commands, and optional local persistence under `arcadia:village-layout:v1`. Storage failures are nonfatal. Room work cards read claimed tasks by their claimant, current activity, and recorded artifacts; they do not infer task ownership from prose. Chronicle and Steward remain the read and write authority boundaries.
 
 Home positions persist per browser and origin, not across devices. Stored data includes identifiers and allocations, not names, messages, credentials, or history. Clearing storage resets placement. Population removal does not reclaim plots immediately, preserving spatial continuity.
 

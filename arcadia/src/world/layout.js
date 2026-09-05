@@ -133,8 +133,8 @@ export function createVillageLayout(savedState = null) {
       const buildings = new Map();
       function building(id, kind, name, project) {
         if (!buildings.has(id)) buildings.set(id, {
-          id, kind, name, position: position(id), width: kind === "home" ? 4 : 5,
-          depth: 4, agentIds: [], ...(project === undefined ? {} : { project }),
+          id, kind, name, position: position(id), width: kind === "home" ? 4 : kind === "workshop" ? 7 : kind === "lodge" ? 6 : 5,
+          depth: kind === "workshop" ? 5.5 : kind === "lodge" ? 4.5 : 4, agentIds: [], ...(project === undefined ? {} : { project }),
         });
         return buildings.get(id);
       }

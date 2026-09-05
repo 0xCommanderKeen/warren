@@ -26,10 +26,10 @@ export function createArtKit() {
         steps: 1, bevelSize: 0.07, bevelThickness: 0.07,
       })
       result.center()
-    } else if (key === 'gable') {
+    } else if (key === 'gable' || key === 'sawtooth') {
       const shape = new THREE.Shape()
       shape.moveTo(-0.5, 0)
-      shape.lineTo(0, 0.5)
+      shape.lineTo(key === 'sawtooth' ? 0.5 : 0, 0.5)
       shape.lineTo(0.5, 0)
       shape.closePath()
       result = new THREE.ExtrudeGeometry(shape, { depth: 1, bevelEnabled: false, steps: 1 })
@@ -77,8 +77,8 @@ export function createArtKit() {
     const root = new THREE.Group()
     root.name = `building:${model.id}`
     root.userData.buildingId = model.id
-    const w = Math.max(1.4, model.width || 2.6)
-    const d = Math.max(1.4, model.depth || 2.4)
+    const w = Number.isFinite(model.width) && model.width > 0 ? model.width : 2.6
+    const d = Number.isFinite(model.depth) && model.depth > 0 ? model.depth : 2.4
     const kind = model.kind || 'home'
     const wallW = w * 0.8
     const wallD = d * 0.7
@@ -122,53 +122,65 @@ export function createArtKit() {
     const tall = kind === 'archive'
     const lodge = kind === 'lodge'
     const workshop = kind === 'workshop'
-    // A finite set of glazed-roof/plaster pairings gives each project a stable
-    // address and keeps material batching effective as the village expands.
-    const identity = [...String(model.project || model.id || '')].reduce((hash, c) => (Math.imul(hash, 31) + c.charCodeAt(0)) | 0, 0) >>> 0
+    const home = kind === 'home'
+    // Personal touches follow a resident's address, never their current project.
+    // A finite palette preserves shared material batches across the whole village.
+    const identity = [...String(model.id || '')].reduce((hash, c) => (Math.imul(hash, 31) + c.charCodeAt(0)) | 0, 0) >>> 0
     const variant = identity % 4
-    const workshopStyles = [
-      { wall: '#88a79b', roof: '#345b5a', ridge: '#244747', pitch: 1.15 },
-      { wall: '#ddc19a', roof: '#a84f3d', ridge: '#813e32', pitch: 1.45 },
-      { wall: '#a1b6bd', roof: '#49617c', ridge: '#364b62', pitch: 0.95 },
-      { wall: '#dfd4ad', roof: '#677650', ridge: '#4c5b39', pitch: 1.3 },
+    const homeStyles = [
+      { wall: '#eee1c4', roof: '#be6549', door: '#477a77' },
+      { wall: '#e5cda9', roof: '#9f5141', door: '#5d748d' },
+      { wall: '#d5ddc4', roof: '#9e714c', door: '#9b5846' },
+      { wall: '#e3d8c9', roof: '#657d77', door: '#a47642' },
     ]
-    const style = workshopStyles[variant]
-    const height = tall ? 2.25 : lodge ? 1.8 : workshop ? 1.45 + variant * 0.11 : 1.35
-    const color = workshop ? style.wall : tall ? '#d8cfb4' : lodge ? '#dfc49e' : 'plaster'
+    const style = homeStyles[variant]
+    const height = tall ? 2.25 : lodge ? 2.05 : workshop ? 2.2 : 1.35
+    const color = workshop ? '#a3b3a0' : tall ? '#d8cfb4' : lodge ? '#dfc49e' : style.wall
     box(root, 'stone', [0, 0.1, 0], [wallW + 0.14, 0.2, wallD + 0.18])
     box(root, color, [0, height / 2 + 0.16, 0], [wallW, height, wallD])
     box(root, 'timber', [0, 0.27, front + 0.025], [wallW + 0.04, 0.11, 0.07])
     for (const x of [-wallW / 2 + 0.06, wallW / 2 - 0.06]) box(root, 'timber', [x, height / 2 + 0.13, front + 0.025], [0.09, height, 0.08])
     const roofY = height + 0.17
-    const pitch = workshop ? style.pitch : 1
-    part(root, 'gable', workshop ? style.roof : 'roof', [0, roofY, 0], [wallW + 0.36, pitch, wallD + 0.36])
-    box(root, workshop ? style.ridge : 'roofDark', [0, roofY + pitch / 2 + 0.01, 0], [0.15, 0.13, wallD + 0.4])
+    const pitch = home ? 0.95 + variant * 0.1 : 1.15
+    if (workshop) {
+      // North-light roof bays identify the communal maker hall from any zoom.
+      const bayWidth = (wallW + 0.36) / 3
+      for (let bay = 0; bay < 3; bay++) {
+        const x = (bay - 1) * bayWidth
+        const roof = part(root, 'sawtooth', '#345b5a', [x, roofY, 0], [bayWidth, 1.25, wallD + 0.36])
+        roof.userData.architecture = 'sawtooth-bay'
+        const glazing = box(root, 'window', [x + bayWidth / 2 + 0.018, roofY + 0.35, 0], [0.035, 0.37, wallD * 0.83])
+        glazing.userData.architecture = 'clerestory'
+      }
+    } else {
+      part(root, 'gable', home ? style.roof : 'roof', [0, roofY, 0], [wallW + 0.36, pitch, wallD + 0.36])
+      box(root, home ? style.roof : 'roofDark', [0, roofY + pitch / 2 + 0.01, 0], [0.15, 0.13, wallD + 0.4])
+    }
     box(root, 'timber', [0, roofY - 0.035, front + 0.12], [wallW + 0.34, 0.1, 0.12])
     const doorX = workshop ? -wallW * 0.23 : 0
-    box(root, 'timber', [doorX, 0.66, front + 0.045], [workshop ? 0.75 : 0.55, 0.95, 0.11])
-    box(root, workshop ? 'navy' : 'teal', [doorX, 0.65, front + 0.112], [workshop ? 0.64 : 0.43, 0.82, 0.045])
+    box(root, 'timber', [doorX, workshop ? 0.81 : 0.66, front + 0.045], [workshop ? 1.05 : lodge ? 0.75 : 0.55, workshop ? 1.25 : 0.95, 0.11])
+    box(root, workshop ? 'navy' : home ? style.door : 'teal', [doorX, workshop ? 0.8 : 0.65, front + 0.112], [workshop ? 0.94 : lodge ? 0.63 : 0.43, workshop ? 1.12 : 0.82, 0.045])
     part(root, 'sphere', 'brass', [doorX + 0.12, 0.64, front + 0.15], [0.045, 0.045, 0.045])
     box(root, 'stone', [doorX, 0.115, front + 0.27], [0.8, 0.16, 0.48])
     if (workshop) {
       window(root, wallW * 0.22, 1.01, front + 0.07, wallW * 0.32, 0.57)
       box(root, 'timber', [wallW * 0.21, 0.55, front + 0.3], [wallW * 0.42, 0.12, 0.36])
       part(root, 'cylinder', 'brass', [wallW * 0.2, 0.7, front + 0.3], [0.18, 0.18, 0.18])
-      // Small roof lanterns make workshops recognisable from the overview.
-      const lanternY = roofY + pitch / 2 + 0.2
-      box(root, style.ridge, [0, lanternY, -wallD * 0.2], [0.46, 0.38, 0.48])
-      box(root, 'window', [0, lanternY + 0.02, -wallD * 0.2 + 0.25], [0.3, 0.2, 0.03])
-      if (variant % 2 === 0) part(root, 'cone', style.roof, [0, lanternY + 0.34, -wallD * 0.2], [0.75, 0.37, 0.75])
-      else part(root, 'gable', style.roof, [0, lanternY + 0.2, -wallD * 0.2], [0.65, 0.5, 0.65])
+      window(root, 0, 1.87, front + 0.07, wallW * 0.72, 0.32)
     } else {
       for (const x of [-wallW * 0.32, wallW * 0.32]) window(root, x, 0.96, front + 0.07, wallW * 0.16, 0.44)
     }
     if (tall || lodge) {
       box(root, 'timber', [0, 1.42, front + 0.04], [wallW, 0.1, 0.08])
-      window(root, 0, tall ? 1.88 : 1.56, front + 0.075, 0.47, tall ? 0.54 : 0.28)
+      window(root, 0, tall ? 1.88 : 1.78, front + 0.075, 0.47, tall ? 0.54 : 0.33)
     }
     if (lodge) {
-      box(root, 'teal', [0, 1.28, front + 0.44], [wallW * 0.77, 0.12, 0.7]).rotation.x = 0.12
-      for (const x of [-wallW * 0.34, wallW * 0.34]) box(root, 'timber', [x, 0.65, front + 0.65], [0.085, 1.17, 0.085])
+      const porch = box(root, 'timber', [0, 0.13, front + 0.49], [wallW * 0.96, 0.16, 1.1])
+      porch.userData.architecture = 'communal-veranda'
+      box(root, 'teal', [0, 1.46, front + 0.49], [wallW * 1.02, 0.14, 1.15]).rotation.x = 0.12
+      for (const fraction of [-0.44, -0.18, 0.18, 0.44]) box(root, 'timber', [wallW * fraction, 0.77, front + 0.94], [0.09, 1.24, 0.09])
+      for (const side of [-1, 1]) box(root, 'cream', [side * wallW * 0.31, 0.59, front + 0.94], [wallW * 0.26, 0.1, 0.09])
+      box(root, 'timber', [-wallW * 0.32, 0.38, front + 0.34], [wallW * 0.26, 0.13, 0.37])
     } else {
       box(root, 'stone', [-wallW * 0.28, roofY + 0.43, -wallD * 0.2], [0.29, 0.82, 0.31])
       box(root, 'cream', [-wallW * 0.28, roofY + 0.84, -wallD * 0.2], [0.38, 0.12, 0.39])
@@ -179,6 +191,20 @@ export function createArtKit() {
     window(side, 0, tall ? 1.68 : 0.94, 0.04, Math.min(0.68, wallD * 0.4), tall ? 0.65 : 0.49)
     root.add(side)
     planter(root, wallW * 0.39, front + 0.35)
+    if (home) {
+      if (variant === 0) {
+        box(root, 'pot', [-wallW * 0.32, 0.65, front + 0.2], [wallW * 0.22, 0.13, 0.24])
+        for (const offset of [-0.12, 0.12]) part(root, 'sphere', '#d69d86', [-wallW * 0.32 + offset, 0.78, front + 0.2], [0.18, 0.19, 0.18])
+      } else if (variant === 1) {
+        part(root, 'gable', style.roof, [0, 1.18, front + 0.18], [0.92, 0.43, 0.58])
+      } else if (variant === 2) {
+        part(root, 'ring', 'cream', [0, roofY + 0.22, front + 0.19], [0.38, 0.38, 0.45])
+        part(root, 'cylinder', 'window', [0, roofY + 0.22, front + 0.18], [0.31, 0.025, 0.31], [Math.PI / 2, 0, 0])
+      } else {
+        box(root, 'timber', [-wallW * 0.32, 0.28, front + 0.28], [0.7, 0.1, 0.32])
+        box(root, 'stone', [-wallW * 0.32, 0.12, front + 0.28], [0.48, 0.24, 0.19])
+      }
+    }
     return fitted()
   }
   function agent(model) {

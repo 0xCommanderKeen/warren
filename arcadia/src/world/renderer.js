@@ -3,6 +3,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
 import { createArtKit } from "./art.js";
 import { createMotion, retargetMotion, advanceMotion, isOutside } from "./motion.js";
+import { buildingOccupancy } from "./occupancy.js";
 import { daylightAt } from "./daylight.js";
 
 const keyOf = selection => selection ? `${selection.kind}:${selection.id}` : "";
@@ -47,6 +48,7 @@ export function createVillageRenderer(host, { onSelect, onError }) {
   const art = createArtKit();
   const agents = new Map();
   const buildingLabels = new Map();
+  let occupancy = new Map();
   const staticRoot = new THREE.Group();
   scene.add(staticRoot);
   const dynamicRoot = new THREE.Group();
@@ -90,6 +92,11 @@ export function createVillageRenderer(host, { onSelect, onError }) {
   };
   const selectedLabel = label("", true); selectedLabel.hidden = true;
   let lighting = daylightAt();
+
+  function buildingLabel(model) {
+    return ["home", "lodge", "workshop", "square"].includes(model.kind)
+      ? `${model.name} · ${occupancy.get(model.id).summary}` : model.name;
+  }
 
   function batch(groups) {
     const batches = new Map();
@@ -151,7 +158,7 @@ export function createVillageRenderer(host, { onSelect, onError }) {
       building.traverse(mesh => { if (mesh.userData.window) mesh.material = windows[lighting.night ? (occupied ? 1 : 2) : 0]; });
       objects.push(building);
       if (!buildingLabels.has(model.id)) buildingLabels.set(model.id, label(model.name));
-      buildingLabels.get(model.id).textContent = model.name;
+      buildingLabels.get(model.id).textContent = buildingLabel(model);
     }
     for (const [id, el] of buildingLabels) {
       if (!world.buildings.some(b => b.id === id)) { el.remove(); buildingLabels.delete(id); }
@@ -305,6 +312,7 @@ export function createVillageRenderer(host, { onSelect, onError }) {
     colorsDirty = true;
     if (!next.world) return;
     const { world } = next;
+    occupancy = new Map(world.buildings.map(building => [building.id, buildingOccupancy(world, building)]));
     const signature = JSON.stringify([world.buildings.map(({id,kind,name,position,width,depth}) => ({id,kind,name,position,width,depth})), world.roads, world.bounds, world.agents.filter(a => ["resting", "working"].includes(a.state)).map(a => a.buildingId), lighting.night]);
     if (signature !== staticSignature) { staticSignature = signature; rebuildLandscape(world); }
     let rosterChanged = false;
@@ -455,10 +463,12 @@ export function createVillageRenderer(host, { onSelect, onError }) {
       for (const model of state.world?.buildings || []) {
         const el = buildingLabels.get(model.id);
         if (!el) continue;
+        const text = buildingLabel(model);
+        if (el.textContent !== text) el.textContent = text;
         if ((compactOverview && model.kind !== "square") || (!visibleLabels && !["square", "lodge", "archive", "noticeboard", "workshop"].includes(model.kind)) || (state.selection?.kind === "building" && state.selection.id === model.id)) { el.hidden = true; continue; }
         placeLabel(el, new THREE.Vector3(model.position[0], 0, model.position[1]), model.kind === "square" ? 1 : 3.2);
       }
-      const shown = state.selection || hover;
+      const shown = hover || state.selection;
       selectedLabel.hidden = !shown;
       if (shown?.kind === "agent") {
         const entry = agents.get(shown.id);
@@ -466,7 +476,7 @@ export function createVillageRenderer(host, { onSelect, onError }) {
         else selectedLabel.hidden = true;
       } else if (shown?.kind === "building") {
         const model = state.world?.buildings.find(b => b.id === shown.id);
-        if (model) { selectedLabel.textContent = model.name; placeLabel(selectedLabel, new THREE.Vector3(model.position[0], 0, model.position[1]), 3.4); }
+        if (model) { selectedLabel.textContent = `${model.name} · ${occupancy.get(model.id).summary}${occupancy.get(model.id).preview ? "\n" + occupancy.get(model.id).preview : ""}`; placeLabel(selectedLabel, new THREE.Vector3(model.position[0], 0, model.position[1]), 3.4); }
       }
       updateAgentBatches();
       renderer.render(scene, camera);
