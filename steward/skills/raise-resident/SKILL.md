@@ -113,11 +113,11 @@ curl -sS -X POST "$STEWARD_URL/residents/<id>/rehearse" \
 
 One throwaway turn from the declaration: its charter, soul and skills in the prompt, and
 no container, no mounts, no memory directory, no credential and no tools. `reply` is what
-it said — so ask it something it can answer by talking, not by doing. **This one costs money, and the money is yours** — it is charged to your budget
-line, not the draft's, because the draft has none. So rehearse once, read the reply
-against the voice you were asked for, and fix the charter rather than the reply if they
-disagree. A separate grant, `residents.rehearse`; without it this is a 403 and the dry run
-does not stand in for it.
+it said — so ask it something it can answer by talking, not by doing.
+**This one costs money, and the money is yours** — charged to your budget line, because
+the draft has none. Rehearse once, read the reply against the voice you were asked for,
+and fix the charter rather than the reply if they disagree. It needs its own grant, `residents.rehearse`;
+the dry run is not it.
 
 ## Knock once, then stop
 
@@ -150,9 +150,8 @@ finished state for this work, and the next move is a human's.
 
 ## A skill onto an existing resident
 
-The other answer the fleet read can give: no new resident, one more skill on one that
-exists. That edit is Miha's to approve and yours to make once he has — a separate knock,
-naming the two things steward checks the write against:
+The other answer the fleet read can give: one more skill on a resident that exists. Miha
+approves, you edit — a separate knock naming the two things the write is checked against:
 
 ```
 <needs-human action="grant_skill" expires-in="24h" options="approve,deny">
@@ -161,8 +160,6 @@ naming the two things steward checks the write against:
 </needs-human>
 ```
 
-When the decision comes back approved, `GET /residents/<id>/declaration`, add the one
-`skills` entry, and `PUT` it back whole with `"approval_request_id": "<id>"` and no `soul`.
-Steward compares your manifest against the one on disk and refuses every difference beyond
-that line, so send the bytes you were given with one entry added. Report the commit hash;
-one approval is one edit, and a refusal is something to knock about again.
+Once approved, `GET /residents/<id>/declaration`, add the one `skills` entry, and `PUT`
+it back whole with `"approval_request_id": "<id>"` and no `soul`. Any other difference is
+refused. One approval is one edit; report the commit hash.
