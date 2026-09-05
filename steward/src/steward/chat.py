@@ -1207,6 +1207,7 @@ class _DiscordState:
 
     channels: dict[str, str] = field(default_factory=dict)
     listened_channels: set[str] = field(default_factory=set)
+    channel_names: dict[str, str] = field(default_factory=dict)
     cursors: dict[str, int] = field(default_factory=dict)
     bot_id: str = ""
     started: bool = False
@@ -1241,7 +1242,11 @@ class DiscordTransport:
         )
 
     def listen(self, token: str, names: Sequence[str]) -> bool:
-        """Resolve configured guild channel names once and add them to this bot's poll set."""
+        """Replace this bot's listening set; failed discovery revokes the old set."""
+        state = self._state(token)
+        previous = state.listened_channels
+        state.listened_channels = set()
+        state.channel_names = {}
         if not names:
             return True
         if not self.guild:
@@ -1254,10 +1259,20 @@ class DiscordTransport:
         resolved = [channels.get(name) for name in names]
         if any(channel is None for channel in resolved):
             return False
-        state = self._state(token)
         state.bot_id = bot_id
-        state.listened_channels.update(channel for channel in resolved if channel is not None)
+        state.channel_names = {name: channels[name] for name in names}
+        desired = set(state.channel_names.values())
+        for channel in desired - previous:
+            if state.started and not self._seed_channel_cursor(token, channel):
+                state.channel_names = {}
+                return False
+        state.listened_channels = desired
         return True
+
+    def listening_channels(self, token: str, names: Sequence[str]) -> frozenset[str]:
+        """Return currently registered channel ids belonging to these declared names."""
+        state = self._state(token)
+        return frozenset(state.channel_names[name] for name in names if name in state.channel_names)
 
     def identity(self, token: str) -> str | None:
         """Authenticate the token and return its visible bot username."""
@@ -1830,6 +1845,11 @@ class ChatBridge:
     #: with the route open rather than shut for one whole recheck interval.
     _reloaded_at: datetime | None = field(default=None, init=False, repr=False)
 
+    _listener_tokens: dict[str, set[str]] = field(default_factory=dict, init=False, repr=False)
+    _listened_channels: dict[str, frozenset[str]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+
     def __post_init__(self) -> None:
         """Build the shared lifecycle from the bridge's existing dependencies."""
         if not self.transports:
@@ -1862,16 +1882,27 @@ class ChatBridge:
         a Discord bot declared with ``listens_in`` and tokened through ``PUT /secrets/{name}``
         would otherwise pass its identity check, report itself reachable, and hear nothing.
         """
-        for route in self.routes:
-            token = self.tokens.get(route.address.token_env)
-            listen = getattr(self.transports.get(route.address.transport), "listen", None)
-            if (
-                token
-                and route.route.listens_in
-                and callable(listen)
-                and not listen(token, route.route.listens_in)
-            ):
-                log.warning("%s: Discord listen channels could not be resolved", route.key)
+        self._listened_channels.clear()
+        for name, transport in self.transports.items():
+            listen = getattr(transport, "listen", None)
+            if not callable(listen):
+                continue
+            routes = [route for route in self.deliverable() if route.address.transport == name]
+            desired: dict[str, set[str]] = {}
+            for route in routes:
+                token = self.tokens[route.address.token_env]
+                desired.setdefault(token, set()).update(route.route.listens_in)
+            for token in self._listener_tokens.get(name, set()) - desired.keys():
+                listen(token, [])
+            self._listener_tokens[name] = set(desired)
+            for token, names in desired.items():
+                if not listen(token, sorted(names)):
+                    log.warning("%s: Discord listen channels could not be resolved", name)
+            channels = getattr(transport, "listening_channels", None)
+            if callable(channels):
+                for route in routes:
+                    token = self.tokens[route.address.token_env]
+                    self._listened_channels[route.key] = channels(token, route.route.listens_in)
 
     @classmethod
     def from_path(  # noqa: PLR0913 — every knob is keyword-only and independently useful
@@ -2323,7 +2354,7 @@ class ChatBridge:
             return self._drop(route, message, "not an operator", now)
         if message.access != ConversationAccess.PRIVATE and not (
             route.address.transport == DISCORD
-            and route.route.listens_in
+            and message.conversation in self._listened_channels.get(route.key, frozenset())
             and message.access == ConversationAccess.ALLOWLISTED_PUBLIC
         ):
             return self._drop(route, message, "not a private conversation", now)
@@ -2626,6 +2657,10 @@ class ChatBridge:
         the transport's business and a log line — a reply the operator did not get is not a
         session that failed, and there is nobody to tell about it anyway.
         """
+        if message.access != ConversationAccess.PRIVATE and message.conversation not in (
+            self._listened_channels.get(route.key, frozenset())
+        ):
+            return ""
         sent = _bounded(f"{route.name}: {text}" if tag and route.route.shared else text)
         token = self.token_for(route)
         if token is None:  # pragma: no cover — nothing reaches here without a token

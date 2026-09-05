@@ -4,7 +4,7 @@ import copy
 import json
 import threading
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -754,6 +754,14 @@ def test_an_operator_mention_in_an_allowlisted_discord_channel_is_answered(
                 ]
             )
             self.references: list[str | None] = []
+
+        def listen(self, token: str, names: Sequence[str]) -> bool:
+            del token, names
+            return True
+
+        def listening_channels(self, token: str, names: Sequence[str]) -> frozenset[str]:
+            del token, names
+            return frozenset({message().conversation})
 
         def send_reply(
             self, token: str, conversation: str, text: str, reply_to: str | None
@@ -2700,3 +2708,87 @@ def test_a_reload_re_registers_the_rooms_a_route_listens_in(
     bridge.reachable()
 
     assert transport.registered == [(FAKE_BOT_TOKEN, ("the-hall",))]
+
+
+@pytest.mark.parametrize("shared_token", [False, True])
+def test_reload_revokes_rooms_at_the_bridge(
+    write_resident: ResidentWriter, store: Store, tmp_path: Path, *, shared_token: bool
+):
+    class Discovery(ch.DiscordTransport):
+        polled: set[str]
+
+        def _request(self, token, method, path, payload=None) -> object:
+            del token, payload
+            if method == "GET" and path.startswith("/channels/"):
+                self.polled.add(path.split("/")[2])
+            if path == "/users/@me":
+                return {"id": "42", "username": "testy"}
+            if path == "/guilds/home/channels":
+                return [
+                    {"id": "700", "name": "old", "type": 0},
+                    {"id": "701", "name": "new", "type": 0},
+                ]
+            return []
+
+    transport = Discovery(guild="home")
+    transport.polled = set()
+    declared = chat_manifest(tmp_path / "memory")
+    declared["routes"][-1].update(address="discord:testy", listens_in=[])
+    path = write_resident(declared)
+    if shared_token:
+        sibling = chat_manifest(
+            tmp_path / "sibling",
+            id="sibling",
+            uid="3a78217a-df03-4f3b-a46a-4c75b4ad929f",
+            home=1,
+            agent_id="resident:sibling",
+        )
+        sibling["routes"][-1].update(address="discord:sibling", listens_in=["old"])
+        write_resident(sibling, soul="---\nagent_id: resident:sibling\n---\nTest resident.")
+    bridge = ch.ChatBridge.from_path(
+        path.parent.parent,
+        store,
+        env={
+            "STEWARD_CHAT_TOKEN_DISCORD_TESTY": FAKE_DISCORD_TOKEN,
+            "STEWARD_CHAT_TOKEN_DISCORD_SIBLING": FAKE_DISCORD_TOKEN,
+            ch.OPERATORS_ENV: f"discord:{OPERATOR}",
+        },
+        transports={ch.DISCORD: transport},
+        emitter=ev.NullEmitter(),
+    )
+    runner = ScriptedRunner()
+    bridge.sessions.runner_factory = lambda _spec, _placement: runner
+    for names, admitted in [(["old"], {"700"}), (["new"], {"701"}), ([], set())]:
+        declared["routes"][-1]["listens_in"] = names
+        write_resident(declared)
+        assert bridge.reload()
+        route = next(route for route in bridge.routes if route.resident.id == "test-agent")
+        for channel in ("700",) if names == ["old"] else ("700", "701"):
+            before = len(runner.requests)
+            incoming = replace(
+                message(sender=f"discord:{OPERATOR}", private=False, allowed_public=True),
+                conversation=channel,
+            )
+            outcome = bridge._handle(route, incoming, NOW)
+            assert outcome.ran == (channel in admitted)
+            assert bool(outcome.reply) == (channel in admitted)
+            assert len(runner.requests) - before == int(channel in admitted)
+        expected = admitted | ({"700"} if shared_token else set())
+        transport.polled.clear()
+        transport.poll(FAKE_DISCORD_TOKEN, 0)
+        transport.poll(FAKE_DISCORD_TOKEN, 0)
+        assert transport.polled == expected
+        if shared_token:
+            sibling_route = next(route for route in bridge.routes if route.resident.id == "sibling")
+            assert bridge._handle(sibling_route, replace(incoming, conversation="700"), NOW).ran
+
+    declared["routes"][-1]["listens_in"] = ["new"]
+    write_resident(declared)
+    assert bridge.reload()
+    declared["routes"].pop()
+    write_resident(declared)
+    assert bridge.reload()
+    transport.polled.clear()
+    transport.poll(FAKE_DISCORD_TOKEN, 0)
+    assert transport.polled == ({"700"} if shared_token else set())
+    assert bridge._reply(route, replace(incoming, conversation="701"), "late reply") == ""
