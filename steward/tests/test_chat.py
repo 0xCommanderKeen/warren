@@ -2716,11 +2716,14 @@ def test_reload_revokes_rooms_at_the_bridge(
 ):
     class Discovery(ch.DiscordTransport):
         polled: set[str]
+        pending: dict[str, list[object]]
 
         def _request(self, token, method, path, payload=None) -> object:
             del token, payload
             if method == "GET" and path.startswith("/channels/"):
-                self.polled.add(path.split("/")[2])
+                channel = path.split("/")[2]
+                self.polled.add(channel)
+                return self.pending.pop(channel, []) if "after=" in path else []
             if path == "/users/@me":
                 return {"id": "42", "username": "testy"}
             if path == "/guilds/home/channels":
@@ -2732,6 +2735,7 @@ def test_reload_revokes_rooms_at_the_bridge(
 
     transport = Discovery(guild="home")
     transport.polled = set()
+    transport.pending = {}
     declared = chat_manifest(tmp_path / "memory")
     declared["routes"][-1].update(address="discord:testy", listens_in=[])
     path = write_resident(declared)
@@ -2778,6 +2782,10 @@ def test_reload_revokes_rooms_at_the_bridge(
         transport.poll(FAKE_DISCORD_TOKEN, 0)
         transport.poll(FAKE_DISCORD_TOKEN, 0)
         assert transport.polled == expected
+        for channel in expected:
+            transport.pending[channel] = [discord_message("101", sender=OPERATOR, mentions=("42",))]
+        outcomes = bridge.poll_once(NOW)
+        assert {outcome.conversation for outcome in outcomes if outcome.ran} == expected
         if shared_token:
             sibling_route = next(route for route in bridge.routes if route.resident.id == "sibling")
             assert bridge._handle(sibling_route, replace(incoming, conversation="700"), NOW).ran

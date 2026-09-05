@@ -2248,10 +2248,11 @@ class ChatBridge:
             # whatever was never acknowledged when a new one starts.
             self._offsets[route.poll_key] = message.update_id + 1
             try:
+                recipient = self._public_recipient(route, message)
                 outcomes.append(
-                    self._handle_shared(route, message, now)
-                    if route.route.shared
-                    else self._handle(route, message, now)
+                    self._handle_shared(recipient, message, now)
+                    if recipient.route.shared
+                    else self._handle(recipient, message, now)
                 )
             except Exception as exc:  # noqa: BLE001 — one bad message must not stop the fleet
                 log.warning("%s: could not answer a message: %s", route.key, exc)
@@ -2265,6 +2266,26 @@ class ChatBridge:
                     )
                 )
         return outcomes
+
+    def _public_recipient(self, polled: ChatRoute, message: Message) -> ChatRoute:
+        """Route a shared Discord poll to a current, reachable listener of this room."""
+        if (
+            polled.address.transport != DISCORD
+            or message.access != ConversationAccess.ALLOWLISTED_PUBLIC
+        ):
+            return polled
+        token = self.token_for(polled)
+        return next(
+            (
+                route
+                for route in self.routes
+                if route.address.transport == DISCORD
+                and self.token_for(route) == token
+                and message.conversation in self._listened_channels.get(route.key, frozenset())
+                and self._health[route.key].reachable
+            ),
+            polled,
+        )
 
     def _handle_shared(self, route: ChatRoute, message: Message, now: datetime) -> ChatOutcome:
         """Authenticate before resolving or changing a shared conversation's recipient."""
