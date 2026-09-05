@@ -1669,13 +1669,17 @@ def test_the_passthrough_refuses_the_master_key_and_says_so(
 ) -> None:
     """An operator who listed it believes their sessions have it; silence would be worse."""
     monkeypatch.setenv("STEWARD_TOKEN", "the-master-key")
-    monkeypatch.setenv(r.SESSION_ENV_PASSTHROUGH_ENV, "STEWARD_TOKEN,STEWARD_SESSION_TOKEN")
+    monkeypatch.setenv("STEWARD_TOKEN_PREVIOUS", "the-previous-key")
+    monkeypatch.setenv(
+        r.SESSION_ENV_PASSTHROUGH_ENV, "STEWARD_TOKEN,STEWARD_TOKEN_PREVIOUS,STEWARD_SESSION_TOKEN"
+    )
 
     with caplog.at_level("WARNING"):
         observed = child_env(stub_bin, tmp_path)
 
     assert "STEWARD_TOKEN" not in observed
     assert "STEWARD_SESSION_TOKEN" not in observed
+    assert "STEWARD_TOKEN_PREVIOUS" not in observed
     assert "which no session may hold" in caplog.text
 
 

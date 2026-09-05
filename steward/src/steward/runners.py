@@ -265,7 +265,7 @@ SESSION_ENV_PASSTHROUGH_ENV = "STEWARD_SESSION_ENV_PASSTHROUGH"
 #: refuse to let the trade happen by accident: :func:`check_session_ingest` is where
 #: ``steward doctor`` gets the line that says a local session's events cannot be delivered
 #: from here. Per-resident ingest credentials are the real answer, and are their own issue.
-SESSION_ENV_REFUSED = frozenset({"STEWARD_TOKEN", SESSION_TOKEN_ENV})
+SESSION_ENV_REFUSED = frozenset({"STEWARD_TOKEN", "STEWARD_TOKEN_PREVIOUS", SESSION_TOKEN_ENV})
 
 
 def passthrough_names(inherited: Mapping[str, str]) -> tuple[tuple[str, ...], tuple[str, ...]]:

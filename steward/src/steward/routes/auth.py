@@ -13,6 +13,7 @@ from steward.input_bounds import (
     validate_json_container_depth,
 )
 from steward.manifest import SessionGrant
+from steward.master_auth import MasterTokens
 from steward.operator_auth import OperatorPrincipal, looks_like_operator_credential
 from steward.routes.deps import _refuse
 from steward.session_auth import (
@@ -210,12 +211,14 @@ type SessionGrantsLookup = Callable[[str], Collection[SessionGrant]]
 type TokenComparator = Callable[[bytes, bytes], bool]
 
 
-def _auth_dependency(
+def _auth_dependency(  # noqa: PLR0913 — explicit auth collaborators
     token: str | None,
     principal_for: PrincipalLookup,
     operator_for: OperatorLookup,
     grants_for: SessionGrantsLookup,
     compare_token: TokenComparator = compare_digest,
+    *,
+    master_tokens: MasterTokens | None = None,
 ) -> Callable[[Request], None]:
     """Build the gate every endpoint hangs off, and record who got through it.
 
@@ -235,6 +238,7 @@ def _auth_dependency(
     by any of the above: that allowlist exists to keep *sessions* out of human acts, and an
     operator is a human.
     """
+    policy = master_tokens or MasterTokens(token, compare=compare_token)
 
     def require_token(request: Request) -> None:
         headers = request.scope.get("headers", [])
@@ -242,7 +246,11 @@ def _auth_dependency(
         # over from the request before it.
         request.state.session = None
         request.state.operator = None
-        if _authorized(headers, token, compare_token):
+        request.state.master_token_slot = None
+        slot = policy.match(_presented_bearer(headers))
+        if slot is not None:
+            request.state.master_token_slot = slot
+            policy.audit(slot)
             return
         presented_operator = _presented_operator_credential(headers)
         operator = operator_for(presented_operator) if presented_operator else None
@@ -363,10 +371,12 @@ class _ApprovalBodyDepthMiddleware:
         *,
         token: str | None,
         compare_token: TokenComparator = compare_digest,
+        master_tokens: MasterTokens | None = None,
     ) -> None:
         self.app = app
         self.token = token
         self.compare_token = compare_token
+        self.master_tokens = master_tokens or MasterTokens(token, compare=compare_token)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:  # noqa: C901
         path = scope.get("path", "")
@@ -387,7 +397,7 @@ class _ApprovalBodyDepthMiddleware:
         # most likely to be carrying one of these bodies (warren#225).
         headers = scope.get("headers", [])
         if not (
-            _authorized(headers, self.token, self.compare_token)
+            self.master_tokens.match(_presented_bearer(headers)) is not None
             or _presented_operator_credential(headers)
             or _presented_session_credential(headers)
         ):

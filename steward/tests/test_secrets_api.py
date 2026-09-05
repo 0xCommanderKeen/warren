@@ -161,7 +161,7 @@ def test_a_put_records_the_name_and_never_the_value(vault: VaultFactory):
     [logged] = harness.store.export_request_history()
     assert logged.outcome == "secret_written"
     assert logged.path == "/secrets/STEWARD_CHAT_TOKEN_TESTY"
-    assert logged.detail == {"secret": "STEWARD_CHAT_TOKEN_TESTY"}
+    assert logged.detail == {"secret": "STEWARD_CHAT_TOKEN_TESTY", "master_token_slot": "current"}
     assert FAKE_BOT_TOKEN not in repr(logged)
 
 

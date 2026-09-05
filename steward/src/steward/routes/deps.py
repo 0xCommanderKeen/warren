@@ -215,6 +215,10 @@ class Deps:
     def accept(self, request: Request, outcome: str, detail: dict[str, Any] | None = None) -> str:
         """Log an accepted mutating request and return its trace id."""
         request_id = new_id()
+        detail = dict(detail or {})
+        slot = getattr(request.state, "master_token_slot", None)
+        if slot in {"current", "previous"}:
+            detail["master_token_slot"] = slot
         self.db.log_request(
             request_id=request_id,
             method=request.method,
