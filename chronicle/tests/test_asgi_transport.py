@@ -304,7 +304,7 @@ class ASGITransportContractTests(unittest.TestCase):
 
         event = {
             "v": 0,
-            "ts": "2026-08-24T12:00:00.000Z",
+            "ts": datetime.datetime.now(datetime.UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             "source": "test",
             "agent_id": "test:resident-owner",
             "project": "chronicle",
@@ -321,9 +321,14 @@ class ASGITransportContractTests(unittest.TestCase):
                 ):
                     villagers = root / f"villagers-{index}"
                     villagers.mkdir()
-                    (villagers / "resident.md").write_text(
-                        f"---\nagent_id: test:resident-owner\nname: {name}\n---\n",
-                        encoding="utf-8",
+                    manifest = json.loads(
+                        (Path(__file__).parent / "fixtures" / "project-agent.resident.json")
+                        .read_text(encoding="utf-8")
+                    )
+                    manifest["match"] = {"agent_id": "test:resident-owner"}
+                    manifest["soul"]["name"] = name
+                    (villagers / "resident.resident.json").write_text(
+                        json.dumps(manifest), encoding="utf-8"
                     )
                     configs.append(
                         dataclasses.replace(
