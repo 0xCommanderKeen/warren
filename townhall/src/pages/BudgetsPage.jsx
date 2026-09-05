@@ -141,7 +141,7 @@ function SpendPanel({ budget }) {
             `${spent.runs || 0}${spent.unreported_runs ? ` (${spent.unreported_runs} reported no usage)` : ""}`,
           ],
           ["tokens", String(spent.tokens || 0)],
-          ["cost", money(spent.cost_usd)],
+          [spent.estimated_cost_runs ? "cost (includes estimates)" : "cost", money(spent.cost_usd)],
           ["seconds", String(Math.round(spent.duration_s || 0))],
           ["max run", budget.max_run_seconds ? `${budget.max_run_seconds}s` : null],
           ["allowance", budget.allowance ? `until ${stamp(budget.allowance.until)}` : null],

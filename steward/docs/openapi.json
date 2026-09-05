@@ -229,6 +229,44 @@
         "title": "Charter",
         "type": "object"
       },
+      "CodexPricing": {
+        "additionalProperties": false,
+        "description": "Operator-declared API-equivalent rates, never a provider billing receipt.",
+        "properties": {
+          "cached_input_usd_per_million": {
+            "maximum": 10000.0,
+            "minimum": 0.0,
+            "title": "Cached Input Usd Per Million",
+            "type": "number"
+          },
+          "input_usd_per_million": {
+            "exclusiveMinimum": 0.0,
+            "maximum": 10000.0,
+            "title": "Input Usd Per Million",
+            "type": "number"
+          },
+          "model": {
+            "description": "Exact model id these rates describe.",
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          },
+          "output_usd_per_million": {
+            "exclusiveMinimum": 0.0,
+            "maximum": 10000.0,
+            "title": "Output Usd Per Million",
+            "type": "number"
+          }
+        },
+        "required": [
+          "model",
+          "input_usd_per_million",
+          "cached_input_usd_per_million",
+          "output_usd_per_million"
+        ],
+        "title": "CodexPricing",
+        "type": "object"
+      },
       "DeclarationPut": {
         "additionalProperties": false,
         "description": "A resident's declaration, as a form edits it.\n\n``manifest`` and ``text`` are two spellings of one thing and exactly one may be given.\n``manifest`` is the mapping a form builds from its fields, which steward serialises \u2014\nconvenient, and it rewrites the file, so comments in it do not survive. ``text`` is the\nYAML itself, written byte for byte, which is how a caller keeps the comments a person\nwrote. Neither is more validated than the other.",
@@ -1674,6 +1712,17 @@
         "additionalProperties": false,
         "description": "Which brain a resident runs on. Every session launch goes through this seam.",
         "properties": {
+          "codex_pricing": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CodexPricing"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Explicit model rates for estimated Codex cost accounting."
+          },
           "command": {
             "anyOf": [
               {

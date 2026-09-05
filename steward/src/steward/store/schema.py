@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS run_ledger (
     cost_usd      REAL NOT NULL DEFAULT 0.0,
     duration_s    REAL NOT NULL DEFAULT 0.0,
     usage_known   INTEGER NOT NULL DEFAULT 1,
+    cost_estimate TEXT,
     recorded_at   TEXT NOT NULL
 );
 
@@ -243,6 +244,7 @@ _ADDED_COLUMNS: Mapping[str, Mapping[str, str]] = {
         "approval_id": "TEXT",
     },
     "run_ledger": {
+        "cost_estimate": "TEXT",
         # Denormalized from the task the run came off (steward #45). Rolling spend up by
         # joining ``ref`` to ``jobs.task_id`` guessed: a routine whose ref happens to
         # equal some task's id would have inherited that task's bill. The row says what

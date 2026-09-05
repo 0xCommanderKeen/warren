@@ -201,18 +201,19 @@ def day_window(tz: str, now: datetime | None = None) -> Window:
 
 @dataclass(frozen=True, slots=True)
 class Spend:
-    """What a set of ledger entries adds up to. Sums of recorded facts, never estimates."""
+    """Sum recorded consumption, retaining how many costs are explicit estimates."""
 
     runs: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
     cost_usd: float = 0.0
     duration_s: float = 0.0
-    #: Runs whose brain did not report usage at all. ``codex`` and ``command`` runners
-    #: have no usage to give, and steward counts them as zero while saying how many they
+    #: Runs without usable cost accounting, including unpriced Codex.
+    #: Steward counts them as zero while saying how many they
     #: were — "0.00 spent across 4 runs, 3 of which did not report" is true; "0.00 spent"
     #: on its own is a comfortable lie.
     unreported: int = 0
+    estimated_runs: int = 0
 
     @property
     def tokens(self) -> int:
@@ -229,6 +230,7 @@ class Spend:
             "cost_usd": round(self.cost_usd, 6),
             "duration_s": round(self.duration_s, 3),
             "unreported_runs": self.unreported,
+            "estimated_cost_runs": self.estimated_runs,
         }
 
 
@@ -241,6 +243,7 @@ def total(entries: Sequence[LedgerEntry]) -> Spend:
         cost_usd=sum(entry.cost_usd for entry in entries),
         duration_s=sum(entry.duration_s for entry in entries),
         unreported=sum(1 for entry in entries if not entry.usage_known),
+        estimated_runs=sum(1 for entry in entries if entry.cost_estimate is not None),
     )
 
 
@@ -346,6 +349,8 @@ class BudgetStatus:
         if not self.declared:
             return "no limit"
         gauges = "; ".join(gauge.describe() for gauge in self.gauges if not gauge.unlimited)
+        if self.spend.estimated_runs:
+            gauges += " (includes cost estimates)"
         if self.tripped is not None and self.allowance is not None:
             # The window's own zone, not UTC: a Ljubljana resident whose day ends at local
             # midnight should read "until 00:00", not the "22:00" its UTC instant would
@@ -468,6 +473,8 @@ class BudgetGuard:
         if pause is not None:
             return refusal(pause, request_open=self._request_open(pause))
         status = self.status(manifest, now)
+        if self._accounting_missing(manifest, status, now):
+            return refusal(self._pause_for_accounting(manifest, status, now))
         tripped = status.tripped
         if tripped is None:
             return None
@@ -483,6 +490,39 @@ class BudgetGuard:
             )
             return None
         return refusal(self._pause(manifest, status, tripped, now))
+
+    @staticmethod
+    def _accounting_missing(
+        manifest: ResidentManifest, status: BudgetStatus, now: datetime | None
+    ) -> bool:
+        """Refuse to infer budget headroom from an unmeasured Codex run."""
+        if status.allowance is not None and status.allowance.covers(now or datetime.now(UTC)):
+            return False
+        return manifest.runner.kind == "codex" and status.declared and status.spend.unreported > 0
+
+    def _pause_for_accounting(
+        self, manifest: ResidentManifest, status: BudgetStatus, now: datetime | None
+    ) -> PauseRecord:
+        """Persist a truthful accounting refusal, using the ordinary unpause door."""
+        reason = "Codex usage accounting is incomplete; daily budget remaining is unknown"
+        return self.transitions.pause(
+            manifest=manifest,
+            agent_id=status.agent_id,
+            budget="usage_accounting",
+            spent=float(status.spend.unreported),
+            cap=0.0,
+            reason=reason,
+            knock=NeedsHuman(
+                raw=reason,
+                action=BUDGET_ACTION,
+                detail={"resident": manifest.id, "runs_without_usage": status.spend.unreported},
+                options=UNPAUSE_OPTIONS,
+                expires_in_s=None,
+            ),
+            message=reason,
+            window_end=status.window.end_iso,
+            now=now,
+        ).require()
 
     def _request_open(self, pause: PauseRecord) -> bool:
         """Report whether the pause's approval request can still be approved.
@@ -520,7 +560,8 @@ class BudgetGuard:
             budget=tripped.name,
             spent=tripped.spent,
             cap=float(tripped.limit if tripped.limit is not None else 0.0),
-            reason=tripped.describe(),
+            reason=tripped.describe()
+            + (" (includes cost estimates)" if status.spend.estimated_runs else ""),
             knock=NeedsHuman(
                 raw=f"budget {tripped.name} exhausted",
                 action=BUDGET_ACTION,
@@ -540,7 +581,8 @@ class BudgetGuard:
                 # the one thing that can lift the pause.
                 expires_in_s=None,
             ),
-            message=knock_message(manifest, tripped),
+            message=knock_message(manifest, tripped)
+            + (" Cost includes API-equivalent estimates." if status.spend.estimated_runs else ""),
             window_end=status.window.end_iso,
             now=now,
         ).require()
@@ -566,8 +608,7 @@ class BudgetGuard:
         """Append what one finished session cost. Called once per run, whatever happened.
 
         Usage that the brain did not report is written as zero and flagged, never guessed:
-        a ``codex`` run has no cost to give, and a ledger that invented one would make the
-        fuel gauge a decoration.
+        a priced Codex run instead carries its explicit API-equivalent estimate and rates.
 
         ``origin`` is what the run descends from; the caller knows the chain, so it says
         so here rather than leaving the rollup to reconstruct it from a join.
@@ -577,6 +618,8 @@ class BudgetGuard:
             or result.input_tokens is not None
             or result.output_tokens is not None
         )
+        if manifest.runner.kind == "codex":
+            known = result.cost_usd is not None
         try:
             entry = self.store.record_run(
                 resident=manifest.id,
@@ -592,6 +635,7 @@ class BudgetGuard:
                 cost_usd=result.cost_usd or 0.0,
                 duration_s=result.duration_s,
                 usage_known=known,
+                cost_estimate=result.cost_estimate,
                 now=ev.utc_now_iso(now) if now is not None else None,
             )
         except Exception as exc:
@@ -650,6 +694,9 @@ class BudgetGuard:
         """
         status = self.status(manifest, now)
         if status.paused:
+            return
+        if self._accounting_missing(manifest, status, now):
+            self._pause_for_accounting(manifest, status, now)
             return
         tripped = status.tripped
         if tripped is None:

@@ -12,7 +12,8 @@ Four kinds:
     ``claude -p <prompt> --model <model> --output-format json``. The JSON result
     carries usage and cost, so a claude run feeds the budget ledger for free.
 ``codex``
-    ``codex exec <prompt>``. Plain text out; usage is not available, and steward
+    ``codex exec --json <prompt>``. Reported tokens and optional explicitly priced
+    estimates feed the ledger; without pricing steward
     reports it as unknown rather than guessing.
 ``command``
     An argv template from the manifest, with ``{prompt}`` and ``{workdir}``
@@ -649,6 +650,7 @@ class RunResult:
     input_tokens: int | None = None
     output_tokens: int | None = None
     cost_usd: float | None = None
+    cost_estimate: dict[str, Any] | None = None
     artifacts: tuple[str, ...] = ()
     error: str | None = None
     #: Whether :attr:`error` is the child's own stdout/stderr rather than steward's own
@@ -1286,7 +1288,7 @@ class ClaudeRunner(_ProcessRunner):
 
 
 class CodexRunner(_ProcessRunner):
-    """``codex exec`` — the same seam, a different brain."""
+    """Codex JSONL usage, with optional explicit API-equivalent cost estimates."""
 
     kind: ClassVar[str] = "codex"
     binary: str = "codex"
@@ -1294,12 +1296,45 @@ class CodexRunner(_ProcessRunner):
 
     def argv(self, request: RunRequest) -> list[str]:
         """Build the codex headless argv."""
-        argv = [self.binary, "exec"]
+        argv = [self.binary, "exec", "--json"]
         model = request.model or self.spec.model
         if model:
             argv += ["--model", model]
         argv.append(request.prompt)
         return argv
+
+    def run(self, request: RunRequest) -> RunResult:
+        """Keep the selected model tied to the operator's rate card."""
+        pricing = self.spec.codex_pricing
+        if pricing is not None and (request.model or self.spec.model) != pricing.model:
+            return RunResult(
+                outcome=Outcome.FAILED, error="Codex model override has no matching rates"
+            )
+        result = super().run(request)
+        if result.outcome is Outcome.TIMEOUT:
+            # The timeout path holds only truncated partial stdout, never a complete
+            # receipt. Keep its reply readable but leave all accounting unknown.
+            from steward.codex_usage import read_usage  # noqa: PLC0415
+
+            return replace(result, output=read_usage(result.output, None).output[:OUTPUT_MAX_CHARS])
+        return result
+
+    def parse(self, result: RunResult, stdout: str) -> RunResult:
+        """Read the complete stream before output truncation; tool output is not a reply."""
+        from steward.codex_usage import read_usage  # noqa: PLC0415 — avoids runner/model cycles
+
+        parsed = read_usage(stdout, self.spec.codex_pricing)
+        return replace(
+            result,
+            output=parsed.output[:OUTPUT_MAX_CHARS],
+            input_tokens=parsed.input_tokens,
+            output_tokens=parsed.output_tokens,
+            cost_usd=parsed.cost_usd,
+            cost_estimate=parsed.cost_estimate,
+            outcome=Outcome.FAILED if parsed.failed else result.outcome,
+            error="Codex reported a failed turn" if parsed.failed else result.error,
+            error_is_child=False if parsed.failed else result.error_is_child,
+        )
 
 
 class CommandRunner(_ProcessRunner):

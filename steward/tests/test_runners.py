@@ -1363,7 +1363,13 @@ def test_codex_runner_uses_exec_and_puts_the_prompt_last(
         )
     )
 
-    assert argv_dump.read_text().splitlines() == ["exec", "--model", "gpt-5-codex", "tidy up"]
+    assert argv_dump.read_text().splitlines() == [
+        "exec",
+        "--json",
+        "--model",
+        "gpt-5-codex",
+        "tidy up",
+    ]
     assert result.outcome is r.Outcome.OK
     assert result.cost_usd is None  # codex tells us nothing, so steward claims nothing
 

@@ -807,6 +807,15 @@ class ToolGrant(RootModel[Literal["unrestricted"] | tuple[ToolName, ...]]):
 PermissionMode = Literal["acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"]
 
 
+class CodexPricing(_Model):
+    """Operator-declared API-equivalent rates, never a provider billing receipt."""
+
+    model: str = Field(min_length=1, description="Exact model id these rates describe.")
+    input_usd_per_million: float = Field(gt=0, le=10000, allow_inf_nan=False, strict=True)
+    cached_input_usd_per_million: float = Field(ge=0, le=10000, allow_inf_nan=False, strict=True)
+    output_usd_per_million: float = Field(gt=0, le=10000, allow_inf_nan=False, strict=True)
+
+
 class Runner(_Model):
     """Which brain a resident runs on. Every session launch goes through this seam."""
 
@@ -821,6 +830,9 @@ class Runner(_Model):
         description="Where a session runs: on the control plane, or inside deploy.container.",
     )
     model: str | None = Field(default=None, description="Model id passed to the CLI.")
+    codex_pricing: CodexPricing | None = Field(
+        default=None, description="Explicit model rates for estimated Codex cost accounting."
+    )
     command: list[str] | None = Field(
         default=None,
         description="Argv template for kind=command; placeholders {prompt} and {workdir}.",
@@ -842,6 +854,10 @@ class Runner(_Model):
 
     @model_validator(mode="after")
     def _check_command_template(self) -> Self:
+        if self.codex_pricing is not None and (
+            self.kind != "codex" or self.model != self.codex_pricing.model
+        ):
+            raise ValueError("codex_pricing requires kind: codex and a matching explicit model")
         placeholders = {
             name for part in (self.command or []) for name in re.findall(r"\{([a-z_]+)\}", part)
         }

@@ -285,10 +285,11 @@ class ApprovalRecord:
 
 @dataclass(frozen=True, slots=True)
 class LedgerEntry:
-    """What one finished session actually cost. Never an estimate.
+    """One run's consumption, with the rate card attached when its cost is estimated.
 
     ``usage_known`` is the honest half. A ``claude`` run reports its usage and cost in
-    the JSON steward already asks for; a ``codex`` or ``command`` run reports nothing,
+    the JSON steward already asks for; priced Codex runs carry ``cost_estimate``.
+    An unpriced Codex or ``command`` run cannot report a dollar amount,
     and steward writes zeroes with ``usage_known = False`` rather than inventing a
     number. A budget can then say "0.00 of 5.00 spent, and 3 of today's 4 runs did not
     report what they cost", which is a true sentence, where "0.00 spent" alone would be
@@ -313,6 +314,7 @@ class LedgerEntry:
     cost_usd: float = 0.0
     duration_s: float = 0.0
     usage_known: bool = True
+    cost_estimate: dict[str, Any] | None = None
 
     @property
     def tokens(self) -> int:
@@ -338,6 +340,7 @@ class LedgerEntry:
             cost_usd=row["cost_usd"],
             duration_s=row["duration_s"],
             usage_known=bool(row["usage_known"]),
+            cost_estimate=json.loads(row["cost_estimate"]) if row["cost_estimate"] else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -357,6 +360,7 @@ class LedgerEntry:
             "cost_usd": self.cost_usd,
             "duration_s": round(self.duration_s, 3),
             "usage_known": self.usage_known,
+            "cost_estimate": self.cost_estimate,
             "recorded_at": self.recorded_at,
         }
 
@@ -419,6 +423,7 @@ class OriginSpend:
 
     origin: str
     runs: int
+    estimated_cost_runs: int = 0
     cost_usd: float = 0.0
     tokens: int = 0
     duration_s: float = 0.0
@@ -428,6 +433,7 @@ class OriginSpend:
         return {
             "origin": self.origin,
             "runs": self.runs,
+            "estimated_cost_runs": self.estimated_cost_runs,
             "cost_usd": round(self.cost_usd, 6),
             "tokens": self.tokens,
             "duration_s": round(self.duration_s, 3),

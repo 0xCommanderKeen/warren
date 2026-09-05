@@ -316,6 +316,16 @@ describe("budget controls", () => {
     expect(screen.getByText("no cap declared")).toBeTruthy();
   });
 
+  it("labels costs derived from token estimates", async () => {
+    const fetch = vi.fn().mockImplementation((url) => Promise.resolve(json(200,
+      String(url).endsWith("/budget")
+        ? { ...BUDGET, spent: { ...BUDGET.spent, estimated_cost_runs: 2 } }
+        : DECLARATION)));
+    mount(<BudgetsPage params={{ id: "hob" }} />, { fetch });
+    expect(await screen.findByText("cost (includes estimates)")).toBeTruthy();
+    expect(screen.getByText("$5.2000")).toBeTruthy();
+  });
+
   it("writes a cap through the declaration, not through a budget endpoint", async () => {
     const fetch = budgetFetch(json(200, { status: "accepted", commit: COMMIT, warnings: [], message: "written and validated" }));
     mount(<BudgetsPage params={{ id: "hob" }} />, { fetch });

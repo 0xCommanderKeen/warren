@@ -140,6 +140,7 @@ def test_budget_show_by_origin_wraps_the_json_only_when_it_is_asked_for(
         {
             "origin": "resident:test-agent",
             "runs": 1,
+            "estimated_cost_runs": 0,
             "cost_usd": 1.0,
             "tokens": 100,
             "duration_s": 0.0,

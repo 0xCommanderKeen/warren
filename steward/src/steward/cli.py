@@ -2222,6 +2222,8 @@ def _render_budget(status: BudgetStatus) -> None:
         click.echo(f"  {gauge.describe()}")
     if status.max_run_seconds is not None:
         click.echo(f"  max_run_seconds: {status.max_run_seconds}")
+    if status.spend.estimated_runs:
+        click.echo(f"  cost includes {status.spend.estimated_runs} API-equivalent estimate(s)")
     if status.spend.unreported:
         click.secho(
             f"  {status.spend.unreported} of today's runs did not report what they cost; "
@@ -2317,6 +2319,11 @@ def _render_origins(statuses: Sequence[BudgetStatus], origins: Sequence[OriginSp
     for spend in origins:
         click.echo(
             f"  {spend.origin}: ${spend.cost_usd:.4f}, {spend.tokens} token(s), {spend.runs} run(s)"
+            + (
+                f" (includes {spend.estimated_cost_runs} cost estimate(s))"
+                if spend.estimated_cost_runs
+                else ""
+            )
         )
 
 
