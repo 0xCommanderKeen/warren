@@ -93,13 +93,13 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
     names.push({ element, position: new THREE.Vector3(...position), always, text, compact, present });
   }
   function plant(group, x, z, size = 1) {
-    part(group, "pot", [x, 0.22 * size, z], [0.5 * size, 0.44 * size, 0.5 * size], "cylinder");
-    part(group, "leaf", [x, 0.74 * size, z], [0.83 * size, 1.0 * size, 0.74 * size], "sphere");
+    part(group, "pot", [x, 0.22 * size, z], [0.5 * size, 0.44 * size, 0.5 * size], "cylinder").userData.detailOnly = true;
+    part(group, "leaf", [x, 0.74 * size, z], [0.83 * size, 1.0 * size, 0.74 * size], "sphere").userData.detailOnly = true;
   }
   function lamp(group, x, z, y = 0) {
-    part(group, "brass", [x, y + 0.08, z], [0.3, 0.1, 0.3], "cylinder");
-    part(group, "brass", [x, y + 0.35, z], [0.05, 0.57, 0.05], "cylinder");
-    part(group, "cream", [x, y + 0.63, z], [0.52, 0.4, 0.52], "cone");
+    part(group, "brass", [x, y + 0.08, z], [0.3, 0.1, 0.3], "cylinder").userData.detailOnly = true;
+    part(group, "brass", [x, y + 0.35, z], [0.05, 0.57, 0.05], "cylinder").userData.detailOnly = true;
+    part(group, "cream", [x, y + 0.63, z], [0.52, 0.4, 0.52], "cone").userData.detailOnly = true;
   }
   function desk(group, x, z) {
     part(group, "timber", [x, 0.83, z + 0.42], [2.1, 0.16, 0.95]);
@@ -107,7 +107,7 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
     part(group, "navy", [x - 0.28, 1.13, z + 0.55], [0.67, 0.43, 0.11]);
     part(group, "window", [x - 0.28, 1.14, z + 0.484], [0.55, 0.31, 0.025]);
     part(group, "brass", [x - 0.28, 0.96, z + 0.54], [0.18, 0.13, 0.18]);
-    part(group, "paper", [x + 0.25, 0.922, z + 0.11], [0.4, 0.025, 0.27]);
+    part(group, "paper", [x + 0.25, 0.922, z + 0.11], [0.4, 0.025, 0.27]).userData.detailOnly = true;
     lamp(group, x + 0.73, z + 0.5, 0.93);
     part(group, "teal", [x, 0.25, z - 0.62], [0.62, 0.17, 0.58]);
     part(group, "timber", [x, 0.12, z - 0.62], [0.35, 0.24, 0.35]);
@@ -127,18 +127,20 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
       group.updateMatrixWorld(true);
       group.traverse(mesh => {
         if (!mesh.isMesh) return;
-        const key = `${mesh.geometry.uuid}:${mesh.material.type}:${mesh.material.roughness}`;
+        const detailOnly = Boolean(mesh.userData.detailOnly);
+        const key = `${mesh.geometry.uuid}:${mesh.material.type}:${mesh.material.roughness}:${detailOnly}`;
         if (!batchMaterials.has(key)) {
           const mat = mesh.material.clone();
           mat.color.set(0xffffff); mat.emissive?.set(0x000000);
           batchMaterials.set(key, mat);
         }
-        if (!batches.has(key)) batches.set(key, { geometry: mesh.geometry, material: batchMaterials.get(key), items: [] });
+        if (!batches.has(key)) batches.set(key, { geometry: mesh.geometry, material: batchMaterials.get(key), items: [], detailOnly });
         batches.get(key).items.push({ matrix: mesh.matrixWorld.clone(), color: mesh.material.color.clone(), selection: group.userData.selection });
       });
     }
     for (const batch of batches.values()) {
       const mesh = new THREE.InstancedMesh(batch.geometry, batch.material, batch.items.length);
+      mesh.userData.detailOnly = batch.detailOnly;
       mesh.userData.selections = batch.items.map(item => item.selection);
       batch.items.forEach((item, i) => { mesh.setMatrixAt(i, item.matrix); mesh.setColorAt(i, item.color); });
       mesh.castShadow = true; mesh.receiveShadow = true;
@@ -183,7 +185,7 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
     part(room, "timber", [-width / 2 + 0.42, 1.1, -depth / 2 + 1.8], [0.65, 2.2, 2.2]);
     for (let row = 0; row < 3; row++) {
       part(room, "trim", [-width / 2 + 0.82, 0.45 + row * 0.65, -depth / 2 + 1.8], [0.18, 0.12, 2.1]);
-      for (let book = 0; book < 6; book++) part(room, ["teal", "paper", "rust", "navy"][(book + row) % 4], [-width / 2 + 0.8, 0.7 + row * 0.65, -depth / 2 + 0.99 + book * 0.3], [0.2, 0.38 + book % 2 * 0.12, 0.21]);
+      for (let book = 0; book < 6; book++) part(room, ["teal", "paper", "rust", "navy"][(book + row) % 4], [-width / 2 + 0.8, 0.7 + row * 0.65, -depth / 2 + 0.99 + book * 0.3], [0.2, 0.38 + book % 2 * 0.12, 0.21]).userData.detailOnly = true;
     }
     plant(room, width / 2 - 0.8, -depth / 2 + 0.85, 1.2);
     plant(room, -width / 2 + 0.9, depth / 2 - 0.85);
@@ -296,6 +298,8 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
     canvas.dataset.focusAgent = focusAgentId && room.stations.some(item => item.id === focusAgentId && item.agent) ? focusAgentId : "";
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, next.quality === "low" ? 1 : 1.75));
     renderer.shadowMap.enabled = next.quality !== "low";
+    for (const mesh of root.children) if (mesh.userData.detailOnly) mesh.visible = next.quality !== "low";
+    canvas.dataset.quality = next.quality === "low" ? "low" : "high";
     // Furniture and occupant poses stay still; motion preference also disables inertia.
     controls.enableDamping = !next.paused;
     if (next.cameraCommand && next.cameraCommand !== lastCommand) {
@@ -327,6 +331,7 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
     pointer.set((event.clientX - rect.left) / rect.width * 2 - 1, -(event.clientY - rect.top) / rect.height * 2 + 1);
     raycaster.setFromCamera(pointer, camera);
     for (const hit of raycaster.intersectObject(root, true)) {
+      if (!hit.object.visible) continue;
       const selection = hit.object.userData.selections?.[hit.instanceId];
       if (selection) { onSelect?.(selection); return; }
     }
@@ -362,6 +367,7 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
         }
       }
       renderer.render(scene, camera);
+      canvas.dataset.visibleDecorations = String(root.children.filter(mesh => mesh.userData.detailOnly && mesh.visible).reduce((total, mesh) => total + (mesh.count || 1), 0));
       canvas.dataset.drawCalls = String(renderer.info.render.calls);
       needsRender = false;
     } catch (error) { cancelAnimationFrame(frame); onError?.(error); }

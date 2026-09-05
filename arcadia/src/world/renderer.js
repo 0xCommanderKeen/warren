@@ -71,6 +71,7 @@ export function createVillageRenderer(host, { onSelect, onError, onCameraChange,
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, level === "low" ? 1 : 1.75));
     renderer.shadowMap.enabled = level !== "low";
     canvas.dataset.quality = level;
+    for (const mesh of staticRoot.children) if (mesh.userData.detailOnly) mesh.visible = level !== "low";
     onQualityChange?.(level);
     resize();
   }
@@ -155,13 +156,16 @@ export function createVillageRenderer(host, { onSelect, onError, onCameraChange,
       group.traverse(object => {
         if (!object.isMesh) return;
         const materials = Array.isArray(object.material) ? object.material : [object.material];
-        const batchKey = `${object.geometry.uuid}:${materials.map(m => m.uuid).join(":")}`;
-        if (!batches.has(batchKey)) batches.set(batchKey, { geometry: object.geometry, material: object.material, items: [] });
+        const detailOnly = Boolean(group.userData.detailOnly);
+        const batchKey = `${object.geometry.uuid}:${materials.map(m => m.uuid).join(":")}:${detailOnly}`;
+        if (!batches.has(batchKey)) batches.set(batchKey, { geometry: object.geometry, material: object.material, items: [], detailOnly });
         batches.get(batchKey).items.push({ matrix: object.matrixWorld.clone(), selection: group.userData.selection || null, shadow: object.castShadow });
       });
     }
-    for (const { geometry, material: mat, items } of batches.values()) {
+    for (const { geometry, material: mat, items, detailOnly } of batches.values()) {
       const mesh = new THREE.InstancedMesh(geometry, mat, items.length);
+      mesh.userData.detailOnly = detailOnly;
+      mesh.visible = !detailOnly || effectiveQuality !== "low";
       mesh.userData.selections = items.map(item => item.selection);
       items.forEach((item, i) => mesh.setMatrixAt(i, item.matrix));
       mesh.castShadow = items.some(item => item.shadow);
@@ -221,6 +225,7 @@ export function createVillageRenderer(host, { onSelect, onError, onCameraChange,
       const x = side < 2 ? minX - 4 + along * (width - 7) : (side === 2 ? minX - 4 : maxX + 4);
       const z = side >= 2 ? minZ - 4 + along * (depth - 7) : (side === 0 ? minZ - 4 : maxZ + 4);
       const tree = art.tree(i);
+      tree.userData.detailOnly = true;
       tree.position.set(x, .02, z);
       tree.scale.setScalar(.65 + random(i + 10) * .7);
       tree.rotation.y = random(i + 4) * Math.PI * 2;
@@ -228,6 +233,7 @@ export function createVillageRenderer(host, { onSelect, onError, onCameraChange,
     }
     // Small pools and stones sit at the landscape edge, away from streets and plots.
     const pool = new THREE.Mesh(poolGeometry, water);
+    pool.userData.detailOnly = true; pool.visible = effectiveQuality !== "low";
     pool.rotation.x = -Math.PI / 2;
     pool.scale.set(2.8, 1.6, 1);
     pool.position.set(minX - 3, .02, maxZ + 3);
@@ -237,7 +243,7 @@ export function createVillageRenderer(host, { onSelect, onError, onCameraChange,
       const angle = i / 14 * Math.PI * 2;
       stone.position.set(minX - 3 + Math.cos(angle) * 2.9, .12, maxZ + 3 + Math.sin(angle) * 1.8);
       stone.scale.setScalar(.7 + random(i) * .8);
-      const group = new THREE.Group(); group.add(stone); objects.push(group);
+      const group = new THREE.Group(); group.userData.detailOnly = true; group.add(stone); objects.push(group);
     }
     // Unoccupied plots become pocket gardens; new homes replace their own garden only.
     for (let x = minX + 8; x <= maxX - 8; x += 10) {
@@ -246,17 +252,19 @@ export function createVillageRenderer(host, { onSelect, onError, onCameraChange,
         const seed = Math.abs(x * 13 + z * 7);
         for (let i = 0; i < 3; i++) {
           const tree = art.tree(seed + i);
+          tree.userData.detailOnly = true;
           tree.position.set(x + (i - 1) * 1.5, .02, z + (i % 2 ? 1.4 : -.7));
           tree.scale.setScalar(.8 + random(seed + i) * .3); objects.push(tree);
         }
         const bench = new THREE.Mesh(box, soil);
         bench.scale.set(1.4, .25, .45); bench.position.set(x, .2, z + 2.5);
-        const group = new THREE.Group(); group.add(bench); objects.push(group);
+        const group = new THREE.Group(); group.userData.detailOnly = true; group.add(bench); objects.push(group);
       }
     }
     for (const building of world.buildings.filter(b => ["home", "lodge", "archive"].includes(b.kind))) {
       for (const side of [-1, 1]) {
         const tree = art.tree(building.position[0] + building.position[1] + side);
+        tree.userData.detailOnly = true;
         tree.position.set(building.position[0] + side * 3.3, .02, building.position[1] - 2.7);
         tree.scale.setScalar(.72); objects.push(tree);
       }
@@ -404,6 +412,18 @@ export function createVillageRenderer(host, { onSelect, onError, onCameraChange,
     }
     const selectionKey = keyOf(next.selection);
     if (selectionKey !== lastSelection) { lastSelection = selectionKey; focusSelection(); }
+    if (previous.world && previous.world.layoutRevision !== world.layoutRevision) {
+      const oldPlots = new Map(previous.world.buildings.map(building => [building.id, building.position]));
+      const moved = world.buildings.filter(building => {
+        const old = oldPlots.get(building.id);
+        return old && old.some((value, axis) => value !== building.position[axis]);
+      });
+      if (moved.length === 1) {
+        const target = new THREE.Vector3(moved[0].position[0], 0, moved[0].position[1]);
+        const offset = camera.position.clone().sub(controls.target);
+        targetCamera = { target, position: target.clone().add(offset) };
+      } else resetCamera();
+    }
     if (next.cameraCommand && next.cameraCommand !== lastCommand) {
       lastCommand = next.cameraCommand;
       const type = lastCommand.type;
@@ -541,6 +561,7 @@ export function createVillageRenderer(host, { onSelect, onError, onCameraChange,
       }
       updateAgentBatches();
       renderer.render(scene, camera);
+      canvas.dataset.visibleDecorations = String(staticRoot.children.filter(mesh => mesh.userData.detailOnly && mesh.visible).reduce((total, mesh) => total + (mesh.count || 1), 0));
       frameCount++;
       if (time - frameSampleAt > 1000) {
         const fps = Math.round(frameCount * 1000 / (time - frameSampleAt));

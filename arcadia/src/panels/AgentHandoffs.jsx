@@ -25,13 +25,31 @@ export function AgentHandoffs({ snapshot, onSelectAgent, agentId = null }) {
   const link = (id) => (
     <AgentLink id={id} snapshot={snapshot} onSelectAgent={onSelectAgent} />
   );
+  if (
+    !model.handoffs.length &&
+    !model.blocked.length &&
+    !model.lineage.length &&
+    !model.unlinked.length
+  )
+    return (
+      <section
+        className="agent-handoffs handoffs-quiet"
+        aria-label="Recorded agent handoffs"
+      >
+        <p>
+          No explicit agent-to-agent handoffs are retained in this snapshot.
+        </p>
+        <small>Accepted handoffs and recorded outcomes will appear here.</small>
+      </section>
+    );
   return (
     <section className="agent-handoffs" aria-label="Recorded agent handoffs">
       <header>
         <h3>Work passed between agents</h3>
         <p>
           Retained records only. Missing events do not imply a reply or a
-          completed task.
+          completed task. Reply delivery and message text are not recorded in
+          this view.
         </p>
       </header>
       {model.handoffs.length ? (
@@ -85,15 +103,30 @@ export function AgentHandoffs({ snapshot, onSelectAgent, agentId = null }) {
                   {item.result.reason && <p>{item.result.reason}</p>}
                   {item.result.artifacts.length > 0 && (
                     <ul>
-                      {item.result.artifacts.map((artifact, index) => (
-                        <li key={`${index}:${artifact}`}>{artifact}</li>
-                      ))}
+                      {item.result.artifacts
+                        .slice(0, 3)
+                        .map((artifact, index) => (
+                          <li key={`${index}:${artifact}`}>{artifact}</li>
+                        ))}
                     </ul>
                   )}
-                  <p>
-                    Task outcome recorded. Reply delivery and message text are
-                    not recorded in this view.
-                  </p>
+                  {item.result.artifacts.length > 3 && (
+                    <details>
+                      <summary>
+                        {item.result.artifacts.length - 3} more recorded{" "}
+                        {item.result.artifacts.length === 4
+                          ? "output"
+                          : "outputs"}
+                      </summary>
+                      <ul>
+                        {item.result.artifacts
+                          .slice(3)
+                          .map((artifact, index) => (
+                            <li key={`${index}:${artifact}`}>{artifact}</li>
+                          ))}
+                      </ul>
+                    </details>
+                  )}
                 </div>
               )}
             </li>

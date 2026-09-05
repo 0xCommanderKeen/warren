@@ -1,3 +1,4 @@
+import { AgentProfile } from "./AgentProfile.jsx";
 import { RoomResidents } from "./RoomResidents.jsx";
 import { VillageLayoutEditor } from "./VillageLayoutEditor.jsx";
 import { AgentHandoffs } from "./AgentHandoffs.jsx";
@@ -159,7 +160,6 @@ function AgentDetails({
   snapshot,
   follow,
   setFollow,
-  onClose,
   detailRef,
   onVisitHome,
   stewardClient,
@@ -182,20 +182,15 @@ function AgentDetails({
       className="ve-dossier"
       aria-label="Selected villager"
     >
+      <div className="agent-profile-identity">
       <div className="ve-detail-heading">
         <Portrait agent={agent} large />
-        <button
-          className="ve-icon-button"
-          onClick={onClose}
-          aria-label="Close villager details"
-        >
-          ×
-        </button>
+
       </div>
       <p className="ve-kicker">
         {agent.residency === "resident" ? "Village resident" : "Visiting agent"}
       </p>
-      <h3>{agent.name}</h3>
+      <h3 id="agent-profile-name">{agent.name}</h3>
       {charter?.meta.role && <p className="ve-role">{charter.meta.role}</p>}
       <div className="ve-detail-status">
         <span className="ve-state" data-state={agent.state}>
@@ -209,10 +204,7 @@ function AgentDetails({
           {follow ? "Following · stop" : "Follow agent ↗"}
         </button>
       </div>
-      <p className="ve-current">
-        {agent.last_line || "No recent activity recorded."}
-      </p>
-      <AgentAttention snapshot={snapshot} stewardClient={stewardClient} agentId={agent.id} />
+
       <dl className="ve-facts">
         <dt>Project</dt>
         <dd>{agent.project || "None"}</dd>
@@ -255,6 +247,11 @@ function AgentDetails({
           Visit home →
         </button>
       )}
+      </div>
+      <div className="agent-profile-work">
+      <h4>Current activity</h4>
+      <p className="ve-current">{agent.last_line || "No recent activity recorded."}</p>
+      <AgentAttention snapshot={snapshot} stewardClient={stewardClient} agentId={agent.id} />
       <Records title="Tasks" items={tasks}>
         {(t) => (
           <li key={t.id}>
@@ -295,6 +292,7 @@ function AgentDetails({
           </li>
         )}
       </Records>
+      </div>
     </section>
   );
 }
@@ -333,6 +331,7 @@ export function VillageExperience({ snapshot, stewardClient }) {
     }
   }, [world]);
   const [selection, setSelection] = useState(null);
+  const [profileOpen, setProfileOpen] = useState(false);
   const [roomId, setRoomId] = useState(null);
   const [roomError, setRoomError] = useState(null);
   const [roomCameraCommand, setRoomCameraCommand] = useState(null);
@@ -356,7 +355,7 @@ export function VillageExperience({ snapshot, stewardClient }) {
   useEffect(() => {
     const enteredRoom = roomId && roomId !== previousScrollRoom.current;
     previousScrollRoom.current = roomId;
-    if (!selection || !globalThis.matchMedia?.("(max-width: 800px)").matches)
+    if (selection?.kind === "agent" || !selection || !globalThis.matchMedia?.("(max-width: 800px)").matches)
       return;
     const target = enteredRoom ? roomRef.current : detailRef.current;
     target?.scrollIntoView?.({
@@ -464,6 +463,7 @@ export function VillageExperience({ snapshot, stewardClient }) {
   const select = useCallback(
     (next) => {
       setSelection(next);
+      setProfileOpen(next?.kind === "agent");
       setFollow(false);
       setRoomCameraCommand(null);
       setTaskRequest(null);
@@ -485,7 +485,7 @@ export function VillageExperience({ snapshot, stewardClient }) {
     },
     [world],
   );
-  const highlightTaskAgent = useCallback(next => { setSelection(next); setFollow(false); setTaskFocusAgentId(next?.id || null); }, []);
+  const highlightTaskAgent = useCallback(next => { setProfileOpen(false); setSelection(next); setFollow(false); setTaskFocusAgentId(next?.id || null); }, []);
   const selectedAgent =
     selection?.kind === "agent"
       ? world.agents.find((a) => a.id === selection.id)
@@ -576,7 +576,7 @@ export function VillageExperience({ snapshot, stewardClient }) {
       <VisitBriefing snapshot={snapshot} onSelectAgent={select}
         onOpenArchive={() => select({ kind: "building", id: "archive" })}
         onOpenTask={id => { select({ kind: "building", id: "workshop" }); setTaskRequest(previous => ({ id, nonce: (previous?.nonce || 0) + 1 })); }}
-        onReviewApprovals={() => document.getElementById("approvals")?.scrollIntoView({ block: "start", behavior: paused ? "auto" : "smooth" })} />
+        onReviewApprovals={() => { window.location.hash = "#approvals"; }} />
       <header className="ve-introduction">
         <h2>The clearing</h2>
         <p>
@@ -691,7 +691,7 @@ export function VillageExperience({ snapshot, stewardClient }) {
               </div>
               {room.kind === "workshop" && <WorkshopBoard snapshot={snapshot} onSelectAgent={select} taskRequest={taskRequest} onHighlightAgent={highlightTaskAgent} />}
               {room.kind === "workshop" && <AgentHandoffs snapshot={snapshot} onSelectAgent={id => select({ kind: "agent", id })} />}
-              <RoomResidents agents={roomAgents} selectedAgentId={selectedAgent?.id} kind={room.kind} onFocusAgent={id => highlightTaskAgent({ kind: "agent", id })} />
+              <RoomResidents agents={roomAgents} selectedAgentId={selectedAgent?.id} kind={room.kind} onFocusAgent={id => { setProfileOpen(false); setSelection({ kind: "agent", id }); setFollow(false); setTaskFocusAgentId(id); }} />
               <div className="ve-room-roster" aria-label="People inside">
                 {roomAgents.length ? (
                   roomAgents.map((agent) => (
@@ -828,17 +828,18 @@ export function VillageExperience({ snapshot, stewardClient }) {
                 <span className="sr-only">Rendering quality</span>
                 <select
                   aria-label="Rendering quality"
+                  title="Scenic includes scenery and shadows. Simple hides them. Automatic adjusts to rendering speed."
                   value={quality}
                   onChange={(e) => setQuality(e.target.value)}
                 >
-                  <option value="high">Full detail</option>
-                  <option value="low">Light detail</option>
-                  <option value="auto">Adaptive detail</option>
+                  <option value="high">Scenic</option>
+                  <option value="low">Simple</option>
+                  <option value="auto">Automatic</option>
                 </select>
               </label>
             </div>
           </footer>
-          {quality === "auto" && <p className="ve-navigation-hint">Adaptive rendering · {adaptiveDetail === "low" ? "light" : "full"} detail</p>}
+          {quality === "auto" && <p className="ve-navigation-hint">Automatic · {adaptiveDetail === "low" ? "simple" : "scenic"} view</p>}
           {editingLayout && <VillageLayoutEditor world={world} onMoveBuilding={(id, position) => changeLayout(() => layout.current.moveBuilding(id, position))} onUndoMove={() => changeLayout(() => layout.current.undoMove())} onReset={() => changeLayout(() => layout.current.resetLayout())} />}
         </section>
         <aside className="ve-sidebar" aria-label="Villagers">
@@ -1008,18 +1009,22 @@ export function VillageExperience({ snapshot, stewardClient }) {
               ))}
           </nav>
           {selectedAgent ? (
+            <>
+            <button className="ve-open-profile" onClick={() => setProfileOpen(true)}>View {selectedAgent.name}’s profile ↗</button>
+            {profileOpen && <AgentProfile onClose={() => setProfileOpen(false)}>
             <AgentDetails
               detailRef={detailRef}
               agent={selectedAgent}
               snapshot={snapshot}
               stewardClient={stewardClient}
               follow={follow}
-              setFollow={setFollow}
-              onClose={() => select(null)}
+              setFollow={value => { setFollow(value); setProfileOpen(false); }}
               onVisitHome={() =>
                 select({ kind: "building", id: `home:${selectedAgent.id}` })
               }
             />
+            </AgentProfile>}
+            </>
           ) : selectedBuilding ? (
             <section
               ref={detailRef}

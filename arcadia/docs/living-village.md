@@ -48,3 +48,11 @@ The layout editor saves version-2 layout data under the existing browser key and
 `ArtifactPreview.jsx` fetches only after an explicit request. The backend verifies a retained artifact identity and reads bounded supported files from dedicated published directories, with no URL fetching or symlink traversal. See [artifact preview configuration](../../chronicle/docs/artifact-previews.md). Existing servers continue to provide metadata; file preview requires the new backend and configured roots.
 
 Adaptive detail is an optional persisted preference. After two warm-up FPS samples and three consecutive samples below 40 FPS, it disables shadows, reduces pixel density, and caps rendering at roughly 30 FPS. It stays light until the preference changes or the page reloads, avoiding oscillation caused by its own frame cap. Manual full/light choices remain available.
+
+## Focused profiles and quieter navigation
+
+Selecting a person opens a large native modal profile with a readable portrait, current activity, recorded work, and the same approval controls. Escape/close restores focus and keeps the underlying village scroll position. Follow closes the profile so the destination remains visible; room cycling and task highlighting frame an agent without interrupting the current task with a modal. The selected person's profile can be reopened from the directory.
+
+The default page contains the village. Records and global requests have explicit navigation views, including direct approval links, while the shared approval provider retains write/authentication state. Workshop columns scroll horizontally on narrow screens; archive browsing starts with 24 records and can expand, with search covering all retained records.
+
+Scenic includes decorative scenery and shadows. Simple removes nonessential scenery and room ornaments as well as shadows, preserving agents, buildings, personal stations, and status information. Automatic selects these same profiles from sustained render timing. Moving a building focuses its new position; resetting multiple positions returns to overview. Camera controls remain separate from the layout editor.

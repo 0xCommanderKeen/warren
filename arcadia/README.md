@@ -76,3 +76,5 @@ pnpm test:browser
 The production Compose/nginx shape, cutover, smoke check, and rollback procedure are in [docs/deployment.md](docs/deployment.md).
 
 Use **Edit layout** to move buildings between plots with automatically reconnected streets, undo, and reset. Layout changes stay in this browser. The workshop includes recorded delegation history. Lodge interiors add project common tables while preserving personal beds; room controls cycle residents and add name/project search in crowded rooms. **Adaptive detail** starts with full rendering and selects the light profile after sustained slow frames.
+
+Selecting an agent opens a large profile; closing it returns to the same village position. Follow returns to the scene, while room cycling stays focused on the room. Village records and Requests open dedicated views instead of a long dashboard under the village. Scenic/Simple/Automatic now control visible scenery and shadows in both exterior and room views.

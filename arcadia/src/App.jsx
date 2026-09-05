@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { pendingApprovals } from "./contract/approvals.js";
 import {
   ContractValidationError,
@@ -128,23 +128,75 @@ export function App({
     return <ContractMismatch error={error} />;
   }
 
+  return <VillageShell snapshot={snapshot} stewardClient={stewardClient} connectionStatus={connectionStatus} />;
+}
+
+function viewFromHash(hash) {
+  if (hash === "#records") return "records";
+  if (hash === "#approvals" || hash.startsWith("#approval-")) return "approvals";
+  return "village";
+}
+
+function VillageShell({ snapshot, stewardClient, connectionStatus }) {
+  const [hash, setHash] = useState(() => window.location.hash);
+  const heading = useRef(null);
+  const villageHeading = useRef(null);
+  const view = viewFromHash(hash);
+  const previousView = useRef(view);
+  const approvals = pendingApprovals(snapshot.approvals);
+  useEffect(() => {
+    const changed = () => setHash(window.location.hash);
+    window.addEventListener("hashchange", changed);
+    window.addEventListener("popstate", changed);
+    return () => {
+      window.removeEventListener("hashchange", changed);
+      window.removeEventListener("popstate", changed);
+    };
+  }, []);
+  useEffect(() => {
+    const previous = previousView.current;
+    previousView.current = view;
+    if (view === "village") {
+      if (previous !== "village") {
+        villageHeading.current?.focus({ preventScroll: true });
+        villageHeading.current?.scrollIntoView?.({ block: "start", behavior: "auto" });
+      }
+      return;
+    }
+    heading.current?.focus({ preventScroll: true });
+    const target = document.getElementById(hash.slice(1)) || heading.current;
+    target?.scrollIntoView?.({ block: "start", behavior: "auto" });
+  }, [hash, view]);
+  function navigate(hash) {
+    if (window.location.hash !== hash) window.history.pushState(null, "", hash);
+    setHash(hash);
+  }
+  function followInternalLink(event) {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const link = event.target.closest?.("a[href]");
+    const target = link?.getAttribute("href");
+    if (!target || !["#village", "#records", "#approvals"].includes(target) && !target.startsWith("#approval-")) return;
+    event.preventDefault();
+    navigate(target);
+  }
   return (
     <ApprovalProvider snapshot={snapshot} stewardClient={stewardClient}>
-      <main className="arcadia-shell">
+      <main className="arcadia-shell" onClick={followInternalLink}>
         <StewardSnapshotBridge client={stewardClient} snapshot={snapshot} />
         <header className="masthead">
           <a className="wordmark" href="/" aria-label="Arcadia home">
             <span aria-hidden="true">♧</span> WARREN / ARCADIA
           </a>
           <nav aria-label="Main navigation">
-            <a href="#village">Village</a>
-            <a href="#records">Village records</a>
+            <a href="#village" aria-current={view === "village" ? "page" : undefined}>Village</a>
+            <a href="#records" aria-current={view === "records" ? "page" : undefined}>Village records</a>
+            <a href="#approvals" aria-current={view === "approvals" ? "page" : undefined}>Requests{approvals.length ? ` (${approvals.length})` : ""}</a>
             <a href="/observatory/">Townhall ↗</a>
           </nav>
         </header>
         <section className="village-intro">
           <div>
-            <h1>Arcadia</h1>
+            <h1 ref={villageHeading} tabIndex={-1}>Arcadia</h1>
             <p>
               Follow the work. Meet the people. Find your place in the village.
             </p>
@@ -167,18 +219,13 @@ export function App({
             </p>
           </div>
         </section>
-        <VillageExperience snapshot={snapshot} stewardClient={stewardClient} />
-        <ApprovalKnocks snapshot={snapshot} stewardClient={stewardClient} />
-        <section id="records" className="records-section">
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">The village almanac</p>
-              <h2>What’s been happening</h2>
-            </div>
-            <p>Work, routines, and the things left behind.</p>
-          </div>
-          <ReadOnlyPanels snapshot={snapshot} />
-        </section>
+        {view === "village" ? <VillageExperience snapshot={snapshot} stewardClient={stewardClient} /> : <section className={`village-secondary-view ${view === "records" ? "records-page" : "requests-page"}`} aria-label={view === "records" ? "Village records" : "Village requests"} id={view === "records" ? "records" : "requests-view"}>
+          <header className="secondary-view-heading">
+            <div><p className="eyebrow">{view === "records" ? "The village almanac" : "Waiting for your answer"}</p><h2 ref={heading} tabIndex={-1}>{view === "records" ? "Village records" : "Requests"}</h2><p>{view === "records" ? "Recorded work, routines, and resident declarations." : "Review pending requests and send an answer to Steward."}</p></div>
+            <a className="back-to-village" href="#village">← Back to village</a>
+          </header>
+          {view === "records" ? <ReadOnlyPanels snapshot={snapshot} /> : approvals.length ? <ApprovalKnocks snapshot={snapshot} stewardClient={stewardClient} /> : <p className="requests-empty" id="approvals">No requests are waiting for an answer.</p>}
+        </section>}
         <footer className="village-footer">
           <span>Arcadia · a window into Warren</span>
           <span>An original miniature world · Powered by Warren</span>

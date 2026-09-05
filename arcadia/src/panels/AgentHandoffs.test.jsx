@@ -115,3 +115,29 @@ describe("agent handoff panel", () => {
     );
   });
 });
+
+it("keeps an entirely empty handoff feed compact", () => {
+  render(
+    <AgentHandoffs snapshot={{ villagers: [], tasks: [], approvals: [] }} />,
+  );
+  const panel = screen.getByRole("region", { name: "Recorded agent handoffs" });
+  expect(panel).toHaveClass("handoffs-quiet");
+  expect(panel).toHaveTextContent(
+    "Accepted handoffs and recorded outcomes will appear here.",
+  );
+  expect(within(panel).queryByRole("heading")).toBeNull();
+});
+
+it("shows three output paths up front and keeps the rest behind disclosure", () => {
+  const data = snapshot();
+  data.villagers[1].history[0].payload.artifacts = [
+    "one.md",
+    "two.md",
+    "three.md",
+    "four.md",
+  ];
+  render(<AgentHandoffs snapshot={data} />);
+  expect(screen.getByText("one.md")).toBeVisible();
+  expect(screen.getByText("four.md")).not.toBeVisible();
+  expect(screen.getByText("1 more recorded output")).toBeVisible();
+});

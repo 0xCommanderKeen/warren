@@ -90,10 +90,10 @@ for (const width of [1440, 768, 390, 320]) {
     await page.getByRole("searchbox").fill("Keeper");
     await page.locator(".ve-person").click();
     await expect(page.getByRole("region", { name: "Selected villager" })).toContainText("Keeper");
+    await page.getByRole("button", { name: "Close villager details" }).click();
     await page.getByRole("button", { name: "Pause motion", exact: true }).click();
     await expect(page.getByRole("button", { name: "Resume motion", exact: true })).toHaveAttribute("aria-pressed", "true");
     await expect(canvas).toHaveAttribute("data-paused", "true");
-    await page.getByRole("button", { name: "Close villager details" }).click();
     await expect(page.getByRole("region", { name: "Selected villager" })).toHaveCount(0);
     await fits(page);
     clean(observed);
@@ -217,6 +217,7 @@ for (const count of [0, 5, 100]) {
       envelope.snapshot.villagers[0].state = "resting";
       await page.evaluate(next => window.villageStream.listeners.snapshot({ data: JSON.stringify(next) }), envelope);
       await expect(room).toHaveAttribute("data-agents", String(count - 1));
+      await page.getByRole("button", { name: "Close villager details" }).click();
     }
     await page.getByRole("button", { name: "Back to village", exact: true }).click();
     await expect(outdoor).toBeVisible();
@@ -238,6 +239,7 @@ test("homes and lodge open with their occupants and retain a directory on room g
   const room = page.getByTestId("interior-canvas");
   await expect(room).toHaveAttribute("data-building", "home:claude:resident-1");
   await expect(room).toHaveAttribute("data-agents", "1");
+  await page.getByRole("button", { name: "Close villager details" }).click();
   await page.getByRole("button", { name: "Back to village", exact: true }).click();
   await page.getByRole("button", { name: "Visitor lodge", exact: true }).click();
   await expect(room).toHaveAttribute("data-building", "lodge:0");
@@ -246,6 +248,7 @@ test("homes and lodge open with their occupants and retain a directory on room g
   await expect(page.getByText("The room view couldn't open.")).toBeVisible();
   await page.getByRole("region", { name: "Building interior" }).getByRole("button", { name: /Villager 002/ }).click();
   await expect(page.getByRole("region", { name: "Selected villager" })).toContainText("Villager 002");
+  await page.getByRole("button", { name: "Close villager details" }).click();
   await page.getByRole("button", { name: "Back to village", exact: true }).click();
   await expect(page.locator('canvas[data-renderer="three"]')).toBeVisible();
   clean(observed);
@@ -340,7 +343,7 @@ test("workshop board opens a real task and locates its claimant", async ({ page 
   const board = page.getByRole("region", { name: "Workshop task board" });
   await board.getByRole("button", { name: /Freeze contract/ }).click();
   await expect(board.getByRole("region", { name: "Selected task" })).toContainText("python");
-  await expect(page.getByRole("region", { name: "Selected villager" })).toContainText("Keeper");
+  await expect(page.getByRole("button", { name: "View Keeper’s profile ↗" })).toBeVisible();
   await board.getByRole("button", { name: "Locate claimant Keeper" }).click();
   await expect(page.getByRole("region", { name: "Selected villager" })).toContainText("Keeper");
   clean(observed);
@@ -451,7 +454,7 @@ test("lodge commons regroup by recorded project without moving personal beds", a
   await expect(room).toHaveAttribute("data-focus-agent", "claude:resident-0");
   await page.getByRole("button", { name: "Focus next resident" }).click();
   await expect(room).toHaveAttribute("data-focus-agent", "claude:resident-1");
-  await expect(page.getByRole("region", { name: "Selected villager" })).toContainText("Villager 001");
+  await expect(page.getByRole("button", { name: "View Villager 001’s profile ↗" })).toBeVisible();
   const stations = JSON.parse(await room.getAttribute("data-stations"));
   envelope.snapshot.generation += 1;
   envelope.snapshot.villagers[0].project = "new project";
@@ -466,5 +469,56 @@ test("lodge commons regroup by recorded project without moving personal beds", a
   const after = JSON.parse(await room.getAttribute("data-stations"));
   for (const station of stations) expect(after.find(item => item.id === station.id).position).toEqual(station.position);
   expect(after.find(item => item.id === stations[0].id).present).toBe(false);
+  clean(observed);
+});
+
+for (const width of [1440, 390]) {
+  test(`layout controls remain clear and camera follows a moved building at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    const observed = await load(page, population(5));
+    const canvas = await ready(page, 5);
+    await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+    await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+    await page.getByRole("button", { name: "Edit layout", exact: true }).click();
+    const editor = page.getByRole("region", { name: "Edit village layout" });
+    await expect(editor).toBeVisible();
+    const cameraControls = await page.getByLabel("Village camera controls").boundingBox();
+    const editorBounds = await editor.boundingBox();
+    expect(cameraControls.y + cameraControls.height).toBeLessThanOrEqual(editorBounds.y);
+    await editor.getByRole("combobox", { name: "Building" }).selectOption("square");
+    await editor.getByRole("button", { name: "Move Village square to -30, -30", exact: true }).click();
+    await canvas.scrollIntoViewIfNeeded();
+    await expect.poll(async () => {
+      const pose = JSON.parse(await canvas.getAttribute("data-camera"));
+      return Math.hypot(pose.target[0] + 30, pose.target[2] + 30);
+    }).toBeLessThan(.05);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    clean(observed);
+  });
+}
+
+test("simple detail visibly removes scenery in village and rooms without losing occupants or desks", async ({ page }) => {
+  const envelope = population(5);
+  envelope.snapshot.villagers.forEach(agent => { agent.state = "working"; });
+  const observed = await load(page, envelope);
+  const outdoor = await ready(page, 5);
+  await expect.poll(() => outdoor.getAttribute("data-visible-decorations").then(Number)).toBeGreaterThan(0);
+  const quality = page.getByRole("combobox", { name: "Rendering quality" });
+  await quality.selectOption("low");
+  await expect(outdoor).toHaveAttribute("data-visible-decorations", "0");
+  await expect(outdoor).toHaveAttribute("data-agents", "5");
+  await quality.selectOption("high");
+  await expect.poll(() => outdoor.getAttribute("data-visible-decorations").then(Number)).toBeGreaterThan(0);
+  await page.getByRole("button", { name: "Workshop", exact: true }).click();
+  const room = page.getByTestId("interior-canvas");
+  await expect(room).toHaveAttribute("data-agents", "5");
+  await expect.poll(() => room.getAttribute("data-visible-decorations").then(Number)).toBeGreaterThan(0);
+  const stations = JSON.parse(await room.getAttribute("data-stations"));
+  await quality.selectOption("low");
+  await expect(room).toHaveAttribute("data-visible-decorations", "0");
+  await expect(room).toHaveAttribute("data-agents", "5");
+  expect(JSON.parse(await room.getAttribute("data-stations"))).toEqual(stations);
+  await quality.selectOption("high");
+  await expect.poll(() => room.getAttribute("data-visible-decorations").then(Number)).toBeGreaterThan(0);
   clean(observed);
 });

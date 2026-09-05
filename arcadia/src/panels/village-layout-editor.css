@@ -13,3 +13,5 @@
 .layout-editor-actions button:disabled{opacity:.5;cursor:default}
 .village-layout-editor button:focus-visible,.village-layout-editor select:focus-visible{outline:2px solid #355e51;outline-offset:3px}
 .layout-editor-status{min-height:18px;color:#5c705f}
+/* The panel grows when its editor opens; bottom anchoring would cover the plots. */
+.ve-world-panel:has(.village-layout-editor) > .ve-map-overlay{position:static;align-self:flex-end;padding:10px 16px;flex-shrink:0}

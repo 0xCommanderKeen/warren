@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { UnsupportedSchemaVersionError } from "./contract/parseSnapshot.js";
 import { App, LiveApp, backendFromLocation } from "./App.jsx";
@@ -11,7 +11,7 @@ vi.mock("./world/VillageWorld.jsx", () => ({
   VillageWorld: () => <div data-testid="village-canvas" />,
 }));
 
-beforeEach(() => localStorage.clear());
+beforeEach(() => { localStorage.clear(); window.history.replaceState(null, "", "/"); });
 
 afterEach(() => {
   cleanup();
@@ -143,6 +143,7 @@ describe("Arcadia", () => {
   });
 
   it("renders every read-only panel directly from the contract fixture", () => {
+    window.history.replaceState(null, "", "#records");
     render(<App envelope={fixture} />);
 
     expect(screen.getByRole("region", { name: "Notice board" })).toHaveTextContent(
@@ -163,6 +164,7 @@ describe("Arcadia", () => {
   });
 
   it("does not turn villager history into panel state", () => {
+    window.history.replaceState(null, "", "#records");
     const envelope = structuredClone(fixture);
     envelope.snapshot.artifacts = [];
     envelope.snapshot.tasks = [];
@@ -243,6 +245,7 @@ describe("Arcadia", () => {
   });
 
   it("safely renders JSON-valued approval options allowed by Chronicle's contract", () => {
+    window.history.replaceState(null, "", "#approvals");
     const envelope = structuredClone(fixture);
     envelope.snapshot.approvals[0].options = [{ decision: "approve" }];
 
@@ -254,6 +257,7 @@ describe("Arcadia", () => {
   });
 
   it("only sends exact Steward decisions and preserves edit semantics", () => {
+    window.history.replaceState(null, "", "#approvals");
     const stewardClient = { confirm: vi.fn(), decideApproval: vi.fn() };
     const envelope = structuredClone(fixture);
     envelope.snapshot.approvals[0].options = [
@@ -282,6 +286,7 @@ describe("Arcadia", () => {
   });
 
   it("does not write an invalid Steward edit", async () => {
+    window.history.replaceState(null, "", "#approvals");
     const stewardClient = { confirm: vi.fn(), decideApproval: vi.fn() };
     const envelope = structuredClone(fixture);
     envelope.snapshot.approvals[0].options = ["edit"];
@@ -305,6 +310,7 @@ describe("Arcadia", () => {
   });
 
   it("keeps a knock visible until a confirming snapshot resolves it", () => {
+    window.history.replaceState(null, "", "#approvals");
     const stewardClient = {
       confirm: vi.fn(),
       decideApproval: vi.fn().mockResolvedValue({ state: "awaiting_confirmation" }),
@@ -335,6 +341,7 @@ describe("Arcadia", () => {
   });
 
   it("hands Steward credentials over without storing them in the page", () => {
+    window.history.replaceState(null, "", "#approvals");
     const stewardClient = {
       confirm: vi.fn(),
       setCredentials: vi.fn(),
@@ -354,6 +361,7 @@ describe("Arcadia", () => {
   });
 
   it("reopens authentication after Steward rejects an expired credential", async () => {
+    window.history.replaceState(null, "", "#approvals");
     const fetch = vi.fn()
       .mockResolvedValueOnce({
         status: 401,
@@ -402,6 +410,7 @@ describe("Arcadia", () => {
   });
 
   it("orders multiple fixture approvals deterministically and answers each by request id", () => {
+    window.history.replaceState(null, "", "#approvals");
     const stewardClient = {
       confirm: vi.fn(),
       decideApproval: vi.fn().mockResolvedValue({ state: "awaiting_confirmation" }),
@@ -446,6 +455,7 @@ describe("Arcadia", () => {
   });
 
   it("never draws a knock for a resolved approval", () => {
+    window.history.replaceState(null, "", "#approvals");
     const envelope = structuredClone(fixture);
     envelope.snapshot.approvals[0].state = "resolved";
     envelope.snapshot.approvals[0].decision = "deny";
@@ -456,6 +466,7 @@ describe("Arcadia", () => {
   });
 
   it("keeps approvals answerable after a definitive preflight refusal", async () => {
+    window.history.replaceState(null, "", "#approvals");
     const refusal = Object.assign(new Error("Steward credentials are required"), {
       ambiguous: false,
       code: "credentials_required",
@@ -514,4 +525,80 @@ describe("village usability", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close villager details" }));
     expect(screen.queryByRole("region", { name: "Selected villager" })).toBeNull();
   });
+});
+
+describe("deliberate records and request views", () => {
+  it("keeps the default village free of the operational record grid and duplicate approvals", () => {
+    render(<App envelope={fixture} />);
+    expect(screen.getByTestId("village-canvas")).toBeVisible();
+    expect(screen.queryByRole("region", { name: "Notice board" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Approval knocks" })).not.toBeInTheDocument();
+    expect(screen.queryByText("What’s been happening")).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Requests (1)" })).toHaveAttribute("href", "#approvals");
+  });
+
+  it("opens records deliberately and returns to the village", () => {
+    render(<App envelope={fixture} />);
+    fireEvent.click(screen.getByRole("link", { name: "Village records", exact: true }));
+    expect(window.location.hash).toBe("#records");
+    expect(screen.getByRole("region", { name: "Notice board" })).toBeVisible();
+    expect(screen.queryByTestId("village-canvas")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("link", { name: /Back to village/ }));
+    expect(window.location.hash).toBe("#village");
+    expect(screen.getByTestId("village-canvas")).toBeVisible();
+    expect(screen.queryByRole("region", { name: "Notice board" })).not.toBeInTheDocument();
+  });
+
+  it("resolves direct request hashes and browser hash navigation", () => {
+    window.history.replaceState(null, "", "#approval-approval-1");
+    render(<App envelope={fixture} />);
+    expect(screen.getByRole("region", { name: "Approval knocks" })).toHaveTextContent("Deploy?");
+    act(() => {
+      window.history.replaceState(null, "", "#records");
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
+    });
+    expect(screen.getByRole("region", { name: "Notice board" })).toBeVisible();
+    expect(screen.queryByRole("region", { name: "Approval knocks" })).not.toBeInTheDocument();
+  });
+
+  it("preserves shared Steward authentication and pending submission across view changes", () => {
+    const stewardClient = { confirm: vi.fn(), setCredentials: vi.fn(), decideApproval: vi.fn().mockResolvedValue({ state: "awaiting_confirmation" }) };
+    render(<App envelope={fixture} stewardClient={stewardClient} />);
+    fireEvent.click(screen.getByRole("link", { name: "Requests (1)" }));
+    fireEvent.change(screen.getByLabelText("Steward token"), { target: { value: "session-only" } });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock answers" }));
+    fireEvent.click(screen.getByRole("button", { name: "Approve Deploy?" }));
+    fireEvent.click(screen.getByRole("link", { name: "Village records", exact: true }));
+    fireEvent.click(screen.getByRole("link", { name: "Requests (1)" }));
+    expect(screen.queryByLabelText("Steward token")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve Deploy?" })).toBeDisabled();
+    expect(screen.getByText(/Answer sent. Waiting for Steward/)).toBeVisible();
+    expect(stewardClient.decideApproval).toHaveBeenCalledOnce();
+  });
+
+  it("has an explicit empty requests destination", () => {
+    window.history.replaceState(null, "", "#approvals");
+    render(<App envelope={{ ...fixture, snapshot: { ...fixture.snapshot, approvals: [] } }} />);
+    expect(screen.getByText("No requests are waiting for an answer.")).toBeVisible();
+    expect(screen.getByRole("link", { name: /Back to village/ })).toBeVisible();
+  });
+  it("returns keyboard focus to the village without scrolling the initial landing", () => {
+    const original = Element.prototype.scrollIntoView;
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    try {
+      render(<App envelope={fixture} />);
+      expect(scroll).not.toHaveBeenCalled();
+      const records = screen.getByRole("link", { name: "Village records", exact: true });
+      records.focus();
+      fireEvent.click(records);
+      expect(screen.getByRole("heading", { name: "Village records", exact: true })).toHaveFocus();
+      const back = screen.getByRole("link", { name: /Back to village/ });
+      back.focus();
+      fireEvent.click(back);
+      expect(screen.getByRole("heading", { name: "Arcadia", exact: true })).toHaveFocus();
+      expect(scroll).toHaveBeenLastCalledWith({ block: "start", behavior: "auto" });
+    } finally { Element.prototype.scrollIntoView = original; }
+  });
+
 });

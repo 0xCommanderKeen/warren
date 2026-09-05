@@ -1507,3 +1507,4 @@
 @media(max-width:600px) { .ve-following { margin-left:0; flex-basis:100%; } }
 
 .ve-follow-destination { margin:0 0 12px; padding:8px 12px; border-left:3px solid #b99654; background:#f4efdc; color:#4b604e; font:12px/1.5 Cousine,monospace; }
+.ve-open-profile { margin: 16px 20px; padding: 16px; border: 1px solid var(--ve-line); border-radius: 12px; background: #e9edde; color: #294139; font: 16px Georgia, serif; text-align: left; cursor: pointer; }

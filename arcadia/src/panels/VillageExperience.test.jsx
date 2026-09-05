@@ -80,6 +80,7 @@ describe("miniature village experience", () => {
     const next = snapshot();
     next.villagers[0].last_line = "The report is ready.";
     view.rerender(<VillageExperience snapshot={next} />);
+    fireEvent.click(screen.getByRole("button", { name: "View Keeper’s profile ↗" }));
     expect(
       screen.getByRole("region", { name: "Selected villager" }),
     ).toHaveTextContent("The report is ready.");
@@ -295,7 +296,7 @@ describe("dossier navigation and recency", () => {
       within(dossier).getAllByRole("list")[0].firstElementChild,
     ).toHaveTextContent("Task 8");
   });
-  it("scrolls to mobile details on selection without scrolling again on a live update", () => {
+  it("opens a mobile profile without moving the underlying village", () => {
     vi.stubGlobal("matchMedia", (query) => ({
       matches: query === "(max-width: 800px)",
     }));
@@ -303,19 +304,17 @@ describe("dossier navigation and recency", () => {
     Element.prototype.scrollIntoView = scroll;
     const view = render(<VillageExperience snapshot={snapshot()} />);
     selectKeeper();
-    expect(scroll).toHaveBeenCalledExactlyOnceWith({
-      behavior: "smooth",
-      block: "nearest",
-    });
+    expect(scroll).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "Keeper" })).toBeVisible();
     view.rerender(
       <VillageExperience snapshot={structuredClone(fixture.snapshot)} />,
     );
-    expect(scroll).toHaveBeenCalledTimes(1);
+    expect(scroll).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Follow agent ↗" }));
     expect(rendererProps.follow).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Reset camera" }));
     expect(rendererProps.follow).toBe(false);
-    expect(scroll).toHaveBeenCalledTimes(1);
+    expect(scroll).not.toHaveBeenCalled();
   });
   it("respects reduced motion when opening mobile details", () => {
     vi.stubGlobal("matchMedia", () => ({ matches: true }));
@@ -323,10 +322,8 @@ describe("dossier navigation and recency", () => {
     Element.prototype.scrollIntoView = scroll;
     render(<VillageExperience snapshot={snapshot()} />);
     selectKeeper();
-    expect(scroll).toHaveBeenCalledExactlyOnceWith({
-      behavior: "auto",
-      block: "nearest",
-    });
+    expect(scroll).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "Keeper" })).toBeVisible();
   });
 });
 
