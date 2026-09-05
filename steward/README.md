@@ -656,7 +656,7 @@ in [the deployment guide](../deploy/README.md#the-residents-checkout).
 Its historical `burrow-builder`, `life-agent`, and `pip` copies and the `skills`
 symlink are no longer tracked. The old builder has no current seed counterpart;
 `life-agent` describes Hob under an older identity, while its settings and the old
-Pip's local memory paths, routes, and schedules differ from the deployed seeds.
+Pip's local memory paths, routes, and schedules differ from the current seeds.
 These copies are not migrated into `residents/`: use the current declarations and
 make deliberate edits there instead of copying old operational settings back.
 Untracking with `git rm --cached` preserves the working files where that command
