@@ -68,7 +68,7 @@ that is worth a caller being able to see.
 | **redaction** | none |
 | **delivery failure** | fallback log; the row stands |
 | **callers** | `POST /jobs` only (no CLI) |
-| **tests** | `tests/test_api.py` |
+| **tests** | `tests/test_api_board.py` |
 
 #### T2 — claim (open board)
 

@@ -16,7 +16,7 @@ from steward.manifest import Route, load_manifest
 from steward.runners import Outcome, RunResult
 from steward.runs import DELIVERED
 from steward.store import Store
-from test_chat import (
+from support.chat import (
     DIGEST,
     FAKE_BOT_TOKEN,
     NOW,

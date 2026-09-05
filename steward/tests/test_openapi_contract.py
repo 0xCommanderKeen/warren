@@ -188,7 +188,7 @@ def test_the_document_says_what_the_prose_says_about_the_credential() -> None:
 
     Declaring the scheme is all it is: `HTTPBearer(auto_error=False)` refuses nothing, so
     the request path is unchanged and the gate is still `_auth_dependency` — which is what
-    `tests/test_api.py`'s auth suite goes on proving, unchanged by this. Without it a
+    `tests/test_api_auth.py`'s auth suite goes on proving, unchanged by this. Without it a
     generated client would send no `Authorization` header and meet a blanket 401 — a
     machine-readable contract that contradicts `docs/api.md` on its first line.
     """
