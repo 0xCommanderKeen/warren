@@ -81,6 +81,66 @@ def test_a_declared_resident_passes_the_validator(tmp_path: Path) -> None:
     assert [resident.id for resident in result.residents] == ["note-keeper"]
 
 
+def test_a_declared_manifest_omits_defaults_but_keeps_required_fields(tmp_path: Path) -> None:
+    created = declare_resident(spec(), tmp_path)
+    payload = yaml.safe_load(created.manifest_path.read_text(encoding="utf-8"))
+
+    assert (
+        not {
+            "retired",
+            "delegation",
+            "deploy",
+            "runner",
+            "routines",
+            "session_grants",
+            "workspace",
+            "board",
+            "budgets",
+            "notifications",
+        }
+        & payload.keys()
+    )
+    assert payload["version"] == 0
+    assert payload["home"] == 0
+    assert payload["id"] == "note-keeper"
+    assert payload["tools"] == []
+    assert payload["skills"] == payload["routes"] == payload["app_grants"] == []
+    result = validate_tree(tmp_path)
+    assert result.ok, [d.render() for d in result.errors]
+    assert result.residents[0].manifest == created.resident.manifest
+
+
+def test_a_minimal_declaration_preserves_nondefault_settings(tmp_path: Path) -> None:
+    requested = spec(
+        agent_id="claude-code:quill",
+        project="notes",
+        summary="Keeps notes.",
+        runner={"model": "sonnet"},
+        memory={"path": "/notes/memory", "journal": "daily", "journal_keep": 7},
+        tools=["Read"],
+        workspace=["/notes"],
+    )
+    created = declare_resident(requested, tmp_path)
+    payload = yaml.safe_load(created.manifest_path.read_text(encoding="utf-8"))
+
+    assert payload["runner"] == {"model": "sonnet"}
+    assert payload["memory"] == {
+        "path": "/notes/memory",
+        "journal": "daily",
+        "journal_keep": 7,
+    }
+    result = validate_tree(tmp_path)
+    assert result.ok, [d.render() for d in result.errors]
+    manifest = result.residents[0].manifest
+    assert manifest.agent_id == requested.agent_id
+    assert manifest.project == requested.project
+    assert manifest.summary == requested.summary
+    assert manifest.runner == requested.runner
+    assert manifest.memory == requested.memory
+    assert manifest.tools == requested.tools
+    assert manifest.workspace == requested.workspace
+
+
 def test_the_nursery_mints_a_random_uid_into_the_manifest(tmp_path: Path) -> None:
     """The durable identity is persisted at birth, not derived from a renameable name."""
     created = declare_resident(spec(), tmp_path)
@@ -104,7 +164,8 @@ def test_the_declaration_deploys_nothing_and_schedules_nothing(tmp_path: Path) -
     created = declare_resident(spec(), tmp_path)
     manifest = yaml.safe_load(created.manifest_path.read_text(encoding="utf-8"))
 
-    assert manifest["routines"] == []
+    assert "routines" not in manifest
+    assert created.resident.manifest.routines == []
     assert sorted(path.name for path in created.directory.iterdir()) == ["manifest.yaml", "soul.md"]
 
 
@@ -120,7 +181,8 @@ def test_the_skeleton_declares_a_journal_directory_and_no_empty_deploy_block(
     created = declare_resident(spec(), tmp_path)
     manifest = yaml.safe_load(created.manifest_path.read_text(encoding="utf-8"))
 
-    assert manifest["memory"]["journal"] == "journal"
+    assert "journal" not in manifest["memory"]
+    assert created.resident.manifest.memory.journal == "journal"
     assert "deploy" not in manifest
     # …and with no deploy block the resolved command is the documented default, not nothing.
     from steward.deploy import target_for  # noqa: PLC0415
