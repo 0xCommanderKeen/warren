@@ -303,7 +303,8 @@ immediate, and it leaves a record.
 
 `STEWARD_CORS_ORIGINS` is a comma-separated list of origins allowed to call the API
 from a browser — chronicle's viewer origin, typically. Unset means no origin is allowed,
-so no CORS headers are sent to anyone.
+so no CORS headers are sent to anyone. Allowed origins can use GET, POST, and PUT
+with `Authorization` and `Content-Type` headers; OPTIONS preflights require no token.
 
 ```console
 $ STEWARD_CORS_ORIGINS=http://village.local:8080 STEWARD_TOKEN=… steward serve
