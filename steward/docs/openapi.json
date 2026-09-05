@@ -2936,6 +2936,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "429": {
+            "description": "Too many authentication failures; retry after Retry-After seconds."
           }
         },
         "security": [
