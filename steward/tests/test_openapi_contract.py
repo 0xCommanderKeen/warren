@@ -151,6 +151,7 @@ def test_success_responses_are_typed_or_explicitly_inventoried() -> None:
     document = openapi_document()
     expected_typed = {
         "GET /requests 200": "RequestListResponse",
+        "GET /queue 200": "QueueResponse",
         "GET /requests/{request_id} 200": "RequestResponse",
         "GET /routines 200": "RoutineListResponse",
         "POST /residents/{resident_id}/routines/{routine_id}/run 202": "RoutineRunReceipt",

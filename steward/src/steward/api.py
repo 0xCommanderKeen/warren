@@ -78,6 +78,7 @@ from steward.routes import board as board_routes
 from steward.routes import delegation as delegation_routes
 from steward.routes import deps as route_deps
 from steward.routes import org as org_routes
+from steward.routes import queue as queue_routes
 from steward.routes import reload as reload_routes
 from steward.routes import requests as request_routes
 from steward.routes import residents as resident_routes
@@ -105,6 +106,7 @@ from steward.scheduler import (
     SchedulerState,
     default_state_path,
 )
+from steward.secrets import read_secret
 from steward.session_auth import SessionPrincipal
 from steward.sessions import RunnerFactory
 from steward.skills import library_for
@@ -115,6 +117,7 @@ from steward.store import (
 )
 from steward.transitions.approval import ApprovalOutboxWorker, ApprovalTransitions
 from steward.transitions.task import TaskTransitions
+from steward.work_queue import GitHubQueue, QueueUnavailableError
 
 __all__ = [
     "DEFAULT_HOST",
@@ -130,6 +133,7 @@ __all__ = [
     "last_run_view",
     "run_server",
 ]
+
 
 log = logging.getLogger("steward.api")
 
@@ -206,6 +210,10 @@ class ApiConfig:
     auth_failure_policy: FailurePolicy = field(default_factory=FailurePolicy)
     token_previous: str | None = None
     token_previous_until: str | None = None
+
+    queue_repository: str = ""
+    queue_reporter: str = "karen"
+    queue_token: str | None = field(default=None, repr=False)
     approval_poll_interval_s: float = 1.0
     approval_close_timeout_s: float = 5.0
 
@@ -229,6 +237,9 @@ class ApiConfig:
             token=source.get(TOKEN_ENV),
             token_previous=source.get(PREVIOUS_ENV),
             token_previous_until=source.get(UNTIL_ENV),
+            queue_repository=source.get("STEWARD_QUEUE_REPOSITORY", "").strip(),
+            queue_reporter=source.get("STEWARD_QUEUE_REPORTER", "karen").strip(),
+            queue_token=read_secret("STEWARD_QUEUE_GITHUB_TOKEN", env=source),
             allow_open=allow_open,
             cors_origins=parse_origins(source.get(CORS_ENV)),
             workdir=Path(workdir) if workdir is not None else None,
@@ -543,10 +554,21 @@ def _auth_lifespan(
     return lifespan
 
 
-def create_app(  # noqa: PLR0913 — injectable collaborators are the public test seams
+def _configured_queue(settings: ApiConfig) -> GitHubQueue | None:
+    """Validate the optional tracker before the app acquires resources."""
+    if not settings.queue_repository:
+        return None
+    try:
+        return GitHubQueue(settings.queue_repository, token=settings.queue_token)
+    except QueueUnavailableError as exc:
+        raise ApiError(str(exc)) from exc
+
+
+def create_app(  # noqa: PLR0913, PLR0915 — composition root wires the public collaborators
     config: ApiConfig | None = None,
     *,
     store: Store | None = None,
+    queue_source: GitHubQueue | None = None,
     emitter: ev.Emitter | None = None,
     runner_factory: RunnerFactory = build_runner,
     nursery: NurseryPipeline = raise_resident,
@@ -570,6 +592,8 @@ def create_app(  # noqa: PLR0913 — injectable collaborators are the public tes
     settings = config if config is not None else ApiConfig.from_env()
     token = resolve_token(settings.token, allow_open=settings.allow_open)
     master_tokens = configured_master_tokens(settings, now)
+
+    queue_source = queue_source or _configured_queue(settings)
     residents_dir = Path(settings.residents_dir)
     library = library_for(residents_dir, settings.skills_dir)
 
@@ -710,6 +734,7 @@ def create_app(  # noqa: PLR0913 — injectable collaborators are the public tes
         hooks=hooks,
         claims=claims,
         runner_factory=runner_factory,
+        queue=queue_source,
     )
     app.include_router(request_routes.router(deps))
     app.include_router(board_routes.router(deps))
@@ -718,6 +743,7 @@ def create_app(  # noqa: PLR0913 — injectable collaborators are the public tes
     app.include_router(routine_routes.router(deps))
     app.include_router(delegation_routes.router(deps))
     app.include_router(org_routes.router(deps))
+    app.include_router(queue_routes.router(deps))
 
     app.include_router(secret_routes.router(deps))
     app.include_router(resident_routes.router(deps))

@@ -24,6 +24,7 @@ import DiagnosticsPage from "./pages/DiagnosticsPage.jsx";
 import FleetPage from "./pages/FleetPage.jsx";
 import SkillsPage from "./pages/SkillsPage.jsx";
 import ResidentsPage from "./pages/ResidentsPage.jsx";
+import QueuePage from "./pages/QueuePage.jsx";
 import OrgPage from "./pages/OrgPage.jsx";
 import RoutinesPage from "./pages/RoutinesPage.jsx";
 import ApprovalsPage from "./pages/ApprovalsPage.jsx";
@@ -206,7 +207,7 @@ function Rail({ snapshot, chronicle }) {
 
 const TITLES = {
   fleet: "Fleet", agent: "Record", residents: "Residents", resident: "Resident",
-  residentNew: "New resident", residentDeclaration: "Declaration", org: "Org",
+  residentNew: "New resident", residentDeclaration: "Declaration", org: "Org", queue: "Queue",
   routines: "Routines",
   approvals: "Approvals", board: "Job board", skills: "Skills", skill: "Skill",
   skillNew: "New skill", budgets: "Budgets", diagnostics: "Diagnostics",
@@ -240,6 +241,8 @@ function Page({ model, page, params }) {
     case "residentNew":
     case "residentDeclaration":
       return <ResidentsPage page={page} params={params} model={model} />;
+    case "queue":
+      return <QueuePage />;
     case "org":
       return <OrgPage />;
     case "routines":

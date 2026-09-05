@@ -1,0 +1,10 @@
+# Merge this item into Karen's routines after granting queue-review; enable after #415.
+id: queue-review
+schedule: "0 8 * * *"
+schedule_tz: Europe/Ljubljana
+prompt: >-
+  Use the queue-review skill to inspect the current tracker projection and freshly
+  fetched code, then save an evidence-backed queue-review.json in your memory.
+requires: [queue-review]
+timeout_s: 600
+enabled: false

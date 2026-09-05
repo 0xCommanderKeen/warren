@@ -114,6 +114,7 @@ const operations = () =>
  * count is checked against the tree below so the list cannot quietly go short.
  */
 const PAGE_QUERIES = [
+  ["GET", "/queue", ["since"]],
   // ResidentDetail asks for the last eight journal entries, not the whole file.
   ["GET", "/residents/{resident_id}/journal", ["limit"]],
 ];

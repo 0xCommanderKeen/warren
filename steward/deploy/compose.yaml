@@ -65,6 +65,9 @@ x-steward-environment: &steward-environment
   STEWARD_RESIDENTS: /checkout/steward/residents
   STEWARD_STATE: /data/state.json
   STEWARD_BURROW: dxp2800
+  STEWARD_QUEUE_REPOSITORY: 0xCommanderKeen/warren
+  STEWARD_QUEUE_REPORTER: karen
+  STEWARD_QUEUE_GITHUB_TOKEN: ${STEWARD_QUEUE_GITHUB_TOKEN:-}
   # The deploy user's home on this machine: what every ~/ in a manifest or a rendered
   # path means to the API, the scheduler and the watchdog alike, instead of the image's
   # /root. The residents mount below sits at the same path in every container.

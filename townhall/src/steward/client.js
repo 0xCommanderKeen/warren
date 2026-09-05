@@ -246,6 +246,7 @@ export function createStewardClient({ baseUrl = "", fetch: fetchImpl, credential
     listRoutines: (options) => call("/routines", options),
     // The org chart, computed from the manifests on every read (warren#441). No write
     // half: an edge is moved by editing a declaration, not by dragging a box.
+    readQueue: (options) => call("/queue", options),
     readOrg: (options) => call("/org", options),
     listJobs: (options) => call("/jobs", options),
     listApprovals: (status, options) => call("/approvals", { ...options, query: { status } }),

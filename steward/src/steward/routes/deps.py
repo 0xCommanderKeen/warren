@@ -26,6 +26,7 @@ from steward.sessions import RunnerFactory
 from steward.store import Store, new_id
 from steward.transitions.approval import ApprovalOutboxWorker, ApprovalTransitions
 from steward.transitions.task import TaskTransitions
+from steward.work_queue import GitHubQueue
 
 ACTED_BY_API = "api"
 API_PRINCIPAL = "a holder of STEWARD_TOKEN, over the steward API"
@@ -99,6 +100,11 @@ class RetireOptions(RetirementSettings):
 
 class RouteSettings(Protocol):
     """The configuration read by routes; frozen application settings also conform."""
+
+    @property
+    def queue_reporter(self) -> str:
+        """The resident whose queue-review note is published."""
+        ...
 
     @property
     def skills_dir(self) -> Path | None:
@@ -211,6 +217,7 @@ class Deps:
     #: bridge, and a route that reached for :func:`steward.runners.build_runner` itself
     #: would be a runner nobody could inject a mock into.
     runner_factory: RunnerFactory = build_runner
+    queue: GitHubQueue | None = None
 
     def accept(self, request: Request, outcome: str, detail: dict[str, Any] | None = None) -> str:
         """Log an accepted mutating request and return its trace id."""

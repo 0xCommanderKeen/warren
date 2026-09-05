@@ -2995,5 +2995,38 @@ def retire_command(  # noqa: PLR0913, PLR0917 — click passes one parameter per
     _report_retire(report)
 
 
+@main.command("queue")
+@click.option(
+    "--repository",
+    envvar="STEWARD_QUEUE_REPOSITORY",
+    required=True,
+    help="GitHub owner/repository.",
+)
+@click.option(
+    "--since",
+    type=click.DateTime(formats=["%Y-%m-%dT%H:%M:%SZ"]),
+    help="Closures since this UTC timestamp.",
+)
+@click.option(
+    "--ranked",
+    type=click.IntRange(min=1),
+    multiple=True,
+    help="Issue number from a recommendation; repeatable.",
+)
+def queue_command(repository: str, since: datetime | None, ranked: tuple[int, ...]) -> None:
+    """Print the computed tracker facts as JSON, without ranking or writing issues."""
+    from steward.work_queue import (  # noqa: PLC0415 — optional CLI capability
+        GitHubQueue,
+        QueueUnavailableError,
+    )
+
+    try:
+        source = GitHubQueue.from_env({**os.environ, "STEWARD_QUEUE_REPOSITORY": repository})
+        projection = source.read(since=since.replace(tzinfo=UTC) if since else None, ranked=ranked)
+    except QueueUnavailableError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(json.dumps(projection, indent=2))
+
+
 if __name__ == "__main__":  # pragma: no cover
     main()
