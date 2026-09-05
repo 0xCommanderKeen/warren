@@ -34,6 +34,7 @@ from steward.store.records import STATUS_PENDING as STATUS_PENDING
 from steward.store.records import STATUS_RESOLVED as STATUS_RESOLVED
 from steward.store.records import new_id as new_id
 from steward.store.requests import _RequestTables
+from steward.store.residents import _ResidentTables
 from steward.store.runs import _RunTables
 
 __all__ = [
@@ -67,6 +68,7 @@ __all__ = [
 
 
 class Store(
+    _ResidentTables,
     _LedgerTables,
     _RunTables,
     _ApprovalTables,
