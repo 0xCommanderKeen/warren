@@ -750,6 +750,40 @@
         "title": "ProvisionPost",
         "type": "object"
       },
+      "RefusalDetail": {
+        "additionalProperties": false,
+        "description": "A machine-readable reason and its operator-facing explanation.",
+        "properties": {
+          "error": {
+            "title": "Error",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "message"
+        ],
+        "title": "RefusalDetail",
+        "type": "object"
+      },
+      "RefusalResponse": {
+        "additionalProperties": false,
+        "description": "The simple refusal used by the ledger and run-now routes (not every API error).",
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/RefusalDetail"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "RefusalResponse",
+        "type": "object"
+      },
       "RehearsePost": {
         "additionalProperties": false,
         "description": "The one message a rehearsal answers.\n\nNothing else, and deliberately no knobs: the declaration in the tree is the rest of\nthe request, and a rehearsal that let the caller vary the charter, the skills or the\ntools would be rehearsing something other than what would be provisioned.",
@@ -766,6 +800,65 @@
           "message"
         ],
         "title": "RehearsePost",
+        "type": "object"
+      },
+      "RequestListResponse": {
+        "additionalProperties": false,
+        "description": "The newest accepted requests, in display order.",
+        "properties": {
+          "requests": {
+            "items": {
+              "$ref": "#/components/schemas/RequestResponse"
+            },
+            "title": "Requests",
+            "type": "array"
+          }
+        },
+        "required": [
+          "requests"
+        ],
+        "title": "RequestListResponse",
+        "type": "object"
+      },
+      "RequestResponse": {
+        "additionalProperties": false,
+        "description": "One accepted request; outcome is an extensible, human-readable ledger value.",
+        "properties": {
+          "detail": {
+            "additionalProperties": true,
+            "title": "Detail",
+            "type": "object"
+          },
+          "method": {
+            "title": "Method",
+            "type": "string"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "received_at": {
+            "title": "Received At",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "received_at",
+          "method",
+          "path",
+          "outcome",
+          "detail"
+        ],
+        "title": "RequestResponse",
         "type": "object"
       },
       "ResidentManifest": {
@@ -1338,6 +1431,245 @@
         "title": "Routine",
         "type": "object"
       },
+      "RoutineLastRun": {
+        "additionalProperties": false,
+        "description": "What actually ran, independently of whether an HTTP request asked for it.",
+        "properties": {
+          "duration_s": {
+            "title": "Duration S",
+            "type": "number"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          },
+          "recorded_at": {
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "trigger": {
+            "title": "Trigger",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "trigger",
+          "outcome",
+          "recorded_at",
+          "duration_s"
+        ],
+        "title": "RoutineLastRun",
+        "type": "object"
+      },
+      "RoutineListResponse": {
+        "additionalProperties": false,
+        "description": "The fleet routine ledger, including manifest errors and scheduler health.",
+        "properties": {
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "routines": {
+            "items": {
+              "$ref": "#/components/schemas/RoutineResponse"
+            },
+            "title": "Routines",
+            "type": "array"
+          },
+          "scheduler": {
+            "$ref": "#/components/schemas/SchedulerLiveness"
+          },
+          "state_path": {
+            "title": "State Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "routines",
+          "state_path",
+          "scheduler",
+          "errors"
+        ],
+        "title": "RoutineListResponse",
+        "type": "object"
+      },
+      "RoutineResponse": {
+        "additionalProperties": false,
+        "description": "One standing-work declaration and the evidence of its execution.",
+        "properties": {
+          "accent": {
+            "title": "Accent",
+            "type": "string"
+          },
+          "anchor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "journal": {
+            "anyOf": [
+              {
+                "const": "close_of_day",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Journal"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "last_request": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RequestResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RoutineLastRun"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_fire": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Fire"
+          },
+          "requires": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Requires",
+            "type": "array"
+          },
+          "resident": {
+            "title": "Resident",
+            "type": "string"
+          },
+          "resident_name": {
+            "title": "Resident Name",
+            "type": "string"
+          },
+          "retired": {
+            "title": "Retired",
+            "type": "boolean"
+          },
+          "routine": {
+            "title": "Routine",
+            "type": "string"
+          },
+          "schedule": {
+            "title": "Schedule",
+            "type": "string"
+          },
+          "schedule_tz": {
+            "title": "Schedule Tz",
+            "type": "string"
+          },
+          "timeout_s": {
+            "title": "Timeout S",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "key",
+          "resident",
+          "resident_name",
+          "accent",
+          "routine",
+          "schedule",
+          "schedule_tz",
+          "enabled",
+          "retired",
+          "requires",
+          "timeout_s",
+          "journal",
+          "anchor",
+          "next_fire",
+          "last_request",
+          "last_run"
+        ],
+        "title": "RoutineResponse",
+        "type": "object"
+      },
+      "RoutineRunReceipt": {
+        "additionalProperties": false,
+        "description": "An acknowledgement, never proof that the routine ran.",
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "resident": {
+            "title": "Resident",
+            "type": "string"
+          },
+          "routine": {
+            "title": "Routine",
+            "type": "string"
+          },
+          "status": {
+            "const": "accepted",
+            "title": "Status",
+            "type": "string"
+          },
+          "trigger": {
+            "const": "manual",
+            "title": "Trigger",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "status",
+          "resident",
+          "routine",
+          "trigger",
+          "message"
+        ],
+        "title": "RoutineRunReceipt",
+        "type": "object"
+      },
       "Runner": {
         "additionalProperties": false,
         "description": "Which brain a resident runs on. Every session launch goes through this seam.",
@@ -1412,6 +1744,45 @@
           }
         },
         "title": "Runner",
+        "type": "object"
+      },
+      "SchedulerLiveness": {
+        "additionalProperties": false,
+        "description": "A never-ticked scheduler is unknown, rather than dead.",
+        "properties": {
+          "alive": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alive"
+          },
+          "last_tick": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Tick"
+          },
+          "stale_after_s": {
+            "title": "Stale After S",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "last_tick",
+          "stale_after_s",
+          "alive"
+        ],
+        "title": "SchedulerLiveness",
         "type": "object"
       },
       "SecretBody": {
@@ -2111,16 +2482,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Requests Requests Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/RequestListResponse"
                 }
               }
             },
             "description": "Successful Response"
           },
           "401": {
-            "description": "No credential was presented, or steward refused the one that was."
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefusalResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
           },
           "422": {
             "content": {
@@ -2161,16 +2537,31 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Request Requests  Request Id  Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/RequestResponse"
                 }
               }
             },
             "description": "Successful Response"
           },
           "401": {
-            "description": "No credential was presented, or steward refused the one that was."
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefusalResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefusalResponse"
+                }
+              }
+            },
+            "description": "Not Found"
           },
           "422": {
             "content": {
@@ -2933,16 +3324,51 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Run Routine Residents  Resident Id  Routines  Routine Id  Run Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/RoutineRunReceipt"
                 }
               }
             },
             "description": "Successful Response"
           },
           "401": {
-            "description": "No credential was presented, or steward refused the one that was."
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefusalResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefusalResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefusalResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefusalResponse"
+                }
+              }
+            },
+            "description": "Conflict"
           },
           "422": {
             "content": {
@@ -2972,16 +3398,21 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response List Routines Routines Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/RoutineListResponse"
                 }
               }
             },
             "description": "Successful Response"
           },
           "401": {
-            "description": "No credential was presented, or steward refused the one that was."
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefusalResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
           }
         },
         "security": [

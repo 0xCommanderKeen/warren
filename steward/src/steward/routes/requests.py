@@ -5,6 +5,7 @@ from typing import Any
 from fastapi import APIRouter
 
 from steward.routes.deps import Deps, _refuse
+from steward.routes.responses import RefusalResponse, RequestListResponse, RequestResponse
 
 REQUESTS_DEFAULT_LIMIT = 50
 REQUESTS_MAX_LIMIT = 500
@@ -12,9 +13,9 @@ REQUESTS_MAX_LIMIT = 500
 
 def router(deps: Deps) -> APIRouter:
     """Build request-ledger routes over one application collaborator graph."""
-    routes = APIRouter()
+    routes = APIRouter(responses={401: {"model": RefusalResponse}})
 
-    @routes.get("/requests")
+    @routes.get("/requests", response_model=RequestListResponse)
     def list_requests(
         limit: int = REQUESTS_DEFAULT_LIMIT, resident: str | None = None
     ) -> dict[str, Any]:
@@ -30,7 +31,11 @@ def router(deps: Deps) -> APIRouter:
         rows = deps.db.recent_requests(limit=window, resident=resident)
         return {"requests": [record.to_dict() for record in rows]}
 
-    @routes.get("/requests/{request_id}")
+    @routes.get(
+        "/requests/{request_id}",
+        response_model=RequestResponse,
+        responses={404: {"model": RefusalResponse}},
+    )
     def get_request(request_id: str) -> dict[str, Any]:
         """Return one accepted request and its outcome. ``404`` for an id nobody logged."""
         record = deps.db.request(request_id)
