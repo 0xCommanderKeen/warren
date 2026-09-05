@@ -34,7 +34,8 @@ from steward.journal import latest_entry, write_entry
 from steward.manifest import load_manifest
 from steward.operator_auth import OPERATOR_CREDENTIAL_PREFIX
 from steward.prompt import JOURNAL_MAX_CHARS, assemble_preamble
-from steward.scheduler import STALE_TICK_AFTER_S, SchedulerState
+from steward.runners import Outcome, RunResult
+from steward.scheduler import STALE_TICK_AFTER_S, FireReport, SchedulerState, load_scheduled
 from steward.skills import effective_skills, library_for
 from steward.store import Store
 
@@ -1416,6 +1417,9 @@ def test_scheduler_run_stops_after_max_ticks(
     assert result.exit_code == 0, result.output
 
 
+@pytest.mark.parametrize(
+    "terminal_error", [None, "run ownership lost: terminal outcome already chosen"]
+)
 @pytest.mark.parametrize("command", [("tick",), ("run", "--max-ticks", "1")])
 @pytest.mark.parametrize(
     ("outcomes", "expected"),
@@ -1423,18 +1427,26 @@ def test_scheduler_run_stops_after_max_ticks(
 )
 def test_scheduler_commands_carry_fire_outcomes(  # noqa: PLR0913, PLR0917
     runner: CliRunner,
+    write_resident: ResidentWriter,
+    terminal_error: str | None,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     command: tuple[str, ...],
     outcomes: tuple[bool | None, ...],
     expected: int,
 ) -> None:
+    path = write_resident(mock_resident())
+    [scheduled] = load_scheduled(path.parent)
     reports = [
-        SimpleNamespace(
+        FireReport(
+            run_id=f"run-{index}",
+            terminal_error=terminal_error,
             fired=ok is not None,
-            scheduled=SimpleNamespace(key=f"agent/routine-{index}"),
+            scheduled=scheduled,
             result=(
-                SimpleNamespace(ok=ok, duration_s=0.1, summary=lambda: "exit 7")
+                RunResult(
+                    outcome=Outcome.OK if ok else Outcome.FAILED, duration_s=0.1, error="exit 7"
+                )
                 if ok is not None
                 else None
             ),
@@ -1453,6 +1465,9 @@ def test_scheduler_commands_carry_fire_outcomes(  # noqa: PLR0913, PLR0917
 
     result = runner.invoke(main, ["scheduler", *command, "--residents", str(tmp_path)])
 
+    if terminal_error and any(ok is not None for ok in outcomes):
+        expected = 1
+        assert terminal_error in result.output
     assert result.exit_code == expected, result.output
     cleanup.assert_called_once_with()
 
