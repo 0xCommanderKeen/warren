@@ -1,9 +1,12 @@
 import { useEffect, useState } from "react";
 import { pendingApprovals } from "./contract/approvals.js";
 import {
-  ContractValidationError, parseSnapshot, UnsupportedSchemaVersionError,
+  ContractValidationError,
+  parseSnapshot,
+  UnsupportedSchemaVersionError,
 } from "./contract/parseSnapshot.js";
 import { VillageExperience } from "./panels/VillageExperience.jsx";
+import { ApprovalProvider, ApprovalKnocks } from "./panels/AgentAttention.jsx";
 import { ReadOnlyPanels } from "./panels/ReadOnlyPanels.jsx";
 import { createStateTransport } from "./transport/createStateTransport.js";
 
@@ -12,17 +15,25 @@ const mono = "font-mono text-xs uppercase tracking-[0.12em]";
 function ContractMismatch({ error }) {
   return (
     <main className="grid min-h-screen place-items-center bg-[#2a1817] p-4 text-[#f4dfcc]">
-      <section className="max-w-2xl border-l-[5px] border-[#d96b54] px-6 py-5" role="alert">
+      <section
+        className="max-w-2xl border-l-[5px] border-[#d96b54] px-6 py-5"
+        role="alert"
+      >
         <p className={mono}>Contract mismatch</p>
-        <h1 className="my-2 text-[clamp(2rem,5vw,4rem)] font-normal tracking-[-0.06em]">Arcadia cannot enter this village.</h1>
-        <p>{error instanceof Error ? error.message : "Invalid village snapshot"}</p>
+        <h1 className="my-2 text-[clamp(2rem,5vw,4rem)] font-normal tracking-[-0.06em]">
+          Arcadia cannot enter this village.
+        </h1>
+        <p>
+          {error instanceof Error ? error.message : "Invalid village snapshot"}
+        </p>
       </section>
     </main>
   );
 }
 
 export function backendFromLocation(search = window.location.search) {
-  if (import.meta.env.DEV) return new URLSearchParams(search).get("backend") || "/chronicle";
+  if (import.meta.env.DEV)
+    return new URLSearchParams(search).get("backend") || "/chronicle";
   return "/chronicle";
 }
 
@@ -51,10 +62,12 @@ export function LiveApp({
         setTransportError(null);
       },
       onError: (error) => {
-        if (error instanceof UnsupportedSchemaVersionError || error instanceof ContractValidationError) {
+        if (
+          error instanceof UnsupportedSchemaVersionError ||
+          error instanceof ContractValidationError
+        ) {
           setContractError(error);
-        }
-        else setTransportError(error);
+        } else setTransportError(error);
       },
     });
     transport.start().catch(() => {});
@@ -65,13 +78,22 @@ export function LiveApp({
   if (transportError && !envelope) {
     return (
       <main className="grid min-h-screen place-items-center bg-[#eee5d1] p-4 text-[#15241c]">
-        <p className="border border-[#d96b54] bg-[#faf6eb] px-5 py-4 font-mono text-sm" role="alert">
+        <p
+          className="border border-[#d96b54] bg-[#faf6eb] px-5 py-4 font-mono text-sm"
+          role="alert"
+        >
           Chronicle is unavailable. Arcadia will keep trying to reconnect.
         </p>
       </main>
     );
   }
-  return <App envelope={envelope} stewardClient={stewardClient} connectionStatus={transportError ? "reconnecting" : connectionStatus} />;
+  return (
+    <App
+      envelope={envelope}
+      stewardClient={stewardClient}
+      connectionStatus={transportError ? "reconnecting" : connectionStatus}
+    />
+  );
 }
 
 function StewardSnapshotBridge({ client, snapshot }) {
@@ -81,150 +103,20 @@ function StewardSnapshotBridge({ client, snapshot }) {
   return null;
 }
 
-function ApprovalKnocks({ snapshot, stewardClient }) {
-  const [error, setError] = useState(null);
-  const [submittedRequestId, setSubmittedRequestId] = useState(null);
-  const [credentialsReady, setCredentialsReady] = useState(
-    () => typeof stewardClient?.setCredentials !== "function",
-  );
-  const [token, setToken] = useState("");
-  const villagers = new Map(snapshot.villagers.map((villager) => [villager.id, villager]));
-  const approvals = pendingApprovals(snapshot.approvals)
-    .toSorted((left, right) =>
-      left.opened_at.localeCompare(right.opened_at) ||
-      left.request_id.localeCompare(right.request_id));
-
-  useEffect(() => {
-    if (submittedRequestId && !approvals.some((approval) =>
-      approval.request_id === submittedRequestId)) {
-      setSubmittedRequestId(null);
-      setError(null);
-    }
-  }, [approvals, submittedRequestId]);
-
-  if (approvals.length === 0) return null;
-
-  async function decide(approval, body) {
-    setError(null);
-    setSubmittedRequestId(approval.request_id);
-    try {
-      await stewardClient.decideApproval(approval.request_id, body);
-    } catch (writeError) {
-      setError(writeError instanceof Error ? writeError.message : "Steward could not record the answer");
-      if (writeError?.ambiguous !== true) {
-        setSubmittedRequestId(null);
-        if (writeError?.status === 401 || writeError?.code === "credentials_required") {
-          setCredentialsReady(false);
-        }
-      }
-    }
-  }
-
-  function unlock(event) {
-    event.preventDefault();
-    if (!token.trim()) return;
-    stewardClient.setCredentials({ token });
-    setToken("");
-    setCredentialsReady(true);
-  }
-
-  function optionLabel(option) {
-    return typeof option === "string" ? option : JSON.stringify(option);
-  }
-
-  function decisionBody(option) {
-    if (option === "approve" || option === "deny") return { decision: option };
-    return null;
-  }
-
-  function choose(approval, option) {
-    const body = decisionBody(option);
-    if (body) return decide(approval, body);
-    if (option !== "edit") return;
-    const entered = window.prompt("Edit approval detail as JSON", JSON.stringify(approval.detail));
-    if (entered === null) return;
-    try {
-      const edit = JSON.parse(entered);
-      if (edit === null || typeof edit !== "object" || Array.isArray(edit)) {
-        throw new Error("Steward edits must be JSON objects");
-      }
-      return decide(approval, { decision: "edit", edit });
-    } catch (editError) {
-      setError(editError instanceof Error ? editError.message : "Invalid edit JSON");
-    }
-  }
-
-  return (
-    <section
-      aria-busy={submittedRequestId !== null}
-      aria-label="Approval knocks"
-      className="approval-knocks"
-      id="approvals"
-    >
-      {!credentialsReady ? (
-        <form className="border-2 border-[#2a1817] bg-[#fff8e7] p-3 shadow-[5px_5px_0_#785a25]" onSubmit={unlock}>
-          <label className={`${mono} block text-[#785a25]`} htmlFor="steward-token">Steward token</label>
-          <div className="mt-2 flex gap-2">
-            <input
-              autoComplete="off"
-              className="min-w-0 flex-1 border border-[#2a1817] bg-white px-2 py-1 font-mono text-sm"
-              id="steward-token"
-              onChange={(event) => setToken(event.target.value)}
-              type="password"
-              value={token}
-            />
-            <button className="border border-[#2a1817] bg-[#eee5d1] px-3 py-1 font-mono text-xs uppercase" type="submit">
-              Unlock answers
-            </button>
-          </div>
-          <p className="mt-2 font-mono text-xs text-[#566158]">Kept in this tab only.</p>
-        </form>
-      ) : null}
-      {approvals.map((approval) => {
-        const villager = villagers.get(approval.agent_id);
-        return (
-          <article className="border-2 border-[#2a1817] bg-[#fff8e7] p-3 shadow-[5px_5px_0_#d96b54]" key={approval.request_id}>
-            <p className={`${mono} text-[#9a3f32]`}>Knock · {villager?.name || approval.agent_id}</p>
-            <h2 className="my-1 text-xl font-normal">{approval.message}</h2>
-            {approval.detail && Object.keys(approval.detail).length > 0 ? (
-              <details className="approval-detail"><summary>Request details</summary><pre>{JSON.stringify(approval.detail, null, 2)}</pre></details>
-            ) : null}
-            <div className="flex flex-wrap gap-2">
-              {approval.options.map((option, optionIndex) => {
-                const label = optionLabel(option);
-                const actionable = option === "approve" || option === "deny" || option === "edit";
-                return (
-                  <button
-                    aria-label={`${label[0]?.toUpperCase() || ""}${label.slice(1)} ${approval.message}`}
-                    className="border border-[#2a1817] bg-[#eee5d1] px-3 py-1.5 font-mono text-xs uppercase tracking-[0.1em] shadow-[2px_2px_0_#2a1817] enabled:cursor-pointer enabled:hover:translate-x-px enabled:hover:translate-y-px enabled:hover:shadow-none disabled:opacity-50"
-                    disabled={!actionable || !stewardClient || !credentialsReady || submittedRequestId !== null}
-                    key={`${optionIndex}:${label}`}
-                    onClick={() => choose(approval, option)}
-                    type="button"
-                  >
-                    {label}
-                  </button>
-                );
-              })}
-            </div>
-          </article>
-        );
-      })}
-      {submittedRequestId && !error ? (
-        <p className="border border-[#785a25] bg-[#fff8e7] p-2 font-mono text-xs" role="status">
-          Answer sent. Waiting for Steward's confirming state…
-        </p>
-      ) : null}
-      {error ? <p className="border border-[#d96b54] bg-[#2a1817] p-2 text-sm text-[#fff8e7]" role="alert">{error}</p> : null}
-    </section>
-  );
-}
-
-export function App({ envelope, stewardClient = null, connectionStatus = "live" }) {
+export function App({
+  envelope,
+  stewardClient = null,
+  connectionStatus = "live",
+}) {
   if (envelope == null) {
     return (
       <main className="grid min-h-screen place-items-center bg-[#eee5d1] p-4 text-[#15241c]">
-        <p className="border border-[#785a25] bg-[#faf6eb] px-5 py-4 font-mono text-sm" role="status">Village snapshot has not loaded yet.</p>
+        <p
+          className="border border-[#785a25] bg-[#faf6eb] px-5 py-4 font-mono text-sm"
+          role="status"
+        >
+          Village snapshot has not loaded yet.
+        </p>
       </main>
     );
   }
@@ -237,20 +129,61 @@ export function App({ envelope, stewardClient = null, connectionStatus = "live" 
   }
 
   return (
-    <main className="arcadia-shell">
-      <StewardSnapshotBridge client={stewardClient} snapshot={snapshot} />
-      <header className="masthead">
-        <a className="wordmark" href="/" aria-label="Arcadia home"><span aria-hidden="true">♧</span> WARREN / ARCADIA</a>
-        <nav aria-label="Main navigation"><a href="#village">Village</a><a href="#records">Village records</a><a href="/observatory/">Townhall ↗</a></nav>
-      </header>
-      <section className="village-intro">
-        <div><h1>Arcadia</h1><p>Follow the work. Meet the people. Find your place in the village.</p></div>
-        <div className="village-summary"><span className={`connection connection-${connectionStatus}`} role="status" aria-label="Village connection"><i />{connectionStatus === "live" ? "Live village" : "Reconnecting · showing last snapshot"}</span><p>{snapshot.villagers.filter(v => v.state === "working").length} working <span> / </span>{pendingApprovals(snapshot.approvals).length} awaiting an answer</p></div>
-      </section>
-      <VillageExperience snapshot={snapshot} />
-      <ApprovalKnocks snapshot={snapshot} stewardClient={stewardClient} />
-      <section id="records" className="records-section"><div className="section-heading"><div><p className="eyebrow">The village almanac</p><h2>What’s been happening</h2></div><p>Work, routines, and the things left behind.</p></div><ReadOnlyPanels snapshot={snapshot} /></section>
-      <footer className="village-footer"><span>Arcadia · a window into Warren</span><span>An original miniature world · Powered by Warren</span></footer>
-    </main>
+    <ApprovalProvider snapshot={snapshot} stewardClient={stewardClient}>
+      <main className="arcadia-shell">
+        <StewardSnapshotBridge client={stewardClient} snapshot={snapshot} />
+        <header className="masthead">
+          <a className="wordmark" href="/" aria-label="Arcadia home">
+            <span aria-hidden="true">♧</span> WARREN / ARCADIA
+          </a>
+          <nav aria-label="Main navigation">
+            <a href="#village">Village</a>
+            <a href="#records">Village records</a>
+            <a href="/observatory/">Townhall ↗</a>
+          </nav>
+        </header>
+        <section className="village-intro">
+          <div>
+            <h1>Arcadia</h1>
+            <p>
+              Follow the work. Meet the people. Find your place in the village.
+            </p>
+          </div>
+          <div className="village-summary">
+            <span
+              className={`connection connection-${connectionStatus}`}
+              role="status"
+              aria-label="Village connection"
+            >
+              <i />
+              {connectionStatus === "live"
+                ? "Live village"
+                : "Reconnecting · showing last snapshot"}
+            </span>
+            <p>
+              {snapshot.villagers.filter((v) => v.state === "working").length}{" "}
+              working <span> / </span>
+              {pendingApprovals(snapshot.approvals).length} awaiting an answer
+            </p>
+          </div>
+        </section>
+        <VillageExperience snapshot={snapshot} stewardClient={stewardClient} />
+        <ApprovalKnocks snapshot={snapshot} stewardClient={stewardClient} />
+        <section id="records" className="records-section">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">The village almanac</p>
+              <h2>What’s been happening</h2>
+            </div>
+            <p>Work, routines, and the things left behind.</p>
+          </div>
+          <ReadOnlyPanels snapshot={snapshot} />
+        </section>
+        <footer className="village-footer">
+          <span>Arcadia · a window into Warren</span>
+          <span>An original miniature world · Powered by Warren</span>
+        </footer>
+      </main>
+    </ApprovalProvider>
   );
 }

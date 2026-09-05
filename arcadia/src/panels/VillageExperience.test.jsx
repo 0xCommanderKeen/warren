@@ -579,3 +579,36 @@ describe("personal work cards and building previews", () => {
     expect(interiorProps.agents[0].name).toBe("Keeper");
   });
 });
+
+it("follows a selected agent between workshop, home and the outdoor square", () => {
+  const first = snapshot();
+  first.approvals = [];
+  first.villagers[0].state = "working";
+  first.villagers[0].residency = "resident";
+  const view = render(<VillageExperience snapshot={first} />);
+  selectKeeper();
+  fireEvent.click(screen.getByRole("button", { name: "Follow agent ↗" }));
+  expect(interiorProps.building.id).toBe("workshop");
+  const resting = structuredClone(first);
+  resting.villagers[0].state = "resting";
+  view.rerender(<VillageExperience snapshot={resting} />);
+  expect(interiorProps.building.id).toBe(`home:${resting.villagers[0].id}`);
+  expect(screen.getByRole("navigation", { name: "Your location" })).toHaveTextContent("Following Keeper");
+  const waiting = structuredClone(resting);
+  waiting.approvals = snapshot().approvals;
+  view.rerender(<VillageExperience snapshot={waiting} />);
+  expect(screen.queryByRole("region", { name: "Building interior" })).not.toBeInTheDocument();
+  expect(rendererProps.follow).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "Village overview" }));
+  expect(rendererProps.follow).toBe(false);
+});
+
+it("remembers rendering quality and the chosen motion preference", () => {
+  const view = render(<VillageExperience snapshot={snapshot()} />);
+  fireEvent.change(screen.getByRole("combobox", { name: "Rendering quality" }), { target: { value: "low" } });
+  fireEvent.click(screen.getByRole("button", { name: "Pause motion", exact: true }));
+  view.unmount();
+  render(<VillageExperience snapshot={snapshot()} />);
+  expect(screen.getByRole("combobox", { name: "Rendering quality" })).toHaveValue("low");
+  expect(rendererProps.paused).toBe(true);
+});

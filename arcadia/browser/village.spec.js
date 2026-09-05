@@ -280,3 +280,55 @@ test("personal workstations stay put through departures, return navigation and r
   expect(await station()).toEqual(original);
   clean(observed);
 });
+
+test("camera and display preferences survive a reload", async ({ page }) => {
+  const observed = await load(page, population(5));
+  const canvas = await ready(page, 5);
+  await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+  await page.getByRole("combobox", { name: "Rendering quality" }).selectOption("low");
+  await page.getByRole("button", { name: "Pause motion", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("arcadia:camera:v1"))?.zoom)).toBeGreaterThan(1);
+  const saved = JSON.parse(await canvas.getAttribute("data-camera"));
+  await page.reload();
+  await ready(page, 5);
+  const restored = JSON.parse(await canvas.getAttribute("data-camera"));
+  expect(restored.zoom).toBeCloseTo(saved.zoom, 5);
+  for (const field of ["position", "target"]) restored[field].forEach((value, i) => expect(value).toBeCloseTo(saved[field][i], 5));
+  await expect(page.getByRole("combobox", { name: "Rendering quality" })).toHaveValue("low");
+  await expect(canvas).toHaveAttribute("data-paused", "true");
+  clean(observed);
+});
+
+test("following enters the agent's next room and stops at overview", async ({ page }) => {
+  const envelope = population(1);
+  envelope.snapshot.villagers[0].residency = "resident";
+  const observed = await load(page, envelope);
+  await ready(page, 1);
+  await page.locator(".ve-person").click();
+  await page.getByRole("button", { name: "Follow agent ↗" }).click();
+  const room = page.getByTestId("interior-canvas");
+  await expect(room).toHaveAttribute("data-building", "workshop");
+  envelope.snapshot.generation += 1;
+  envelope.snapshot.villagers[0].state = "resting";
+  await page.evaluate(next => window.villageStream.listeners.snapshot({ data: JSON.stringify(next) }), envelope);
+  await expect(room).toHaveAttribute("data-building", "home:claude:resident-0");
+  await expect(room).toHaveAttribute("data-focus-agent", "claude:resident-0");
+  await expect(page.getByRole("navigation", { name: "Your location" })).toContainText("Following Villager 000");
+  await page.getByRole("button", { name: "Village overview" }).click();
+  await expect(page.locator('canvas[data-renderer="three"]')).toBeVisible();
+  await expect(page.getByRole("button", { name: "Stop following" })).toHaveCount(0);
+  clean(observed);
+});
+
+test("archive opens recorded work and returns to the village", async ({ page }) => {
+  const observed = await load(page);
+  await ready(page);
+  await page.getByRole("button", { name: "Archive", exact: true }).click();
+  const archive = page.getByRole("region", { name: "Village archive" });
+  await expect(archive).toBeVisible();
+  await expect(archive).toContainText("Artifact");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await archive.getByRole("button", { name: "Back to village", exact: true }).click();
+  await expect(page.locator('canvas[data-renderer="three"]')).toBeVisible();
+  clean(observed);
+});

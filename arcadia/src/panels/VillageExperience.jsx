@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { VillageArchive } from "./VillageArchive.jsx";
+import { AgentAttention } from "./AgentAttention.jsx";
+import { readDisplayPreferences, saveDisplayPreferences } from "../world/viewPreferences.js";
 import { InteriorWorld } from "../world/InteriorWorld.jsx";
 import { VillageWorld } from "../world/VillageWorld.jsx";
 import { createVillageLayout } from "../world/layout.js";
@@ -153,6 +156,7 @@ function AgentDetails({
   onClose,
   detailRef,
   onVisitHome,
+  stewardClient,
 }) {
   const charter = snapshot.residents.find(
     (r) => r.file === agent.resident_file,
@@ -202,6 +206,7 @@ function AgentDetails({
       <p className="ve-current">
         {agent.last_line || "No recent activity recorded."}
       </p>
+      <AgentAttention snapshot={snapshot} stewardClient={stewardClient} agentId={agent.id} />
       <dl className="ve-facts">
         <dt>Project</dt>
         <dd>{agent.project || "None"}</dd>
@@ -288,7 +293,7 @@ function AgentDetails({
   );
 }
 
-export function VillageExperience({ snapshot }) {
+export function VillageExperience({ snapshot, stewardClient }) {
   const layout = useRef(null);
   if (!layout.current) {
     let savedLayout = null;
@@ -352,12 +357,11 @@ export function VillageExperience({ snapshot }) {
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState("people");
   const [filter, setFilter] = useState("all");
-  const [paused, setPaused] = useState(
-    () =>
-      globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches ??
-      false,
-  );
-  const [quality, setQuality] = useState("high");
+  const [preferences] = useState(readDisplayPreferences);
+  const [paused, setPaused] = useState(() => preferences.paused ??
+    (globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false));
+  const [quality, setQuality] = useState(preferences.quality);
+  useEffect(() => saveDisplayPreferences({ quality, paused }), [quality, paused]);
   const [follow, setFollow] = useState(false);
   const [cameraCommand, setCameraCommand] = useState(null);
   const [ready, setReady] = useState(false);
@@ -450,7 +454,7 @@ export function VillageExperience({ snapshot }) {
           : world.agents.find((agent) => agent.id === next.id);
       setRoomId(
         next.kind === "building"
-          ? ["home", "lodge", "workshop"].includes(target?.kind)
+          ? ["home", "lodge", "workshop", "archive"].includes(target?.kind)
             ? target.id
             : null
           : target?.indoor
@@ -474,6 +478,21 @@ export function VillageExperience({ snapshot }) {
       setFollow(false);
     }
   }, [selection, selectedAgent, selectedBuilding]);
+  useEffect(() => {
+    if (!follow || !selectedAgent) return;
+    const nextRoom = selectedAgent.indoor ? selectedAgent.buildingId : null;
+    if (roomId !== nextRoom) {
+      setRoomId(nextRoom);
+      setRoomCameraCommand(null);
+    }
+  }, [follow, selectedAgent?.id, selectedAgent?.buildingId, selectedAgent?.indoor, roomId]);
+  const overview = () => {
+    setRoomId(null);
+    setRoomCameraCommand(null);
+    setSelection(null);
+    setFollow(false);
+    command("reset");
+  };
   const workshop = world.buildings.find(
     (building) => building.kind === "workshop",
   );
@@ -540,6 +559,12 @@ export function VillageExperience({ snapshot }) {
           {working} working
         </p>
       </header>
+      <nav className="ve-location-bar" aria-label="Your location">
+        <button onClick={overview}>Village overview</button>
+        <span aria-hidden="true">/</span>
+        <span>{room?.name || (selectedAgent ? world.buildings.find(b => b.id === selectedAgent.buildingId)?.name : "The clearing")}</span>
+        {follow && selectedAgent && <span className="ve-following" role="status">Following {selectedAgent.name} <button onClick={() => setFollow(false)}>Stop following</button></span>}
+      </nav>
       <div className="ve-main">
         <section
           className="ve-world-panel"
@@ -553,7 +578,8 @@ export function VillageExperience({ snapshot }) {
             </span>
             <span className="ve-world-note">A home for every agent</span>
           </div>
-          {room && (
+          {room?.kind === "archive" && <VillageArchive snapshot={snapshot} onSelectAgent={select} onBack={() => { setRoomId(null); setSelection(null); setFollow(false); }} />}
+          {room && room.kind !== "archive" && (
             <section
               ref={roomRef}
               className="ve-room"
@@ -582,6 +608,7 @@ export function VillageExperience({ snapshot }) {
                   key={room.id}
                   building={room}
                   agents={roomAgents}
+                  focusAgentId={follow ? selectedAgent?.id : null}
                   paused={paused}
                   quality={quality}
                   onSelect={select}
@@ -744,7 +771,7 @@ export function VillageExperience({ snapshot }) {
               <a href="#approvals">Review →</a>
             </div>
           )}
-          <footer className="ve-world-footer">
+          <footer className="ve-world-footer" style={room?.kind === "archive" ? { display: "none" } : undefined}>
             <time
               className="ve-local-time"
               dateTime={localTime.toISOString()}
@@ -945,6 +972,7 @@ export function VillageExperience({ snapshot }) {
               detailRef={detailRef}
               agent={selectedAgent}
               snapshot={snapshot}
+              stewardClient={stewardClient}
               follow={follow}
               setFollow={setFollow}
               onClose={() => select(null)}

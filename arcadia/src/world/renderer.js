@@ -5,6 +5,7 @@ import { createArtKit } from "./art.js";
 import { createMotion, retargetMotion, advanceMotion, isOutside } from "./motion.js";
 import { buildingOccupancy } from "./occupancy.js";
 import { daylightAt } from "./daylight.js";
+import { readCameraPreferences, saveCameraPreferences } from "./viewPreferences.js";
 
 const keyOf = selection => selection ? `${selection.kind}:${selection.id}` : "";
 
@@ -61,6 +62,26 @@ export function createVillageRenderer(host, { onSelect, onError }) {
   let targetCamera = null, worldCenter = new THREE.Vector3(), worldSpan = 40;
   let fittedExtent = { width: 40, height: 40 };
   let first = true, frameCount = 0, frameSampleAt = performance.now(), colorsDirty = true;
+  let saveTimer = null, savePending = false;
+  const cameraPose = () => ({ position: camera.position.toArray(), target: controls.target.toArray(), zoom: camera.zoom });
+  function publishCamera() { canvas.dataset.camera = JSON.stringify(cameraPose()); }
+  function saveCamera() {
+    saveTimer = null;
+    if (disposed || first || host.clientWidth < 2 || host.clientHeight < 2) return;
+    saveCameraPreferences(cameraPose()); savePending = false;
+  }
+  function queueCameraSave() {
+    if (first || host.clientWidth < 2 || host.clientHeight < 2) return;
+    savePending = true;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(saveCamera, 350);
+  }
+  function cameraChanged() {
+    publishCamera();
+    if (savePending) queueCameraSave();
+  }
+  controls.addEventListener("change", cameraChanged);
+  controls.addEventListener("end", queueCameraSave);
   const projected = new THREE.Vector3();
   const hiddenInstance = new THREE.Matrix4().makeScale(0, 0, 0);
   const ownResources = new Set();
@@ -217,7 +238,15 @@ export function createVillageRenderer(host, { onSelect, onError }) {
     sun.shadow.camera.updateProjectionMatrix();
     sun.target.position.copy(worldCenter);
     applyLighting();
-    if (first) { resetCamera(true); first = false; }
+    if (first) {
+      resetCamera(true);
+      const saved = readCameraPreferences(world.bounds);
+      if (saved) {
+        camera.position.fromArray(saved.position); controls.target.fromArray(saved.target);
+        camera.zoom = saved.zoom; camera.updateProjectionMatrix(); controls.update();
+      }
+      first = false; publishCamera();
+    }
   }
 
   function applyLighting() {
@@ -355,6 +384,7 @@ export function createVillageRenderer(host, { onSelect, onError }) {
       if (type === "zoom-in" || type === "zoom-out") {
         camera.zoom = THREE.MathUtils.clamp(camera.zoom * (type === "zoom-in" ? 1.3 : 1 / 1.3), .25, 5);
         camera.updateProjectionMatrix();
+        publishCamera(); queueCameraSave();
       }
       if (type === "rotate-left" || type === "rotate-right") {
         const offset = camera.position.clone().sub(controls.target).applyAxisAngle(new THREE.Vector3(0, 1, 0), type === "rotate-left" ? Math.PI / 4 : -Math.PI / 4);
@@ -446,7 +476,10 @@ export function createVillageRenderer(host, { onSelect, onError }) {
       if (targetCamera) {
         camera.position.lerp(targetCamera.position, 1 - Math.exp(-dt * 6));
         controls.target.lerp(targetCamera.target, 1 - Math.exp(-dt * 6));
-        if (camera.position.distanceTo(targetCamera.position) < .03) targetCamera = null;
+        if (camera.position.distanceTo(targetCamera.position) < .03) {
+          camera.position.copy(targetCamera.position); controls.target.copy(targetCamera.target);
+          targetCamera = null; queueCameraSave();
+        }
       } else if (state.follow && state.selection?.kind === "agent" && !pointerStart) {
         const position = selectionPosition();
         if (position) {
@@ -493,6 +526,10 @@ export function createVillageRenderer(host, { onSelect, onError }) {
 
   function dispose() {
     if (disposed) return;
+    if (savePending) saveCamera();
+    clearTimeout(saveTimer);
+    controls.removeEventListener("change", cameraChanged);
+    controls.removeEventListener("end", queueCameraSave);
     disposed = true; cancelAnimationFrame(frame); observer.disconnect(); controls.dispose();
     canvas.removeEventListener("pointerdown", down); canvas.removeEventListener("pointerup", up);
     canvas.removeEventListener("pointermove", move); canvas.removeEventListener("pointerleave", leave);

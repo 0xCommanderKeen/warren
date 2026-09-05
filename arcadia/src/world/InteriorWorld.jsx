@@ -11,7 +11,7 @@ function restoreLayout() {
 }
 
 /** Accessible occupant navigation is supplied by the room's surrounding panel. */
-export function InteriorWorld({ building, agents, paused = false, quality = "high", cameraCommand, onSelect, onError }) {
+export function InteriorWorld({ building, agents, paused = false, quality = "high", cameraCommand, focusAgentId = null, onSelect, onError }) {
   const host = useRef(null);
   const renderer = useRef(null);
   const layout = useRef(null);
@@ -26,7 +26,7 @@ export function InteriorWorld({ building, agents, paused = false, quality = "hig
   const callbacks = useRef({ onSelect, onError });
   callbacks.current = { onSelect, onError };
   const state = useRef(null);
-  state.current = { building, agents, room, paused, quality, cameraCommand };
+  state.current = { building, agents, room, paused, quality, cameraCommand, focusAgentId };
   useEffect(() => {
     let instance;
     try {
@@ -45,6 +45,6 @@ export function InteriorWorld({ building, agents, paused = false, quality = "hig
   useEffect(() => {
     try { renderer.current?.update(state.current); }
     catch (error) { callbacks.current.onError?.(error); }
-  }, [building, agents, room, paused, quality, cameraCommand]);
+  }, [building, agents, room, paused, quality, cameraCommand, focusAgentId]);
   return <div className="interior-world" ref={host} aria-hidden="true" style={{ width: "100%", height: "100%", minHeight: 360, position: "relative", overflow: "hidden" }} />;
 }

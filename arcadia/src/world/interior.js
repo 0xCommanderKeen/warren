@@ -53,6 +53,7 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
   const knownNames = new Map();
   let disposed = false, frame = 0, needsRender = true, signature = "", buildingId = null;
   let extent = { width: 16, depth: 13 }, state = null, lastCommand = null;
+  let lastFocusAgentId = null;
   const projected = new THREE.Vector3();
   const colors = {
     floor: "#b98b5e", floorEdge: "#866247", plank: "#c59b6e", wall: "#ece0c8",
@@ -254,6 +255,21 @@ export function createInteriorRenderer(host, { onSelect, onError } = {}) {
     const changedBuilding = buildingId !== next.building.id;
     if (signature !== nextSignature) { signature = nextSignature; rebuild(next.building, occupants, room); fit(changedBuilding, !changedBuilding); }
     buildingId = next.building.id;
+    const focusAgentId = next.focusAgentId || null;
+    if (changedBuilding) lastFocusAgentId = null;
+    if (focusAgentId && (changedBuilding || focusAgentId !== lastFocusAgentId)) {
+      const station = room.stations.find(item => item.id === focusAgentId && item.agent);
+      if (station) {
+        const offset = camera.position.clone().sub(controls.target);
+        controls.target.set(station.position[0], .7, station.position[1]);
+        camera.position.copy(controls.target).add(offset);
+        camera.zoom = THREE.MathUtils.clamp((camera.top - camera.bottom) / 12, .5, 5);
+        camera.updateProjectionMatrix(); controls.update();
+        lastFocusAgentId = focusAgentId;
+      }
+    }
+    if (!focusAgentId) lastFocusAgentId = null;
+    canvas.dataset.focusAgent = focusAgentId && room.stations.some(item => item.id === focusAgentId && item.agent) ? focusAgentId : "";
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, next.quality === "low" ? 1 : 1.75));
     renderer.shadowMap.enabled = next.quality !== "low";
     // Furniture and occupant poses stay still; motion preference also disables inertia.
