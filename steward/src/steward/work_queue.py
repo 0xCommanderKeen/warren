@@ -40,42 +40,50 @@ class Issue(BaseModel):
     pull_request: dict[str, Any] | None = None
 
 
-def blockers(body: str | None, repository: str) -> tuple[list[int], list[str]]:  # noqa: C901 — one conservative Markdown scan
-    """Read explicit dependencies; ambiguous prose can never prove an issue unblocked."""
-    lines = (body or "").splitlines()
+def _dependency_lines(body: str | None) -> list[str]:
+    """Keep nested sections and ambiguous code blocks inside the dependency section."""
     section: list[str] = []
-    inside = False
+    level = 0
     fenced = False
-    for line in lines:
+    for line in (body or "").splitlines():
         if line.strip().startswith(("```", "~~~")):
             fenced = not fenced
+            if level:
+                section.append("Code block in dependency section requires review.")
             continue
         if fenced:
             continue
-        if re.fullmatch(r"#{1,6}\s+Blocked by\s*#*\s*", line, re.IGNORECASE):
-            inside = True
-            continue
-        if inside and re.match(r"^#{1,6}\s", line):
-            inside = False
-        if inside and line.strip():
+        heading = re.fullmatch(r"(#{1,6})\s+(.+?)\s*#*\s*", line)
+        if heading:
+            if heading[2].lower() == "blocked by":
+                level = len(heading[1])
+                continue
+            if len(heading[1]) <= level:
+                level = 0
+        if level and line.strip():
             section.append(line.strip())
+    return section
+
+
+def blockers(body: str | None, repository: str) -> tuple[list[int], list[str]]:
+    """Read explicit dependencies; ambiguous prose can never prove an issue unblocked."""
     numbers: set[int] = set()
     unknown: list[str] = []
-    for line in section:
-        # Each dependency is a standalone reference, with optional descriptive prose.
+    for line in _dependency_lines(body):
         text = re.sub(r"^[-*+]\s+(?:\[[ xX]\]\s*)?", "", line).strip()
-        if text.lower().rstrip(".") in {"none", "none — ready", "n/a"}:
+        if text.lower().rstrip(".") in {"none", "n/a"}:
             continue
-        match = re.fullmatch(r"#([1-9][0-9]*)(?:\s+.*)?", text)
+        match = re.fullmatch(r"#([1-9][0-9]*)(\s+.*)?", text)
         if not match:
             match = re.fullmatch(
-                rf"https://github\.com/{re.escape(repository)}/issues/([1-9][0-9]*)(?:\s+.*)?",
+                rf"https://github\.com/{re.escape(repository)}/issues/([1-9][0-9]*)(\s+.*)?",
                 text,
             )
-        # More than one reference on a line could hide a remaining blocker in prose.
-        if match and len(re.findall(r"#[0-9]+|https://github\.com/", text)) == 1:
+        if match:
             numbers.add(int(match[1]))
-        else:
+        # Descriptions may hide an independent prerequisite. Show the reference but
+        # require review of every suffix, rather than interpreting natural language.
+        if not match or match[2]:
             unknown.append(line)
     return sorted(numbers), unknown
 

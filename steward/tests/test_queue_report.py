@@ -71,3 +71,26 @@ def test_failed_run_and_symlink_notes_are_not_published(tmp_path: Path):
         original.rename(tmp_path / "target.json")
         original.symlink_to(tmp_path / "target.json")
         assert read_note(tmp_path, receipt(db, outcome="ok"), "owner/repo")["note"] is None
+
+
+def test_published_prose_redacts_nested_credentials_without_changing_run_provenance(tmp_path):
+    note_file(
+        tmp_path,
+        recommendations=[
+            {
+                "number": 466,
+                "reason": "Found TOKEN=private-secret while inspecting the code.",
+                "evidence": [
+                    {
+                        "source": "TOKEN=private-secret inspect",
+                        "quote": "Authorization: Bearer private-secret",
+                    }
+                ],
+            }
+        ],
+    )
+    with Store(":memory:") as db:
+        report = read_note(tmp_path, receipt(db, outcome="ok"), "owner/repo")
+    assert "private-secret" not in json.dumps(report)
+    assert report["note"]["run_id"] == "run1"
+    assert report["note"]["commit"] == "a" * 40

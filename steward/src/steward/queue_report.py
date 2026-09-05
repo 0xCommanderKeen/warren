@@ -7,6 +7,7 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from steward.credential_policy import redact_mapping
 from steward.store.records import LedgerEntry
 
 NOTE_FILE = "queue-review.json"
@@ -76,4 +77,6 @@ def read_note(memory: Path, receipt: LedgerEntry | None, repository: str) -> dic
             "run": run,
             "message": "The note does not match the recorded run and repository.",
         }
-    return {"note": note.model_dump(), "run": run, "message": None}
+    published = note.model_dump()
+    published["recommendations"] = [redact_mapping(item) for item in published["recommendations"]]
+    return {"note": published, "run": run, "message": None}

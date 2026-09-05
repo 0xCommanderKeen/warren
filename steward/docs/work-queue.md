@@ -51,6 +51,7 @@ mount of the deployment checkout or GitHub write permissions.
 rejects symlinks and invalid/oversized documents, and requires its run ID and repository
 to match the latest successful `queue-review` receipt. The prose is resident-authored;
 structural evidence validation does not certify that its conclusions are correct.
+Published reasons and evidence use Steward’s shared credential redaction policy.
 A failed latest review suppresses the note and displays the failed receipt. Live states
 of the recommended numbers come from the tracker observation, even if the note is older.
 

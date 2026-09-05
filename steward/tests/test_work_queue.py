@@ -249,3 +249,18 @@ def test_api_admits_report_receipt_and_refreshes_recommended_item_state(tmp_path
         assert result["report"]["run"]["run_id"] == "review-1"
         assert result["report"]["note"]["recommendations"][0]["reason"] == "Next when inspected."
         assert result["ranked_items"] == [{"number": 1, "state": "closed"}]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "## Blocked by\n- #2 and operator approval",
+        "## Blocked by\n- #2\n### Release gate\n- operator approval",
+    ],
+)
+def test_prose_and_nested_gates_keep_stale_certification_unknown(body):
+    result = project(
+        issue(body=body, labels=[{"name": "status:blocked"}]), issue(2, state="closed")
+    )
+    assert result["issues"][0]["stale_blocked"] is False
+    assert result["issues"][0]["unknown_blockers"]
