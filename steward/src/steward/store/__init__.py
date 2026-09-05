@@ -5,7 +5,10 @@ from steward.runs import RUN_CHAT, RUN_DELEGATED, RUN_KINDS, RUN_ROUTINE, RUN_TA
 from steward.runs import TRIGGER_MANUAL as RUN_TRIGGER_MANUAL
 from steward.runs import TRIGGER_SCHEDULE as RUN_TRIGGER_SCHEDULE
 from steward.store._connection import _Connection
-from steward.store._legacy import _LegacyTables
+from steward.store.approvals import _ApprovalTables
+from steward.store.board import _BoardTables
+from steward.store.budgets import _BudgetTables
+from steward.store.ledger import _LedgerTables
 from steward.store.records import (
     APPROVAL_DECISIONS,
     DECIDED_BY_EXPIRY,
@@ -31,6 +34,8 @@ from steward.store.records import STATUS_PENDING as STATUS_PENDING
 from steward.store.records import STATUS_RESOLVED as STATUS_RESOLVED
 from steward.store.records import new_id as new_id
 from steward.store.requests import _RequestTables
+from steward.store.residents import _ResidentTables
+from steward.store.runs import _RunTables
 
 __all__ = [
     "APPROVAL_DECISIONS",
@@ -62,5 +67,14 @@ __all__ = [
 ]
 
 
-class Store(_LegacyTables, _RequestTables, _Connection):
+class Store(
+    _BoardTables,
+    _ApprovalTables,
+    _RunTables,
+    _LedgerTables,
+    _ResidentTables,
+    _BudgetTables,
+    _RequestTables,
+    _Connection,
+):
     """The one durable memory the API writes to. Safe to share across threads."""
