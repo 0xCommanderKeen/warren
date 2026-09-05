@@ -904,6 +904,8 @@ def _diagnose(kind, *, diagnostics=None, **details):
                             >= STUCK_OUTBOX_AGE_SECONDS
                         )
                         and hooks_without_ack >= STUCK_OUTBOX_HOOKS
+                        else "delayed"
+                        if details.get("oldest_age_seconds", 0) >= 10
                         else "healthy"
                     )
                     report["outbox"] = details
@@ -1378,6 +1380,14 @@ def redact_event(event):
     return out
 
 
+def delivery_module():
+    try:
+        from hooks import delivery_worker
+    except ImportError:
+        import delivery_worker
+    return delivery_worker
+
+
 def main(runner="claude", deadline=None):
     hook = json.loads(sys.stdin.read())
     specs = adapt_hook(runner, hook)
@@ -1412,7 +1422,11 @@ def main(runner="claude", deadline=None):
             "type": etype,
             "payload": payload,
         }
-        if deadline is None:
+        if os.path.isfile(os.path.join(LOG_DIR, "delivery-config.json")):
+            # Running sessions already invoke this stable bundle path. The marker
+            # switches them without changing their captured environment or spool.
+            delivery_module().enqueue(event, session_id=str(hook.get("session_id") or hook.get("thread_id") or agent_id))
+        elif deadline is None:
             deliver(event)
         else:
             deliver(event, deadline)
@@ -1492,6 +1506,8 @@ def print_emitter_status():
 if __name__ == "__main__":
     if sys.argv[1:] == ["--status"]:
         print_emitter_status()
+    elif sys.argv[1:] == ["--worker"]:
+        delivery_module().run_service()
     else:
         runner = runner_name(sys.argv[1:])
         if runner:

@@ -22,7 +22,7 @@ from conftest import REPO_ROOT
 
 #: The three files chronicle's bundle is a pure function of. The target guards every one:
 #: build.py decides the artifact's shape as much as the two sources it flattens.
-SOURCES = ("emit.py", "durable.py", "build.py")
+SOURCES = ("emit.py", "durable.py", "build.py", "presence.py", "delivery_worker.py")
 
 #: A stand-in emit.py: the shebang the bundle keeps first, and the exact import block the
 #: build replaces. Copying chronicle's real emitter here would make these tests fail
@@ -34,7 +34,14 @@ try:
 except ImportError:  # standalone deployment invokes this file from hooks/
     import durable
 
-print(durable.VALUE)
+def delivery_module():
+    pass
+
+
+def main():
+    print(durable.VALUE)
+
+main()
 """
 
 FAKE_DURABLE = "VALUE = 'committed bytes'\n"
@@ -63,6 +70,8 @@ def chronicle_repo(tmp_path: Path, *, omit: str = "") -> Path:
     (repo / "hooks" / "emit.py").write_text(FAKE_EMIT, encoding="utf-8")
     (repo / "hooks" / "durable.py").write_text(FAKE_DURABLE, encoding="utf-8")
     shutil.copy(REPO_ROOT.parent / "chronicle" / "hooks" / "build.py", repo / "hooks" / "build.py")
+    for name in ("presence.py", "delivery_worker.py"):
+        (repo / "hooks" / name).write_text("# synthetic module\n", encoding="utf-8")
     run("git", "init", "-q", cwd=repo)
     run("git", "config", "user.email", "test@example.com", cwd=repo)
     run("git", "config", "user.name", "Test", cwd=repo)

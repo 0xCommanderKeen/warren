@@ -27,7 +27,7 @@ class InstalledEmitterTest(unittest.TestCase):
             self.run_installer(install_root)
             self.assertEqual(
                 {path.name for path in install_root.iterdir()},
-                {"chronicle-emit", "burrow-emit", "emit.py", "durable.py"},
+                {"chronicle-emit", "burrow-emit", "emit.py", "durable.py", "presence.py", "delivery_worker.py", "delivery_service.py"},
             )
             for entry_point in ("chronicle-emit", "burrow-emit"):
                 self.assertTrue(os.access(install_root / entry_point, os.X_OK))

@@ -8,7 +8,7 @@ checked out. That machine is a laptop, or a GitHub Actions runner on every merge
 ```sh
 deploy/deploy.sh chronicle              # one service
 deploy/deploy.sh arcadia townhall       # several
-deploy/deploy.sh all                    # chronicle → arcadia → townhall → steward
+deploy/deploy.sh all                    # arcadia → townhall → chronicle → steward
 deploy/status.sh                        # what is running, against origin/main
 ```
 

@@ -107,8 +107,12 @@ jobs:
   # clients validate chronicle's contract, and townhall's routes are steward's.
 
   chronicle:
-    needs: changes
-    if: needs.changes.outputs.chronicle == 'true'
+    needs: [changes, arcadia, townhall]
+    if: >-
+      always()
+      && needs.changes.outputs.chronicle == 'true'
+      && !contains(needs.*.result, 'failure')
+      && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -132,7 +136,7 @@ jobs:
       - run: deploy/deploy.sh chronicle
 
   arcadia:
-    needs: [changes, chronicle]
+    needs: changes
     if: >-
       always()
       && needs.changes.outputs.arcadia == 'true'
@@ -162,7 +166,7 @@ jobs:
       - run: deploy/deploy.sh arcadia
 
   townhall:
-    needs: [changes, chronicle, arcadia]
+    needs: [changes, arcadia]
     if: >-
       always()
       && needs.changes.outputs.townhall == 'true'

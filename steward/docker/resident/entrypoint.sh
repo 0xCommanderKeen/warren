@@ -117,4 +117,15 @@ fi
 echo "steward: durable outbox under $HOME/.chronicle — container-local unless the"
 echo "steward:          compose file mounts it"
 
+# One supervised delivery owner per container spool. Hooks only enqueue once the
+# worker publishes its managed marker; a restart keeps the existing outbox IDs.
+if [ -n "${CHRONICLE_URL:-}" ]; then
+    (
+        while :; do
+            python3 "$BAKED_DIR/chronicle-emit.py" --worker || true
+            sleep 5
+        done
+    ) &
+fi
+
 exec "$@"
