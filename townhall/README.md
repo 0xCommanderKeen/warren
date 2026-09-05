@@ -128,6 +128,13 @@ pnpm test
 pnpm build
 ```
 
+The page tests hold confirmation reads unresolved for routine runs, approval decisions,
+job posts and resident declarations, then release the matching result. Client tests set
+Vite's development flag false and observe credential routing at `fetch`; the app test
+also follows crafted service query parameters through both transports. `architecture.test.js`
+keeps only narrow source lint (with recursive file discovery), proxy route contracts and
+measured palette contrast. Source lint does not establish runtime confirmation or security.
+
 **The deployed build needs its mount prefix**: `pnpm build --base=/observatory/`. The router
 reads that prefix back out of `import.meta.env.BASE_URL`, so links and deep links work under
 any mount — see [`docs/deployment.md`](docs/deployment.md).

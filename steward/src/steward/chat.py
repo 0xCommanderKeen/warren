@@ -1358,9 +1358,10 @@ class DiscordTransport:
                 return None
             return []
         found: list[Message] = []
+        cursors = state.cursors.copy()
         dm_channels = set(state.channels.values())
         for channel in (*state.channels.values(), *sorted(state.listened_channels)):
-            messages = self._messages_after(token, channel, state.cursors.get(channel, 0))
+            messages = self._messages_after(token, channel, cursors.get(channel, 0))
             if messages is None:
                 return None
             for raw in messages:
@@ -1369,7 +1370,7 @@ class DiscordTransport:
                     if isinstance(raw, Mapping) and str(raw.get("id", "")).isdigit()
                     else 0
                 )
-                state.cursors[channel] = max(state.cursors.get(channel, 0), raw_id)
+                cursors[channel] = max(cursors.get(channel, 0), raw_id)
                 message = self._message(
                     raw,
                     channel,
@@ -1378,6 +1379,9 @@ class DiscordTransport:
                 )
                 if message is not None:
                     found.append(message)
+        # A failed later channel returns no messages: keep every cursor retryable until
+        # the complete batch can be handed to the bridge.
+        state.cursors = cursors
         return found
 
     def send(self, token: str, conversation: str, text: str) -> bool:

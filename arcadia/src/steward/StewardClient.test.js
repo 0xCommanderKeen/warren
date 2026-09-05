@@ -205,20 +205,26 @@ describe("the credential never leaves this origin", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("sends no Authorization header off-origin, on any write", async () => {
-    shipped();
-    const fetch = vi.fn();
-    for (const baseUrl of ["https://evil.tld", "//evil.tld", "http://127.0.0.1:8802"]) {
-      const client = createStewardClient({ baseUrl, fetch });
-      client.setCredentials({ token: "secret" });
-      await client.postJob({ title: "x" }).catch(() => {});
-      await client.runRoutine("keeper", "daily").catch(() => {});
-      await client.decideApproval("a-1", { decision: "approve" }).catch(() => {});
-      await client.createResident({ id: "keeper" }).catch(() => {});
-    }
-
-    expect(fetch).not.toHaveBeenCalled();
-  });
+  it.each(["https://evil.tld", "//evil.tld", "http://127.0.0.1:8802"])(
+    "rejects every write to %s before fetch", async (baseUrl) => {
+      shipped();
+      const fetch = vi.fn().mockResolvedValue(response(202, {
+        status: "accepted", request_id: "request-1", task_id: "task-1",
+      }));
+      for (const request of [
+        (client) => client.postJob({ title: "x" }),
+        (client) => client.runRoutine("keeper", "daily"),
+        (client) => client.decideApproval("a-1", { decision: "approve" }),
+        (client) => client.createResident({ id: "keeper" }),
+      ]) {
+        // A fresh client ensures an earlier write's lock cannot hide a missing guard.
+        const client = createStewardClient({ baseUrl, fetch });
+        client.setCredentials({ token: "secret" });
+        await expect(request(client)).rejects.toMatchObject({ code: "cross_origin_base" });
+        expect(fetch).not.toHaveBeenCalled();
+      }
+    },
+  );
 
   it("does not wedge the client: a refusal leaves no write unresolved", async () => {
     // The refusal has to happen before any write is registered. A cross-origin base that

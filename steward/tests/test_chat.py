@@ -1650,6 +1650,49 @@ def test_discord_drains_more_than_one_page_without_skipping_unseen_messages(
     ] == list(range(100, 151))
 
 
+def test_discord_bridge_recovers_both_channels_after_a_later_channel_fails(
+    discord_api: DiscordApi, make_bridge: BridgeMaker, tmp_path: Path
+):
+    declared = chat_manifest(tmp_path / "memory")
+    declared["routes"][-1]["address"] = "discord:testy"
+    operators = frozenset({"31337", "31338"})
+    discord_api.queue("GET", "/users/@me", (200, {"id": "42", "username": "Testy"}))
+    discord_api.queue("POST", "/users/@me/channels", (200, {"id": "900"}), (200, {"id": "901"}))
+    for channel, seed, incoming in (("900", "10", "11"), ("901", "20", "21")):
+        discord_api.queue(
+            "GET", f"/channels/{channel}/messages?limit=1", (200, [discord_message(seed)])
+        )
+        answer = (200, [discord_message(incoming)])
+        discord_api.queue(
+            "GET",
+            f"/channels/{channel}/messages?after={seed}&limit=50",
+            answer if channel == "900" else (500, {}),
+            answer,
+        )
+        discord_api.queue(
+            "GET", f"/channels/{channel}/messages?after={incoming}&limit=50", (200, [])
+        )
+        discord_api.queue("POST", f"/channels/{channel}/messages", (200, {"id": "30"}))
+    bridge = make_bridge(
+        manifest=declared,
+        tokens={"STEWARD_CHAT_TOKEN_DISCORD_TESTY": FAKE_DISCORD_TOKEN},
+        operators_by_transport={"discord": operators},
+        transports={"discord": ch.DiscordTransport(base_url=discord_api.url, operators=operators)},
+    )
+
+    assert bridge.poll_once() == []
+    assert [outcome.status for outcome in bridge.poll_once()] == [ch.ChatStatus.UNREACHABLE]
+    recovered = bridge.poll_once()
+    assert [outcome.status for outcome in recovered] == [ch.ChatStatus.ANSWERED] * 2
+    assert bridge.poll_once() == []
+    replies = [
+        path
+        for method, path, _, _ in discord_api.calls
+        if method == "POST" and path.startswith("/channels/")
+    ]
+    assert replies == ["/channels/900/messages", "/channels/901/messages"]
+
+
 def test_chat_list_discovers_a_discord_bot_handle(
     discord_api: DiscordApi,
     runner: CliRunner,

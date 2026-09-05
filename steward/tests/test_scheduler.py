@@ -5,6 +5,8 @@ import json
 import os
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -625,8 +627,12 @@ def test_the_claim_is_given_back_so_the_next_fire_goes(
     assert second.fired
 
 
+@pytest.mark.parametrize("worker_delay", [0, 0.3])
 def test_two_routines_of_one_resident_serialise_rather_than_refuse(
-    write_resident: ResidentWriter, tmp_path: Path
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_delay: float,
 ) -> None:
     """The in-process guarantee survives: inside one process the second one waits its turn.
 
@@ -650,19 +656,43 @@ def test_two_routines_of_one_resident_serialise_rather_than_refuse(
             tmp_path,
             runner_factory=lambda _spec, _placement: r.MockRunner(behavior=slow),
         )
+        contended = threading.Event()
+        resident_lock = engine._resident_lock
+
+        @contextmanager
+        def observed_lock(resident_id: str) -> Iterator[None]:
+            lock = resident_lock(resident_id)
+            if not lock.acquire(blocking=False):
+                # A failed acquisition observes actual contention, not thread startup.
+                contended.set()
+                assert lock.acquire(timeout=10), "resident lock was never released"
+            try:
+                yield
+            finally:
+                lock.release()
+
+        monkeypatch.setattr(engine, "_resident_lock", observed_lock)
         hourly, daily = engine.scheduled
-        first = threading.Thread(target=lambda: reports.append(engine.fire(hourly)))
-        second = threading.Thread(target=lambda: reports.append(engine.fire(daily)))
+
+        def delayed_second() -> None:
+            time.sleep(worker_delay)  # deliberately schedule beyond the former 0.2s assumption
+            reports.append(engine.fire(daily))
+
+        first = threading.Thread(target=lambda: reports.append(engine.fire(hourly)), daemon=True)
+        second = threading.Thread(target=delayed_second, daemon=True)
         first.start()
         try:
             assert started.wait(timeout=10)
             second.start()
-            time.sleep(0.2)  # long enough for the second to be queued on the resident lock
+            assert contended.wait(timeout=5), "second fire never contested the resident lock"
             assert len(reports) == 0, "the second fire is waiting, not refused"
         finally:
             release.set()
             first.join(timeout=10)
-            second.join(timeout=10)
+            if second.ident is not None:
+                second.join(timeout=10)
+            assert not first.is_alive()
+            assert not second.is_alive()
 
     assert [report.fired for report in reports] == [True, True]
 
