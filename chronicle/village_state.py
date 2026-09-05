@@ -170,8 +170,9 @@ def ambient_share(ordinary, ambient, capacity, floor):
 
 def _ambient_tail(records, capacity, floor, is_ambient):
     """Keep the newest of a channel under :func:`ambient_share`, in append order."""
-    ambient = [index for index, record in enumerate(records) if is_ambient(record)]
-    ordinary = [index for index in range(len(records)) if index not in set(ambient)]
+    ambient, ordinary = [], []
+    for index, record in enumerate(records):
+        (ambient if is_ambient(record) else ordinary).append(index)
     take_ordinary, take_ambient = ambient_share(
         len(ordinary), len(ambient), capacity, floor
     )
