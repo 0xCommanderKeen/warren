@@ -66,6 +66,32 @@ def test_an_existing_database_gains_the_approval_announcement_outbox(tmp_path: P
     }
 
 
+def test_an_existing_approval_ledger_gains_the_consumption_marks(tmp_path: Path) -> None:
+    """Every approval read goes through ``from_row``, so a missing column is a dead ledger."""
+    path = tmp_path / "old-approvals.db"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE approvals (request_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, "
+        "project TEXT NOT NULL, action TEXT NOT NULL, message TEXT NOT NULL, "
+        "detail TEXT NOT NULL DEFAULT '{}', options TEXT NOT NULL DEFAULT '[]', "
+        "status TEXT NOT NULL DEFAULT 'pending', decision TEXT, decided_by TEXT, "
+        "decided_at TEXT, edit TEXT, expires_at TEXT, created_at TEXT NOT NULL)"
+    )
+    connection.execute(
+        "INSERT INTO approvals (request_id, agent_id, project, action, message, created_at) "
+        "VALUES ('old-1', 'a:b', 'p', 'send_email', 'from before the column', "
+        "'2026-01-01T00:00:00Z')"
+    )
+    connection.commit()
+    connection.close()
+
+    with Store(path) as store:
+        carried_over = _approval(store, "old-1")
+        assert carried_over.consumed_at is None
+        assert carried_over.consumed_by == ""
+        assert store.consume_approval("old-1", by="write-1") is True
+
+
 def test_an_existing_request_log_gains_approval_correlation(tmp_path: Path) -> None:
     path = tmp_path / "old-requests.db"
     connection = sqlite3.connect(path)
@@ -833,6 +859,48 @@ def test_an_edit_decision_keeps_the_humans_version(store: Store) -> None:
     assert decided is not None
     assert decided.edit == {"subject": "shorter"}
     assert decided.to_dict()["edit"] == {"subject": "shorter"}
+
+
+def test_a_decision_is_spent_by_one_write_and_no_other(store: Store) -> None:
+    """One approval is one edit (warren#437), and the claim is what makes that true."""
+    record = store.create_approval_request(
+        agent_id="claude-code:karen", project="karen", action="grant_skill", message="…"
+    )
+    store.decide(record.request_id, "approve", decided_by="miha")
+
+    assert store.consume_approval(record.request_id, by="write-1") is True
+    assert store.consume_approval(record.request_id, by="write-2") is False
+
+    spent = _approval(store, record.request_id)
+    assert spent.consumed_at
+    assert spent.consumed_by == "write-1"
+    assert spent.to_dict()["consumed_by"] == "write-1"
+
+
+def test_only_the_write_that_claimed_a_decision_can_give_it_back(store: Store) -> None:
+    """A refused write releases its own claim; a stale caller may not re-open somebody's."""
+    record = store.create_approval_request(
+        agent_id="claude-code:karen", project="karen", action="grant_skill", message="…"
+    )
+    assert store.consume_approval(record.request_id, by="write-1") is True
+
+    assert store.release_approval(record.request_id, by="write-2") is False
+    assert _approval(store, record.request_id).consumed_at, "somebody else's claim stands"
+
+    assert store.release_approval(record.request_id, by="write-1") is True
+    released = _approval(store, record.request_id)
+    assert released.consumed_at is None
+    assert released.consumed_by == ""
+    assert store.consume_approval(record.request_id, by="write-3") is True
+
+
+def test_releasing_a_decision_nobody_claimed_changes_nothing(store: Store) -> None:
+    record = store.create_approval_request(
+        agent_id="a:b", project="p", action="grant_skill", message="…"
+    )
+
+    assert store.release_approval(record.request_id, by="") is False
+    assert _approval(store, record.request_id).consumed_at is None
 
 
 def test_deciding_an_unknown_request_records_nothing(store: Store) -> None:

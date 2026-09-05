@@ -99,16 +99,45 @@ the body count alone is the honest half. The commit hash is how the person who a
 what you wrote without asking you to summarise it: a skill reported with no commit hash
 has, as far as anyone can check, not been written.
 
-## The grant is Miha's
+## The grant is a knock, then one line
 
 Writing a skill into the library gives it to nobody: a resident holds it when its manifest
-says so, and that edit belongs to Miha. End the reply with the exact lines to paste under
-`skills:`, with the note saying why that resident holds it:
+says so. That edit is Miha's to approve and yours to make once he has. Raise it as one
+decision, carrying the two names steward will check the write against and the note saying
+why that resident holds it:
 
-```yaml
-  - id: read-invoices
-    note: Reads the supplier PDFs; the numbers still go to a human.
+```
+<needs-human action="grant_skill" expires-in="24h" options="approve,deny">
+{"resident": "shelf-worker", "skill": "read-invoices",
+ "note": "Reads the supplier PDFs; the numbers still go to a human."}
+</needs-human>
 ```
 
-Then stop, and leave the manifest as you found it. The grant and the session that first
-runs with it are both on the other side of an answer you do not have yet.
+Spell `resident` and `skill` exactly. Then stop: the answer reaches you in a later
+session's `DECISIONS SINCE YOU LAST RAN`, and nothing happens meanwhile.
+
+When it says approve, read the declaration, add the one line, and write it back with the
+request id:
+
+```
+curl -sS "$STEWARD_URL/residents/<id>/declaration" \
+  -H "Authorization: Bearer $STEWARD_SESSION_TOKEN"
+
+curl -sS -X PUT "$STEWARD_URL/residents/<id>/declaration" \
+  -H "Authorization: Bearer $STEWARD_SESSION_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "<the manifest, one skills entry added>", "approval_request_id": "<id>"}'
+```
+
+Send the manifest **whole**, exactly as `GET` returned it with the one `skills` entry
+added, and no `soul`: steward compares it against what is on disk and refuses every other
+difference, down to a reordered list. One approval is one edit, so a refusal is something
+to knock about again rather than retry with different bytes.
+
+End on the hash the way you ended the write:
+
+```
+🔑 read-invoices granted to shelf-worker (d4e5f6).
+```
+
+A grant reported with no commit hash has, as far as anyone can check, not happened.

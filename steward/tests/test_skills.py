@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from conftest import REPO_ROOT, ResidentWriter, SkillWriter, valid_manifest
+from steward import approvals as ap
 from steward import manifest as m
 from steward import prompt as p
 from steward import skills as sk
@@ -526,6 +527,23 @@ def test_hrs_two_crafts_are_granted_not_default() -> None:
         assert skill is not None, f"{name} is not in the shipped library"
         assert not skill.default, f"{name} must be granted, not handed to every resident"
         assert skill.description, f"{name} needs a description; it is what triggers it"
+
+
+@pytest.mark.parametrize("name", ["write-skill", "raise-resident"])
+def test_hrs_skill_grant_knock_spells_what_the_write_door_matches_on(name: str) -> None:
+    """The literals in these bodies are a contract with `steward.approved_edits`.
+
+    A session writes what the skill told it to write, and steward matches the action slug
+    and the two detail keys exactly (warren#437). Rename either side alone and every knock
+    Karen raises is refused at the door for a reason nobody can see from the skill — so the
+    drift has to be a red test rather than a discovery.
+    """
+    skill = sk.load_library(LIBRARY).get(name)
+    assert skill is not None
+    assert f'action="{ap.GRANT_SKILL_ACTION}"' in skill.body
+    for key in ("resident", "skill"):
+        assert f'"{key}"' in skill.body, f"the knock must name {key} in its detail"
+    assert "approval_request_id" in skill.body, "and the edit is made against the decision"
 
 
 def test_vault_keeper_points_at_the_vaults_own_conventions_rather_than_copying_them() -> None:

@@ -161,7 +161,7 @@ The write allowlist below is about **sessions** and is untouched by operator cre
 It exists to keep a running resident out of human acts, and an operator is the human.
 
 **What a session may reach.** Every `GET`, plus `POST /delegate`. Named `session_grants`
-may open four deliberately narrow doors beside that permanent allowlist:
+may open five deliberately narrow doors beside that permanent allowlist:
 
 - `skills.write` permits `POST /skills` and `PUT` of an ungranted skill. It may not set
   `defaults: true` or replace a skill any resident manifest already grants.
@@ -176,20 +176,23 @@ may open four deliberately narrow doors beside that permanent allowlist:
   `residents.dry_run`**, and that is the point of it being a
   name of its own (warren#446): a dry run reads a plan and costs nothing, a rehearsal runs
   a model turn and spends the caller's own budget line.
+- `residents.grant_skill` permits `PUT /residents/{id}/declaration` **only against an
+  approval a human answered** — see [An approved declaration
+  edit](#an-approved-declaration-edit). It is the one grant that opens nothing by itself.
 
 The narrowings and every other write path are `403 session_credential_forbidden`, naming
-the act, and nothing is recorded. In particular, declaration edits and retirement stay
-closed even to a session holding both resident grants. The allowlist consults the resident
-named by the live credential; request data cannot name a different one. Adding a route does
-not make it session-reachable by accident.
+the act, and nothing is recorded. In particular, retirement stays closed under every grant,
+and so does any declaration edit that no decision covers. The allowlist consults the
+resident named by the live credential; request data cannot name a different one. Adding a
+route does not make it session-reachable by accident.
 
 That allowlist is what makes the write API (steward #214) safe to have at all. A resident
 that could `PUT` its own declaration would be choosing the rules it is held to, and one
 that could write a skill without a grant would be handing itself instructions nobody
-approved — so `PUT /residents/{id}/declaration` and `POST /reload` remain closed, while
-skill writes require the narrow grant above. Each refusal names the act. Reading
-a declaration stays open: a resident that could not see its own charter could not follow
-it.
+approved — so `POST /reload` remains closed, declaration edits open only for one approved
+line at a time, and skill writes require the narrow grant above. Each refusal names the
+act. Reading a declaration stays open: a resident that could not see its own charter could
+not follow it.
 
 Reads are *not* narrowed, and that is a decision rather than an omission. A locally placed
 session already has `steward.db` and the residents tree on the same disk — that is how
@@ -205,7 +208,7 @@ takes the other road has to do something no resident's charter describes. Real c
 needs the session to have neither the database nor the residents tree, which is container
 placement's job, not this issue's.
 
-Five of those refusals name the act rather than the rule, because the act is the part
+Six of those refusals name the act rather than the rule, because the act is the part
 worth knowing:
 
 - **`POST /approvals/{request_id}`** — deciding an approval is the human end of the
@@ -227,6 +230,9 @@ worth knowing:
   the same reason provisioning is.
 - **`POST /residents/{id}/routines/{routine}/run`** — firing a routine is a human act; a
   session's own work arrives through the board and its inbox.
+- **`PUT /residents/{id}/declaration`** — a resident's charter, skills and routines are
+  written *about* it rather than by it. `residents.grant_skill` opens one skill line at a
+  time and only against a human's yes; everything else about this door stays shut.
 
 **`POST /delegate` derives the sender from the credential.** Omitting `from` no longer
 means "a person asked" for a session caller: it means *this* resident, and its charter is
@@ -1146,9 +1152,12 @@ move the *typing* into a control panel while keeping every guarantee that rule b
 
 Four rules hold for all of them.
 
-Declaration updates are human-only. A new skeleton may also be written with the narrow
-`residents.declare` session grant, and skill writes accept the similarly narrow
-`skills.write` grant described under [Three kinds of caller](#three-kinds-of-caller).
+Declaration updates are human-only, with one exception: a session holding
+`residents.grant_skill` may add one approved skill line, described under [An approved
+declaration edit](#an-approved-declaration-edit). A new skeleton may also be written with
+the narrow `residents.declare` session grant, and skill writes accept the similarly narrow
+`skills.write` grant — both described under [Three kinds of
+caller](#three-kinds-of-caller).
 
 **An invalid write is never written.** The candidate is applied to a throwaway *copy* of
 the tree and validated there with the same gate `steward validate` runs, and only a copy
@@ -1253,6 +1262,75 @@ overwriting the first. Omit it to overwrite deliberately, which is what a script
 | 409 | `resident_identity_changed` | ordinary edits cannot replace `uid` or `agent_id` |
 | 409 | `not_a_git_checkout` | the tree has no git behind it and this steward refuses to write unrecorded |
 | 422 | `manifest_invalid` | the tree would not validate; `diagnostics` names the fields |
+| 422 | `approval_not_needed` | a human caller sent `approval_request_id`; they are the approval |
+| 403 | `edit_not_approved` | a session's edit is not the one a human said yes to |
+| 403 | `session_credential_forbidden` | a session with no `residents.grant_skill`, or holding it and naming no request |
+
+#### An approved declaration edit
+
+Added in warren#437, and the only way a session ever writes here. Everything above is
+about a human caller; this is the narrow door beside it, and it is shut until a person
+opens it.
+
+A session holding `residents.grant_skill` sends the ordinary `PUT` body plus one field:
+
+```json
+{"text": "# the whole manifest, with one skill line added
+…",
+ "approval_request_id": "5f0e…"}
+```
+
+Steward writes only when **all** of these hold. Any one of them failing is `403
+edit_not_approved` naming which, and nothing is written, committed, or spent:
+
+- the request id names an approval **this resident raised** — not steward's own knock, and
+  not a colleague's;
+- its action is one this door recognises, which today means `grant_skill`;
+- it was answered `approve`. Pending, `deny`, expiry's deny-by-default and an `edit`
+  decision all refuse; the knock offers `approve,deny` for that reason;
+- it has not passed its `expires_at`. The deadline bounds the whole act, not only how long
+  there was to answer: a yes from last week arriving at the write door is a question worth
+  asking again;
+- it has not already been spent. **One approval is one edit** — the decision is claimed
+  before the tree is touched, so two sessions presenting the same id cannot both write;
+- the candidate declaration **is the edit the approval described**.
+
+**What "matches" means.** The approval's detail names a resident and a skill
+(`{"resident": "shelf-worker", "skill": "series-detection"}`). Steward reads the
+declaration currently on disk, parses both it and the candidate as YAML, and requires that:
+
+- the resident in the detail is the resident in the path;
+- every top-level key except `skills` is **equal** — a key changed, added or removed
+  anywhere else is refused naming it (`… and this declaration also changes charter`);
+- `skills` is the current list with **exactly one entry inserted**, and that entry grants
+  the skill the approval named. Removing an index has to reproduce the current list
+  exactly, so reordering the list, rewriting another grant's note, or dropping a grant
+  alongside the one added are all refused;
+- no `soul` is sent. The approved edit is one line of one manifest; a soul document riding
+  along is a second change nobody answered.
+
+Matching is on what the manifest **says**, not on its bytes: field order and comments may
+differ, values may not. The write then lands with the revision of the declaration the match
+was made against, so it cannot apply to bytes nobody compared.
+
+The commit is authored `<resident> (session) <<resident>-session@localhost>` like every
+other session write, and the response carries what the write was made against:
+
+```json
+{"request_id": "…", "status": "accepted", "revision": "sha256:…",
+ "commit": {"committed": true, "sha": "a1b2c3d", "…": "…"},
+ "approval": {"request_id": "5f0e…",
+              "act": "grant skill 'series-detection' to 'shelf-worker'"}}
+```
+
+`approval` is `null` for a human caller. A human sending `approval_request_id` is `422
+approval_not_needed` rather than obeyed: they *are* the approval, and steward will not put
+a spent mark against a decision nobody used.
+
+**A refusal gives the decision back.** The claim is taken before the write and released if
+the write refuses — a manifest the fleet will not validate must not cost a human's yes.
+What it does not survive is the process dying mid-write, which fails closed: the decision
+reads as spent, nothing was written, and the honest next move is to ask again.
 
 ### `GET /skills/{name}` · `POST /skills` · `PUT /skills/{name}`
 

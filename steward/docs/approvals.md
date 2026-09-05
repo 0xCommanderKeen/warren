@@ -179,6 +179,78 @@ beyond it. A decision recorded by `expiry` reads as the deny it is.
 > one turn — is not implemented. The store and the events already support it; issue #10
 > asks for both, and this is the half that works for `claude -p` today.
 
+## An approval that opens a door
+
+Almost every decision authorises something the *resident* then does with its own tools:
+steward records the yes, hands it back in the next preamble, and never hears what happened.
+One decision is different. A session holding the `residents.grant_skill` manifest grant may
+present an approved request id to `PUT /residents/{id}/declaration`, and steward performs
+the edit itself (warren#437).
+
+This exists because putting a skill on a resident's manifest is an edit of the rules that
+resident is held to — human-only by design, and not something any manifest key should buy
+outright. So the grant opens the *route* and a human's yes opens the *write*:
+
+```
+                      Karen's session                    Miha
+raises  <needs-human action="grant_skill" …>  ──────────▶  approves in Townhall
+                             │                                  │
+next wake-up ◀── DECISIONS SINCE YOU LAST RAN ──────────────────┘
+        │
+        └── PUT /residents/shelf-worker/declaration  { text, approval_request_id }
+                             │
+                    steward: is this the edit that was approved?
+                             ├── no  → 403 edit_not_approved, nothing written
+                             └── yes → claim the decision, write, commit as karen (session)
+```
+
+The knock's detail is what the write is checked against, so it names the two things the
+edit is made of:
+
+```
+<needs-human action="grant_skill" expires-in="24h" options="approve,deny">
+{"resident": "shelf-worker", "skill": "series-detection",
+ "note": "Reads the series index so the shelf worker stops guessing from filenames."}
+</needs-human>
+```
+
+`options` deliberately omits `edit`: an edited detail is a human writing a *different*
+request, and the honest way to grant a different skill is to say so and let the session ask
+about that one.
+
+**The detail is the diff**, for this shape, because the diff *is* one grant: `resident` and
+`skill` are the change, and steward matches on those two exactly, so a knock that misspells
+either is refused at the write door rather than granting something else. `note` is what
+makes it answerable — everything else in the detail is ignored. A shape whose diff was more
+than one line would have to carry it, and would be the point at which the knock stops being
+readable in a notification.
+
+**The check is about the approval, not about skills.** What a caller presents is a decision
+plus a candidate document, and the question steward answers is whether the second is what
+the first says. `steward.approved_edits` knows one edit shape while answering it; a second
+shape — a budget raised, a routine's schedule moved — is another entry in `EDIT_SHAPES`,
+not another door. [docs/api.md](api.md#an-approved-declaration-edit) has the field-by-field
+definition of "matches" and every refusal.
+
+**One approval is one edit.** The decision is *claimed* before the tree is touched and
+released if the write fails for any reason the authoring seam rolls back — a validation
+refusal, a git call that died — so a manifest typo does not cost a human's yes while two
+sessions presenting the same id cannot both write. The process dying outright is the one
+uncovered case, and it fails closed: the decision reads as spent, nothing was written. The mark is on the approval row —
+`consumed_at` and `consumed_by`, visible in `GET /approvals/{id}` — which is what makes
+"what did that yes actually authorise, and was it used" an answerable question.
+
+**`grant_skill` is exempt from the repeat-deny guard**, alongside `unreadable_escalation`.
+The guard fingerprints `(resident, action)`, and every ask to grant a skill wears the same
+action name: one no to *grant series-detection to shelf-worker* would otherwise silently
+answer *grant read-invoices to hob* for the rest of the window, with nobody's phone
+buzzing to say so.
+
+> **Answering this from a chat button stays out of scope.** An approval is an
+> authorisation, and "who pressed it" is a security question a v0 chat channel has no
+> honest answer to — see [docs/chat.md](chat.md#approval-buttons-belong-to-approvals). Miha
+> answers in Townhall, and Karen's session reads the decision on its next wake-up.
+
 ## What the charter has to do with it
 
 The charter is where gating is declared. Its `rules` and `escalation` block say which

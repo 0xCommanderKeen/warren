@@ -89,6 +89,7 @@ __all__ = [
     "DEFAULT_EXPIRES_IN_S",
     "DEFAULT_REPEAT_DENY_WINDOW_H",
     "DETAIL_MAX_CHARS",
+    "GRANT_SKILL_ACTION",
     "MAX_EXPIRES_IN_S",
     "REPEAT_DENY_WINDOW_ENV",
     "REPEAT_GUARD_EXEMPT_ACTIONS",
@@ -130,6 +131,13 @@ DETAIL_MAX_CHARS = 8000
 #: The action recorded when a session tried to escalate and steward could not read it.
 UNREADABLE_ACTION = "unreadable_escalation"
 
+#: The action a knock names when it asks for a skill to be put on a resident's manifest
+#: (warren#437). The vocabulary of actions lives here with the rest of the block grammar,
+#: and :mod:`steward.approved_edits` — which decides what an approved one *opens* — reads
+#: it from here rather than the other way round, for the reason the exempt set below gives
+#: about :mod:`steward.delegation`: this module is under the policy layers, not beside them.
+GRANT_SKILL_ACTION = "grant_skill"
+
 #: How long a deny goes on answering for the same resident and action (steward #33). Half
 #: a day covers the wake-ups between one night's sleep and the next without turning a
 #: single no into a permanent ban: a resident that still wants the thing tomorrow may ask
@@ -146,7 +154,15 @@ REPEAT_DENY_WINDOW_ENV = "STEWARD_REPEAT_DENY_WINDOW_H"
 #: exactly the case this module promises never to swallow. :mod:`steward.delegation` has
 #: two catch-alls of its own and keeps them out of the guard the other way, by knocking
 #: rather than raising, because approvals cannot import it.
-REPEAT_GUARD_EXEMPT_ACTIONS = frozenset({UNREADABLE_ACTION})
+#:
+#: :data:`GRANT_SKILL_ACTION` is the third, and a catch-all of the same kind (warren#437):
+#: every ask to put a skill on a manifest carries the same action and differs only in its
+#: detail, so one no to *grant series-detection to shelf-worker* would silently answer
+#: *grant read-invoices to hob* for the rest of the window — the second question swallowed
+#: unheard, and no phone buzzing to say so. The action is also the one steward's write door
+#: opens against, which makes it the one action where a swallowed ask costs a write nobody
+#: refused on the merits.
+REPEAT_GUARD_EXEMPT_ACTIONS = frozenset({UNREADABLE_ACTION, GRANT_SKILL_ACTION})
 
 ACTION_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _BLOCK = re.compile(

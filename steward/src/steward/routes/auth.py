@@ -38,20 +38,39 @@ SESSION_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 SESSION_WRITE_PATHS = frozenset({"/delegate"})
 
 
+#: One-resident routes a manifest grant can open, by ``(method, action)`` — the action is
+#: the path's last segment after ``/residents/{id}/``. Listed rather than branched so that
+#: adding a door is one line and the shape check (exactly one id, no slash) stays shared.
+_RESIDENT_ACTION_GRANTS: dict[tuple[str, str], SessionGrant] = {
+    ("POST", "provision"): SessionGrant.RESIDENTS_DRY_RUN,
+    ("POST", "rehearse"): SessionGrant.RESIDENTS_REHEARSE,
+    # The grant gets the session as far as the route and no further (warren#437). What
+    # actually opens this door is an approved, unspent request naming this exact edit,
+    # which only the route can check because only the route has been handed the
+    # candidate document. The gate's job is to stop a session that holds no grant at
+    # all from reaching a body parse.
+    ("PUT", "declaration"): SessionGrant.RESIDENTS_GRANT_SKILL,
+}
+
+
+def _resident_action_grant(method: str, path: str) -> SessionGrant | None:
+    """Name the grant for ``/residents/{id}/<action>`` when the id is one clean segment."""
+    if not path.startswith("/residents/"):
+        return None
+    resident_id, sep, action = path.removeprefix("/residents/").partition("/")
+    if not sep or not resident_id or "/" in action:
+        return None
+    return _RESIDENT_ACTION_GRANTS.get((method, action))
+
+
 #: Granted write paths, matched after the permanent session-safe allowlist above. A prefix
 #: ends in ``/`` so ``/skills-not-really`` can never inherit the skill-library door.
 def _session_grant_for(method: str, path: str) -> SessionGrant | None:
     """Name the grant for one exact method/route shape, or keep the door closed."""
     if method == "POST" and path == "/residents":
         return SessionGrant.RESIDENTS_DECLARE
-    if method == "POST" and path.startswith("/residents/") and path.endswith("/provision"):
-        resident_id = path.removeprefix("/residents/").removesuffix("/provision")
-        if resident_id and "/" not in resident_id:
-            return SessionGrant.RESIDENTS_DRY_RUN
-    if method == "POST" and path.startswith("/residents/") and path.endswith("/rehearse"):
-        resident_id = path.removeprefix("/residents/").removesuffix("/rehearse")
-        if resident_id and "/" not in resident_id:
-            return SessionGrant.RESIDENTS_REHEARSE
+    if (grant := _resident_action_grant(method, path)) is not None:
+        return grant
     if method == "POST" and path == "/skills":
         return SessionGrant.SKILLS_WRITE
     if method == "PUT" and path.startswith("/skills/"):
@@ -74,7 +93,9 @@ _SESSION_REFUSALS: tuple[tuple[str, str], ...] = (
         (
             "a resident's charter, skills and routines are written about it rather than by "
             "it; a session that could edit its own declaration would be choosing its own "
-            "rules, which is the one thing the declaration exists to stop"
+            "rules, which is the one thing the declaration exists to stop. The "
+            "residents.grant_skill grant opens this door for one skill line at a time, and "
+            "only against an approval a human answered yes to"
         ),
     ),
     (
