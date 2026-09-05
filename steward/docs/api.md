@@ -48,7 +48,10 @@ a village that shows work the fleet has not confirmed is a village that lies.
 The other half of that promise is that **a request that cannot work fails immediately
 and specifically** rather than queueing into silence. Unknown resident, unknown
 routine, routine disabled in the manifest, a run already in flight — each is its own
-status and its own error code, and nothing is written for a request that was refused.
+status and its own error code. Most refusals leave no request row. A run-now that
+reaches submission is logged first, so an overlapping run refused with
+`409 already_running` retains a row with outcome `refused: already running`.
+Authentication failures also produce bounded aggregate summaries in the request log.
 
 Every accepted mutating request is logged to `.steward/state/steward.db` with its
 outcome, so a queued action that later failed is traceable. A failure surfaces as a
@@ -1095,7 +1098,7 @@ exactly as in `GET /residents`.
 
 ### `GET /requests` · `GET /requests/{request_id}`
 
-Accepted requests, and what became of them. This is the endpoint that makes *accepted*
+Logged requests and authentication summaries. This is the endpoint that makes *accepted*
 survivable as an answer: everything above returns a `request_id` and refuses to claim an
 effect, and this is where the effect eventually shows up.
 
@@ -1108,10 +1111,12 @@ $ curl -sS -H "Authorization: Bearer $STEWARD_TOKEN" \
 ```
 
 `outcome` is the whole point. A run-now is written as `queued` and becomes `ran`,
-`failed`, `skipped: <reason>`, or `refused: already running` when the fire it stands for
-finishes. A posted job is `posted`, a decision `recorded`, a declaration `declared`, a
-handoff `delegated`. A client polls one of these rather than deciding on its own that a
-202 went well.
+`failed`, or `skipped: <reason>` when the fire it stands for finishes. If submission
+refuses an overlapping run, the row instead becomes `refused: already running` before
+the handler returns `409 already_running`; no new run starts. The refusal response
+has no `request_id`, but the row is visible in `GET /requests`. A posted job is
+`posted`, a decision `recorded`, a declaration `declared`, a handoff `delegated`. A client
+polls one of these rather than deciding on its own that a 202 went well.
 
 `GET /requests` is the log, **newest first**, with `?limit=` (default 50, clamped to
 1–500). `?resident=hob` filters by the exact resident segment of `/residents/{id}/…`
@@ -1121,9 +1126,9 @@ SQLite; `/routines` separately looks up only the newest request for each declare
 The complete audit trail remains available to deliberate Store callers through
 `export_request_history()` (oldest first).
 
-`404 unknown_request` for an id nobody logged — and only *accepted* mutating
-requests are logged, so a refused one has no id to look up. That is the same promise as
-everywhere else here: nothing is written for a request that was refused.
+`404 unknown_request` means that id has no log entry. Most refused calls have no
+individual entry; the overlapping run-now exception above does. Authentication
+failures appear as aggregate `AUTH` summaries rather than individual receipts.
 
 ## Storage
 
