@@ -25,6 +25,7 @@ the API is not.
 """
 
 import copy
+import json
 import subprocess
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -34,8 +35,9 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from jsonschema import Draft202012Validator
 
-from conftest import ResidentWriter, valid_manifest
+from conftest import REPO_ROOT, ResidentWriter, valid_manifest
 from steward import events as ev
 from steward.api import ApiConfig, create_app, latest_run_requests
 from steward.deploy import DeployTarget
@@ -48,6 +50,7 @@ from steward.nursery import (
 )
 from steward.runners import MockRunner
 from steward.scheduler import STALE_TICK_AFTER_S, SchedulerState, load_scheduled
+from steward.session_auth import new_session_credential
 from steward.store import RequestRecord, Store
 
 TOKEN = "a-shared-secret"
@@ -620,3 +623,150 @@ def test_raising_a_retired_resident_is_refused_by_its_own_code(panel: PanelFacto
     assert response.status_code == 409
     assert response.json()["detail"]["error"] == "resident_retired"
     assert "retired: false" in response.json()["detail"]["message"]
+
+
+def test_run_receipt_and_request_ledger_validate_exported_contract(panel: PanelFactory) -> None:
+    """The accepted id survives through both ledger reads, with a checkable envelope."""
+    document = json.loads((REPO_ROOT / "docs/openapi.json").read_text(encoding="utf-8"))
+    built = panel()
+    path = "/residents/{resident_id}/routines/{routine_id}/run"
+    accepted = built.client.post("/residents/test-agent/routines/daily-summary/run")
+    assert accepted.status_code == 202
+    request_id = accepted.json()["request_id"]
+    for route, method, response in [
+        (path, "post", accepted),
+        ("/requests/{request_id}", "get", built.client.get(f"/requests/{request_id}")),
+        ("/requests", "get", built.client.get("/requests")),
+    ]:
+        schema = document["paths"][route][method]["responses"][str(response.status_code)][
+            "content"
+        ]["application/json"]["schema"]
+        assert "$ref" in schema, f"{route} still publishes an unchecked dictionary"
+        validator = Draft202012Validator({**schema, "components": document["components"]})
+        validator.validate(response.json())
+        malformed = dict(response.json())
+        del malformed["requests" if route == "/requests" else "request_id"]
+        assert not validator.is_valid(malformed)
+
+
+def test_routine_rows_validate_before_and_after_a_run(
+    panel: PanelFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "never.json"))
+    document = json.loads((REPO_ROOT / "docs/openapi.json").read_text(encoding="utf-8"))
+    schema = document["paths"]["/routines"]["get"]["responses"]["200"]["content"][
+        "application/json"
+    ]["schema"]
+    assert "$ref" in schema, "routine rows still have no published fields"
+    validator = Draft202012Validator({**schema, "components": document["components"]})
+    built = panel()
+    before = built.client.get("/routines").json()
+    validator.validate(before)
+    assert before["scheduler"]["alive"] is None
+    assert before["routines"][0]["last_request"] is None
+    assert before["routines"][0]["last_run"] is None
+    assert before["routines"][0]["journal"] is None
+    assert built.client.post("/residents/test-agent/routines/daily-summary/run").status_code == 202
+    built.client.app.state.runs.wait(timeout=10.0)
+    after = built.client.get("/routines").json()
+    validator.validate(after)
+    assert after["routines"][0]["last_request"]["outcome"] == "ran"
+    assert after["routines"][0]["last_run"]["trigger"] == "manual"
+    del after["routines"][0]["last_run"]
+    assert not validator.is_valid(after), "nullable must not mean absent"
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "status", "code"),
+    [
+        ("get", "/requests/missing", 404, "unknown_request"),
+        ("post", "/residents/test-agent/routines/missing/run", 404, "unknown_routine"),
+        ("post", "/residents/missing/routines/daily-summary/run", 404, "unknown_resident"),
+        ("post", "/residents/test-agent/routines/daily-summary/run", 409, "routine_disabled"),
+    ],
+)
+def test_run_path_refusals_validate_exported_contract(
+    panel: PanelFactory, method: str, path: str, status: int, code: str
+) -> None:
+    data = valid_manifest()
+    data["routines"][0]["enabled"] = False
+    built = panel(manifest=data)
+    response = built.client.request(method, path)
+    assert response.status_code == status
+    assert response.json()["detail"]["error"] == code
+    assert "request_id" not in response.json()
+    route = (
+        "/requests/{request_id}"
+        if method == "get"
+        else ("/residents/{resident_id}/routines/{routine_id}/run")
+    )
+    document = json.loads((REPO_ROOT / "docs/openapi.json").read_text(encoding="utf-8"))
+    schema = document["paths"][route][method]["responses"][str(status)]["content"][
+        "application/json"
+    ]["schema"]
+    validator = Draft202012Validator({**schema, "components": document["components"]})
+    validator.validate(response.json())
+    assert not validator.is_valid({"detail": {"error": code}})
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "route"),
+    [
+        ("GET", "/requests", "/requests"),
+        ("GET", "/requests/missing", "/requests/{request_id}"),
+        ("GET", "/routines", "/routines"),
+        (
+            "POST",
+            "/residents/test-agent/routines/daily-summary/run",
+            "/residents/{resident_id}/routines/{routine_id}/run",
+        ),
+    ],
+)
+def test_typed_path_auth_refusals_match_the_artifact(
+    panel: PanelFactory, method: str, path: str, route: str
+) -> None:
+    built = panel()
+    response = anonymous(built).request(method, path)
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+    document = json.loads((REPO_ROOT / "docs/openapi.json").read_text(encoding="utf-8"))
+    schema = document["paths"][route][method.lower()]["responses"]["401"]["content"][
+        "application/json"
+    ]["schema"]
+    Draft202012Validator({**schema, "components": document["components"]}).validate(response.json())
+
+
+def test_session_run_refusal_and_invalid_limit_keep_distinct_contracts(panel: PanelFactory) -> None:
+    built = panel()
+    credential = new_session_credential()
+    assert built.store.open_run(
+        run_id="live-run",
+        kind="routine",
+        trigger="schedule",
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        ref="daily-summary",
+        resident_id="test-agent",
+        session_credential=credential,
+        timeout_s=900.0,
+    )
+    refused = built.client.post(
+        "/residents/test-agent/routines/daily-summary/run",
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+    assert refused.status_code == 403
+    assert refused.json()["detail"]["error"] == "session_credential_forbidden"
+    invalid = built.client.get("/requests?limit=not-a-number")
+    assert invalid.status_code == 422
+    assert isinstance(invalid.json()["detail"], list)
+    document = json.loads((REPO_ROOT / "docs/openapi.json").read_text(encoding="utf-8"))
+    for method, route, response in [
+        ("post", "/residents/{resident_id}/routines/{routine_id}/run", refused),
+        ("get", "/requests", invalid),
+    ]:
+        schema = document["paths"][route][method]["responses"][str(response.status_code)][
+            "content"
+        ]["application/json"]["schema"]
+        Draft202012Validator({**schema, "components": document["components"]}).validate(
+            response.json()
+        )

@@ -14,18 +14,16 @@
  * `.github/workflows/townhall.yml` lists the file among this suite's paths, or the
  * contract would only be checked when townhall itself changed.
  *
- * What is checkable today, and what is not: Steward's request models are real pydantic
- * models with `additionalProperties: false`, so the bodies this console sends are pinned in
- * both directions — a field it invents and a field Steward renames both fail here. Its
- * handlers return `dict[str, Any]`, so every response reaches the document as an open
- * object and pins nothing. Steward's `test_the_document_records_that_responses_are_untyped`
- * is the tripwire for that: it fails the moment a handler declares a response model, and
- * says to come back here and validate these fixtures against the shape that just appeared.
+ * The run-now receipt, request ledger and routine list publish closed response envelopes.
+ * Their fixtures below share the rendering suite's data and pass through the real client.
+ * Remaining response endpoints are inventoried in steward/docs/response-migration.md.
  */
 
 import { readFileSync, readdirSync } from "node:fs";
 import Ajv2020 from "ajv/dist/2020.js";
 import { describe, expect, it, vi } from "vitest";
+import { ROUTINE, ROUTINES, RUN_RECEIPT, RUN_REQUEST } from "./run-contract-fixtures.js";
+import { confirmRun } from "../console/ledger.jsx";
 import { createStewardClient } from "./client.js";
 import { createOperatorCredential } from "./credential.js";
 import { complaints, declarationBody } from "../pages/ResidentNew.jsx";
@@ -296,30 +294,76 @@ describe("the bodies the console sends are bodies Steward accepts", () => {
 
 /* -- what the client reads back -------------------------------------------------------- */
 
+function validateResponse(method, path, status, answer) {
+  const schema = openapi.paths[path][method.toLowerCase()].responses[status]
+    .content["application/json"].schema;
+  expect(schema.$ref, `${method} ${path} must name a response model`).toBeDefined();
+  const validate = ajv.compile({ ...schema, components: openapi.components });
+  return validate(answer) ? [] : validate.errors;
+}
+
 describe("the answers the console renders", () => {
-  it("validates against the response schemas Steward publishes", () => {
-    // Weak today, and deliberately wired anyway: every handler is annotated
-    // `dict[str, Any]`, so each success response reaches the document as an open object
-    // and anything validates. Steward's own contract test fails the moment that stops being true and
-    // sends whoever changed it here — at which point these fixtures start meaning
-    // something without anyone having to build this seam under time pressure.
-    const answers = [
-      ["PUT", "/residents/{resident_id}/declaration", {
-        id: "hob", status: "written", commit: { committed: true, sha: "abc123def456" },
-      }],
-      ["POST", "/jobs", { status: "accepted", request_id: "r-1", task_id: "t-1", message: "queued" }],
-      ["GET", "/residents", { residents: [{ id: "hob", name: "Hob" }] }],
-    ];
+  it("validates the routine rows used by the rendering suite, including nullable fields", () => {
+    for (const answer of [
+      ROUTINES,
+      { ...ROUTINES, routines: [] },
+      { ...ROUTINES, scheduler: { alive: null, last_tick: null, stale_after_s: 360 },
+        routines: [{ ...ROUTINE, anchor: null, next_fire: null, enabled: false,
+          last_run: null, last_request: null }] },
+      { ...ROUTINES, routines: [{ ...ROUTINE, last_request: RUN_REQUEST }] },
+    ]) expect(validateResponse("GET", "/routines", 200, answer)).toEqual([]);
 
-    for (const [method, path, answer] of answers) {
-      // One success code per route, and it is not always 200: an acknowledgement is a 202
-      // and a creation a 201, because Steward answers for the request rather than the effect.
-      const responses = openapi.paths[path][method.toLowerCase()].responses;
-      const success = Object.keys(responses).filter((code) => code.startsWith("2"));
-      expect(success, `${method} ${path} declares no success response`).toHaveLength(1);
+    const missing = structuredClone(ROUTINES);
+    delete missing.routines[0].last_run;
+    expect(validateResponse("GET", "/routines", 200, missing)).not.toEqual([]);
+    const wrong = structuredClone(ROUTINES);
+    wrong.scheduler.alive = "yes";
+    expect(validateResponse("GET", "/routines", 200, wrong)).not.toEqual([]);
+  });
 
-      const schema = responses[success[0]].content["application/json"].schema;
-      expect(ajv.validate(schema, answer), `${method} ${path}: ${ajv.errorsText()}`).toBe(true);
-    }
+  it("carries an accepted run through the client and polls its typed ledger outcome", async () => {
+    let record = structuredClone(RUN_REQUEST);
+    const fetch = vi.fn(async (path, init) => {
+      const receipt = init.method === "POST";
+      const body = receipt ? RUN_RECEIPT : record;
+      expect(validateResponse(receipt ? "POST" : "GET",
+        receipt ? "/residents/{resident_id}/routines/{routine_id}/run" : "/requests/{request_id}",
+        receipt ? 202 : 200, body)).toEqual([]);
+      return { status: receipt ? 202 : 200, ok: true, text: async () => JSON.stringify(body) };
+    });
+    const client = createStewardClient({ credential: held(), fetch });
+    const accepted = await client.runRoutine("hob", "daily-summary");
+    const confirm = confirmRun(client, accepted.request_id);
+    expect(await confirm()).toBeNull();
+    record = { ...record, outcome: "ran", detail: { ...record.detail, run_id: "run-7" } };
+    expect(await confirm()).toEqual({ state: "confirmed", why: "steward's log: ran (run run-7)." });
+    record = { ...record, outcome: "failed", detail: { routine: "hob/daily-summary", error: "timeout" } };
+    expect(await confirm()).toEqual({ state: "failed", why: "steward's log: failed — timeout" });
+    expect(fetch.mock.calls.at(-1)[0]).toBe("/requests/request-7");
+    expect(validateResponse("GET", "/requests", 200, { requests: [record] })).toEqual([]);
+    expect(validateResponse("GET", "/requests/{request_id}", 200,
+      { ...RUN_REQUEST, detail: {} })).toEqual([]);
+    const missing = { ...RUN_REQUEST };
+    delete missing.outcome;
+    expect(validateResponse("GET", "/requests/{request_id}", 200, missing)).not.toEqual([]);
+    expect(validateResponse("GET", "/requests/{request_id}", 200,
+      { ...RUN_REQUEST, detail: null })).not.toEqual([]);
+    expect(validateResponse("POST", "/residents/{resident_id}/routines/{routine_id}/run", 202,
+      { ...RUN_RECEIPT, status: "ran" })).not.toEqual([]);
+  });
+
+  it.each([
+    ["GET", "/requests/{request_id}", 404, "unknown_request"],
+    ["POST", "/residents/{resident_id}/routines/{routine_id}/run", 409, "routine_disabled"],
+    ["POST", "/residents/{resident_id}/routines/{routine_id}/run", 403, "session_credential_forbidden"],
+    ["GET", "/routines", 401, "unauthorized"],
+  ])("validates and preserves a %s %s %s refusal", async (method, path, status, code) => {
+    const answer = { detail: { error: code, message: "Steward refused this request." } };
+    expect(validateResponse(method, path, status, answer)).toEqual([]);
+    expect(validateResponse(method, path, status, { detail: { error: code } })).not.toEqual([]);
+    const client = createStewardClient({ credential: held(), fetch: async () => ({
+      status, ok: false, text: async () => JSON.stringify(answer),
+    }) });
+    await expect(client.call(path, { method })).rejects.toMatchObject({ status, code, raw: answer });
   });
 });
