@@ -39,15 +39,10 @@ from typing import Any
 
 import yaml
 
-from steward.manifest import (
-    Diagnostic,
-    ResidentManifest,
-    Severity,
-    closest_match,
-    scan_for_credentials,
-    scan_text_for_secrets,
-    split_frontmatter,
-)
+from steward.credential_policy import scan_for_credentials, scan_text_for_secrets
+from steward.diagnostics import Diagnostic, Severity, closest_match
+from steward.manifest_models import ResidentManifest
+from steward.soul import split_frontmatter
 
 __all__ = [
     "BODY_MAX_CHARS",
