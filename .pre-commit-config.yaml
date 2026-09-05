@@ -1,0 +1,23 @@
+repos:
+  - repo: local
+    hooks:
+      - id: steward-validate
+        name: steward validate
+        language: system
+        # Validate the complete checked-in tree, including deletions and changes to
+        # validator code or dependencies. Ignore an operator's alternate residents path.
+        entry: env STEWARD_RESIDENTS=residents uv run --directory steward --locked steward validate --skills skills
+        pass_filenames: false
+        always_run: true
+      - id: steward-ruff-format
+        name: steward ruff format
+        language: system
+        entry: uv run --directory steward --locked ruff format --check .
+        files: ^(steward/|\.pre-commit-config\.yaml$)
+        pass_filenames: false
+      - id: steward-ruff-check
+        name: steward ruff check
+        language: system
+        entry: uv run --directory steward --locked ruff check .
+        files: ^(steward/|\.pre-commit-config\.yaml$)
+        pass_filenames: false
