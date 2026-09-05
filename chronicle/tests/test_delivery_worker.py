@@ -221,6 +221,17 @@ class DeliveryWorkerTests(unittest.TestCase):
         self.worker().tick()
         self.assertEqual(2, len(self.accepted))
 
+    def test_presence_is_only_sent_to_its_observing_hooks_destinations(self):
+        delivery.enqueue(self.event(1), session_id="session")
+        reports = []
+        def transport(url, path, body, token):
+            if path == "/telemetry":
+                reports.append(body)
+            return None
+        with patch.dict(os.environ, CHRONICLE_URL="http://different-destination"):
+            delivery.DeliveryWorker(transport=transport).tick()
+        self.assertEqual([], reports[0]["presence"])
+
 
 if __name__ == "__main__":
     unittest.main()

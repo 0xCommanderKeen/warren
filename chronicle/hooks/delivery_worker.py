@@ -54,7 +54,13 @@ def enqueue(event, *, session_id=""):
     try:
         if session_id:
             presence.observe(
-                os.path.join(emit.LOG_DIR, "latest-presence.json"), event, session_id
+                os.path.join(emit.LOG_DIR, "latest-presence.json"),
+                event,
+                session_id,
+                targets=[
+                    emit._target_id(url)
+                    for url, _ in primary + later + mirrors + later_mirrors
+                ],
             )
         mirror_records = emit._stamp_enqueue_order(
             [
@@ -228,7 +234,18 @@ class DeliveryWorker:
         error = self.transport(
             url,
             "/telemetry",
-            dict(health=health, presence=list(latest.get("presence", {}).values())),
+            dict(
+                health=health,
+                presence=[
+                    {
+                        key: value
+                        for key, value in observation.items()
+                        if key != "targets"
+                    }
+                    for observation in latest.get("presence", {}).values()
+                    if target in observation.get("targets", [])
+                ],
+            ),
             token,
         )
         if error:

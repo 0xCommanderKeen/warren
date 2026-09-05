@@ -80,7 +80,7 @@ def admit(state, observation, producer=""):
     return True
 
 
-def observe(path, event, session_id):
+def observe(path, event, session_id, targets=()):
     kind = event["type"]
     if kind not in ACTIVE and kind not in STATES:
         return
@@ -103,6 +103,7 @@ def observe(path, event, session_id):
         ).timestamp()
         sequence = max(time.time_ns(), previous.get("sequence", 0) + 1)
         observation = dict(
+            targets=list(targets),
             agent_id=event["agent_id"],
             session_id=session_id,
             sequence=sequence,
