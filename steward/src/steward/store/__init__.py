@@ -33,6 +33,7 @@ from steward.store.records import STATUS_PENDING as STATUS_PENDING
 from steward.store.records import STATUS_RESOLVED as STATUS_RESOLVED
 from steward.store.records import new_id as new_id
 from steward.store.requests import _RequestTables
+from steward.store.runs import _RunTables
 
 __all__ = [
     "APPROVAL_DECISIONS",
@@ -64,5 +65,5 @@ __all__ = [
 ]
 
 
-class Store(_ApprovalTables, _BoardTables, _LegacyTables, _RequestTables, _Connection):
+class Store(_RunTables, _ApprovalTables, _BoardTables, _LegacyTables, _RequestTables, _Connection):
     """The one durable memory the API writes to. Safe to share across threads."""
