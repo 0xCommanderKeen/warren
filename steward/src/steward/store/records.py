@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from steward.claims import ResidentClaim
-from steward.scheduler import default_state_path
+from steward.state_paths import default_state_path
 
 #: What a human may answer a gated action with. ``edit`` carries a modified detail.
 APPROVAL_DECISIONS = ("approve", "deny", "edit")
