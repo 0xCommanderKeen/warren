@@ -11,12 +11,12 @@ function restoreLayout() {
 }
 
 /** Accessible occupant navigation is supplied by the room's surrounding panel. */
-export function InteriorWorld({ building, agents, paused = false, quality = "high", cameraCommand, focusAgentId = null, onSelect, onError }) {
+export function InteriorWorld({ building, agents, villagers = agents, paused = false, quality = "high", cameraCommand, focusAgentId = null, onSelect, onError }) {
   const host = useRef(null);
   const renderer = useRef(null);
   const layout = useRef(null);
   if (!layout.current) layout.current = restoreLayout();
-  const room = useMemo(() => layout.current.update(building.id, agents), [building.id, agents]);
+  const room = useMemo(() => layout.current.update(building.id, agents, villagers), [building.id, agents, villagers]);
   useEffect(() => {
     try {
       const saved = layout.current.serialize();
