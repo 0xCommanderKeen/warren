@@ -871,6 +871,10 @@ async def ingest_event(
     event_wire: ProtocolEvent,
     x_burrow_delivery_id: str | None = Header(None),
 ):
+    return await _ingest_record(request, event_wire, x_burrow_delivery_id)
+
+
+async def _ingest_record(request, event_wire, x_burrow_delivery_id, *, project=True):
     event = event_wire.model_dump(mode="python", exclude_unset=True)
     error = validate_event(event)
     if error:
@@ -887,7 +891,8 @@ async def ingest_event(
         return _error(503, "notification queue unavailable")
     if await anyio.to_thread.run_sync(claim_knock, event, runtime):
         await anyio.to_thread.run_sync(notify_async, event, runtime)
-    await anyio.to_thread.run_sync(runtime.state_coordinator.evaluate)
+    if project:
+        await anyio.to_thread.run_sync(runtime.state_coordinator.evaluate)
     return Response(status_code=204)
 
 
@@ -928,9 +933,12 @@ async def ingest_batch(request: Request, batch: DeliveryBatch):
         if error:
             return _error(400, error)
     for record in batch.records:
-        response = await ingest_event(request, record.event, record.delivery_id)
+        response = await _ingest_record(request, record.event, record.delivery_id, project=False)
         if response.status_code != 204:
             return response
+    # One projection per batch keeps server CPU work from multiplying the network
+    # budget. Concurrent snapshot readers may still observe a committed prefix.
+    await anyio.to_thread.run_sync(_runtime(request).state_coordinator.evaluate)
     return Response(status_code=204)
 
 
