@@ -148,9 +148,8 @@ class ResidentClaim:
 class ClaimStore(Protocol):
     """The conditional writes a cross-process claim is made of.
 
-    A structural protocol rather than an import of :class:`steward.store.Store`, for the
-    usual reason in this codebase and one extra: ``Store`` imports the scheduler and the
-    scheduler needs this module. What satisfies it is that ``Store``.
+    A structural protocol satisfied by :class:`steward.store.Store`. The store imports
+    claim records from this module, so the protocol also keeps that dependency one-way.
     """
 
     def claim_resident(  # noqa: PLR0913 — one parameter per fact the claim records

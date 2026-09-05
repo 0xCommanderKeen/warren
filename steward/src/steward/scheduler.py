@@ -118,6 +118,8 @@ from steward.skills import (
     library_for,
     missing_skills,
 )
+from steward.state_paths import DEFAULT_STATE_PATH, default_state_path
+from steward.state_paths import STATE_ENV as STATE_ENV  # noqa: PLC0414 - compatibility export
 from steward.topology import residents_on_this_burrow
 
 __all__ = [
@@ -151,9 +153,6 @@ __all__ = [
 ]
 
 log = logging.getLogger("steward.scheduler")
-
-DEFAULT_STATE_PATH = Path(".steward/state/scheduler.json")
-STATE_ENV = "STEWARD_STATE"
 
 #: How late a fire may be and still be honest work rather than a back-fill.
 DEFAULT_CATCHUP_S = 300.0
@@ -601,13 +600,6 @@ def scheduler_liveness(state: SchedulerState, now: datetime | None = None) -> di
         "stale_after_s": STALE_TICK_AFTER_S,
         "alive": None if last is None else (moment - last).total_seconds() <= STALE_TICK_AFTER_S,
     }
-
-
-def default_state_path(env: dict[str, str] | None = None) -> Path:
-    """Return ``$STEWARD_STATE``, or ``.steward/state/scheduler.json`` under the cwd."""
-    source = os.environ if env is None else env
-    configured = (source.get(STATE_ENV) or "").strip()
-    return Path(configured).expanduser() if configured else DEFAULT_STATE_PATH
 
 
 def _lock_holder(path: Path) -> str:

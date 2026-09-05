@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Protocol
 from steward import events as ev
 from steward.runners import RunResult
 
-if TYPE_CHECKING:  # Store imports Scheduler, which uses this lifecycle seam.
+if TYPE_CHECKING:  # Store's claim records depend on this lifecycle seam.
     from steward.store import JobRecord, OpenRun
 
 log = logging.getLogger("steward.run_lifecycle")
