@@ -452,10 +452,8 @@ def validate_skill(
     """
     text = document.text()
     source = skills_dir / document.name / SKILL_FILENAME
-    # Parse what will actually be written rather than what was asked for. `Skill.document`
-    # builds frontmatter with f-strings, so a description carrying a colon or a newline
-    # renders into YAML that means something else — a round trip is the only honest check
-    # that the bytes landing on disk say what the request said.
+    # Validate the serialized document through the same parser the library uses, so
+    # the bytes landing on disk satisfy its field, size, and credential checks.
     skill, diagnostics = parse_skill(text, source, document.name)
     if skill is None:
         raise AuthoringError(

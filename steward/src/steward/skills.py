@@ -122,10 +122,19 @@ class Skill:
         Rendered rather than copied byte-for-byte so what a session loads from disk is
         exactly what steward parsed and validated — one representation, two readers.
         """
-        frontmatter = [f"name: {self.name}", f"description: {self.description}"]
+        frontmatter: dict[str, str | bool] = {
+            "name": self.name,
+            "description": self.description,
+        }
         if self.default:
-            frontmatter.append("defaults: true")
-        return "---\n" + "\n".join(frontmatter) + "\n---\n\n" + self.body.strip() + "\n"
+            frontmatter["defaults"] = True
+        return (
+            "---\n"
+            + yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True)
+            + "---\n\n"
+            + self.body.strip()
+            + "\n"
+        )
 
     def render(self) -> str:
         """Render the skill for prompt injection: heading, description, then the body.
@@ -245,10 +254,24 @@ def _frontmatter(text: str, source: Path) -> tuple[Mapping[str, Any] | None, str
                 )
             ],
         )
+    invalid_keys = [key for key in loaded if not isinstance(key, str)]
+    if invalid_keys:
+        return (
+            None,
+            body,
+            [
+                _complain(
+                    source,
+                    "frontmatter",
+                    f"frontmatter keys must be strings; got {invalid_keys!r}",
+                    _FRONTMATTER_EXAMPLE,
+                )
+            ],
+        )
     return loaded, body, []
 
 
-def parse_skill(  # noqa: C901 — one flat branch per field, each with its own diagnostic
+def parse_skill(  # noqa: C901, PLR0912 — flat field checks with their own diagnostics
     text: str, source: Path, expected_name: str | None = None
 ) -> tuple[Skill | None, list[Diagnostic]]:
     """Parse one ``SKILL.md``, returning the skill and every complaint about it.
@@ -278,8 +301,18 @@ def parse_skill(  # noqa: C901 — one flat branch per field, each with its own 
             )
         )
 
-    name = str(frontmatter.get("name") or "").strip()
-    if not name:
+    raw_name = frontmatter.get("name", "")
+    name = raw_name.strip() if isinstance(raw_name, str) else ""
+    if not isinstance(raw_name, str):
+        diagnostics.append(
+            _complain(
+                source,
+                "name",
+                f"name must be a string; got {type(raw_name).__name__}",
+                f"name: {expected_name or 'research'}",
+            )
+        )
+    elif not name:
         diagnostics.append(
             _complain(
                 source, "name", "required field is missing", f"name: {expected_name or 'research'}"
@@ -305,8 +338,18 @@ def parse_skill(  # noqa: C901 — one flat branch per field, each with its own 
             )
         )
 
-    description = str(frontmatter.get("description") or "").strip()
-    if not description:
+    raw_description = frontmatter.get("description", "")
+    description = raw_description.strip() if isinstance(raw_description, str) else ""
+    if not isinstance(raw_description, str):
+        diagnostics.append(
+            _complain(
+                source,
+                "description",
+                f"description must be a string; got {type(raw_description).__name__}",
+                'description: "How to research honestly: sources, uncertainty, citations."',
+            )
+        )
+    elif not description:
         diagnostics.append(
             _complain(
                 source,

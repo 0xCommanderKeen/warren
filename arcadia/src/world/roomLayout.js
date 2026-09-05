@@ -12,7 +12,7 @@ function valid(value) {
     const ids = new Set(), slots = new Set();
     for (const member of room[1]) {
       if (!Array.isArray(member) || member.length !== 2 || !isId(member[0]) || ids.has(member[0]) ||
-        !Number.isInteger(member[1]) || member[1] < 0 || member[1] >= room[1].length || slots.has(member[1])) return false;
+        !Number.isInteger(member[1]) || member[1] < 0 || member[1] >= LIMIT || slots.has(member[1])) return false;
       ids.add(member[0]); slots.add(member[1]);
     }
   }
@@ -34,11 +34,23 @@ function point(slot) {
 export function createRoomLayout(saved = null) {
   const rooms = new Map((valid(saved) ? saved.rooms : []).map(([id, members]) => [id, new Map(members)]));
   return {
-    update(buildingId, agents) {
+    update(buildingId, agents, villagers = agents) {
       if (!rooms.has(buildingId)) rooms.set(buildingId, new Map());
       const members = rooms.get(buildingId);
       const current = new Map(agents.map(agent => [agent.id, agent]));
-      for (const id of [...current.keys()].sort()) if (!members.has(id)) members.set(id, members.size);
+      if (buildingId === "workshop") {
+        // Room absence is not session departure: resting/knocking agents still
+        // reserve their desk until Chronicle removes them from the live roster.
+        const live = new Set(villagers.map(agent => agent.id));
+        for (const id of members.keys()) if (!live.has(id)) members.delete(id);
+      }
+      const occupied = new Set(members.values());
+      let slot = 0;
+      for (const id of [...current.keys()].sort()) if (!members.has(id)) {
+        while (occupied.has(slot)) slot++;
+        members.set(id, slot);
+        occupied.add(slot);
+      }
       const stations = [...members].map(([id, slot]) => ({ id, slot, position: point(slot), agent: current.get(id) ?? null }));
       const reach = stations.reduce((max, station) => Math.max(max, ...station.position.map(Math.abs)), 0);
       return { stations, width: Math.max(11, reach * 2 + 6), depth: Math.max(11, reach * 2 + 6) };

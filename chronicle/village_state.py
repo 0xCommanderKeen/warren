@@ -11,7 +11,7 @@ import datetime as dt
 import json
 from collections import defaultdict
 
-from identity import fallback_identity
+from identity import allocate_identities, fallback_identity
 from protocol import validate_event
 
 
@@ -170,32 +170,15 @@ def ambient_share(ordinary, ambient, capacity, floor):
 
 def _ambient_tail(records, capacity, floor, is_ambient):
     """Keep the newest of a channel under :func:`ambient_share`, in append order."""
-    ambient = [index for index, record in enumerate(records) if is_ambient(record)]
-    ordinary = [index for index in range(len(records)) if index not in set(ambient)]
+    ambient, ordinary = [], []
+    for index, record in enumerate(records):
+        (ambient if is_ambient(record) else ordinary).append(index)
     take_ordinary, take_ambient = ambient_share(
         len(ordinary), len(ambient), capacity, floor
     )
     kept = set(ordinary[len(ordinary) - take_ordinary :])
     kept.update(ambient[len(ambient) - take_ambient :])
     return [record for index, record in enumerate(records) if index in kept]
-
-
-def _resident_indexes(manifests):
-    exact, projects = {}, {}
-    for manifest in manifests or ():
-        if (
-            not isinstance(manifest, dict)
-            or not manifest.get("valid")
-            or manifest.get("manifest_version") != 1
-        ):
-            continue
-        match = manifest.get("match") or manifest.get("meta") or {}
-        if match.get("agent_id"):
-            exact.setdefault(match["agent_id"], manifest)
-        if match.get("project"):
-            project = match["project"]
-            projects[project] = manifest if project not in projects else None
-    return exact, projects
 
 
 def _event_record(event):
@@ -540,7 +523,6 @@ def project_village(
             ):
                 declaration_by_agent.pop(event["agent_id"], None)
                 retired_agents.add(event["agent_id"])
-    exact, projects = _resident_indexes(resident_manifests)
 
     approvals, approval_by_id = [], {}
     contested_approvals = set()
@@ -749,6 +731,7 @@ def project_village(
     for approval in approvals:
         if approval["state"] == "pending":
             pending_by_agent[approval["agent_id"]].append(approval)
+    candidates, declarations = {}, {}
     for agent_id in sorted(by_agent):
         history = by_agent[agent_id]
         # Three readings of one log: what this villager *did* decides its state and its
@@ -783,24 +766,19 @@ def project_village(
             last["type"] == "session_ended" or age > policy.absent_seconds
         ):
             continue
-        manifest = exact.get(agent_id)
-        has_parent_lineage = any(
-            "parent_agent_id" in item["payload"] for _, item in history
-        )
-        if manifest is None and not has_parent_lineage:
-            manifest = projects.get(last["project"])
-        generated_name, generated_char, generated_accent = fallback_identity(agent_id)
+        candidates[agent_id] = {
+            "project": last["project"],
+            "has_parent_lineage": any(
+                "parent_agent_id" in item["payload"] for _, item in history
+            ),
+        }
         if declaration is not None:
-            declared = declaration["payload"]
-            manifest = {
-                "home": declared["home"],
+            declarations[agent_id] = {
+                "home": declaration["payload"]["home"],
                 "file": None,
-                "meta": {
-                    key: declared[key]
-                    for key in ("name", "char", "accent", "role", "summary")
-                },
+                "meta": declaration["payload"],
             }
-        meta = (manifest or {}).get("meta") or (manifest or {}).get("soul") or {}
+        generated_name, generated_char, generated_accent = fallback_identity(agent_id)
         state = (
             "knocking"
             if pending or last["type"] == "needs_human"
@@ -833,17 +811,16 @@ def project_village(
             )
         ]
         mood = _mood(agent_id, evidence or history, approvals)
-        resident = manifest is not None
         villagers.append(
             {
                 "id": agent_id,
-                "name": meta.get("name", generated_name),
-                "char": meta.get("char", generated_char),
-                "accent": meta.get("accent", generated_accent),
-                "residency": "resident" if resident else "visitor",
-                "home": manifest.get("home") if resident else None,
-                "base": "home" if resident else "lodge",
-                "resident_file": manifest.get("file") if resident else None,
+                "name": generated_name,
+                "char": generated_char,
+                "accent": generated_accent,
+                "residency": "visitor",
+                "home": None,
+                "base": "lodge",
+                "resident_file": None,
                 "state": state,
                 "project": last["project"],
                 "cwd": last.get("cwd", ""),
@@ -861,6 +838,27 @@ def project_village(
                 "mood": mood,
                 "pending_approval_ids": [item["request_id"] for item in pending],
             }
+        )
+
+    allocations = allocate_identities(
+        candidates,
+        [
+            item for item in resident_manifests or ()
+            if isinstance(item, dict) and item.get("valid") is True
+            and item.get("manifest_version") == 1
+        ],
+        declarations,
+    )
+    for villager in villagers:
+        manifest = allocations.get(villager["id"])
+        if manifest is None:
+            continue
+        meta = manifest.get("meta") or manifest.get("soul") or {}
+        for key in ("name", "char", "accent"):
+            villager[key] = meta.get(key, villager[key])
+        villager.update(
+            residency="resident", home=manifest.get("home"),
+            base="home", resident_file=manifest.get("file"),
         )
 
     residents = sorted(

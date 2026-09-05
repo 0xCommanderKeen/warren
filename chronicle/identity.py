@@ -1,4 +1,4 @@
-"""Stable fallback identity for agents without a resident declaration or manifest."""
+"""Fleet resident/home allocation and stable fallback identities."""
 
 import hashlib
 from typing import NamedTuple
@@ -55,3 +55,47 @@ def fallback_identity(agent_id):
         CHARS[number % len(CHARS)],
         ACCENTS[number % len(ACCENTS)],
     )
+
+
+def allocate_identities(candidates, manifests, declarations=None):
+    """Allocate each identity/home once among eligible villagers.
+
+    Declarations win, then exact identities, then unambiguous projects in agent-id
+    order. Retained child lineage forbids project inheritance.
+    Candidates map agent IDs to project and has_parent_lineage.
+    """
+    exact, projects = {}, {}
+    for manifest in manifests or ():
+        match = manifest.get("match") or manifest.get("meta") or {}
+        for index, key in ((exact, match.get("agent_id")), (projects, match.get("project"))):
+            if not key:
+                continue
+            options = index.setdefault(key, [])
+            options.append(manifest)
+
+    def select(options):
+        return options[0] if len(options) == 1 else None
+
+    assigned, used, homes = {}, set(), set()
+
+    def reserve(agent_id, manifest):
+        if manifest is None:
+            return
+        key = manifest.get("file") or id(manifest)
+        home = manifest.get("home")
+        if key in used or (home is not None and home in homes):
+            return
+        assigned[agent_id] = manifest
+        used.add(key)
+        if home is not None:
+            homes.add(home)
+
+    for agent_id in sorted(candidates):
+        reserve(agent_id, (declarations or {}).get(agent_id))
+    for agent_id in sorted(candidates):
+        if agent_id not in assigned:
+            reserve(agent_id, next(iter(exact.get(agent_id, [])), None))
+    for agent_id, candidate in sorted(candidates.items()):
+        if agent_id not in assigned and not candidate["has_parent_lineage"]:
+            reserve(agent_id, select(projects.get(candidate["project"], [])))
+    return assigned

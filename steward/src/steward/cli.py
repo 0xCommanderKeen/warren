@@ -22,6 +22,7 @@ from steward import notify as nf
 from steward.api import (
     DEFAULT_HOST,
     DEFAULT_PORT,
+    RESIDENTS_ENV,
     ApiConfig,
     ApiError,
     create_app,
@@ -132,11 +133,18 @@ _DB_OPTION = click.option(
     default=None,
     help="Jobs, approvals, and the run ledger. Defaults to steward.db beside $STEWARD_STATE.",
 )
+
+
+def default_residents_dir() -> Path:
+    """Read the process's residents tree, falling back to the local development seed."""
+    return Path(os.environ.get(RESIDENTS_ENV, "").strip() or DEFAULT_RESIDENTS_DIR)
+
+
 _RESIDENTS_OPTION = click.option(
     "--residents",
     type=click.Path(path_type=Path),
-    default=DEFAULT_RESIDENTS_DIR,
-    show_default=True,
+    default=default_residents_dir,
+    show_default="$STEWARD_RESIDENTS or residents",
     help="Residents tree the manifests are read from.",
 )
 
@@ -152,8 +160,8 @@ def _require_residents(result: ValidationResult, root: Path) -> ValidationResult
     """Fail a defaulted run that validated nothing (steward #137).
 
     ``steward validate`` with no argument is CI's merge gate, and it falls back to
-    :data:`DEFAULT_RESIDENTS_DIR` — a *relative* path, resolved against whatever the
-    process cwd happens to be. A tree that is renamed, moved, or simply looked for from
+    :func:`default_residents_dir` — ``$STEWARD_RESIDENTS`` or the relative ``residents``
+    path resolved against the process cwd. A tree that is renamed, moved, or looked for from
     the wrong working directory therefore validated nothing and printed ``ok:`` while
     doing it: the step whose whole purpose is that an invalid manifest must never merge,
     passing green having read no manifests at all.
@@ -340,16 +348,16 @@ def events_flush(
     "beside the residents tree.",
 )
 def validate(paths: tuple[Path, ...], output_format: str, skills_dir: Path | None) -> None:
-    """Validate resident manifests. Defaults to the residents/ tree.
+    """Validate resident manifests. Defaults to $STEWARD_RESIDENTS or residents/.
 
     Exits non-zero if any manifest fails, so CI can gate on it. A granted skill that
     names nothing in the library is one of the failures — and so, when no path is named,
     is finding no manifests at all: a gate that validated nothing has not held.
     """
-    targets = list(paths) or [DEFAULT_RESIDENTS_DIR]
+    targets = list(paths) or [default_residents_dir()]
     result = validate_paths(targets, skills_dir)
     if not paths:
-        result = _require_residents(result, DEFAULT_RESIDENTS_DIR)
+        result = _require_residents(result, targets[0])
     if output_format == "json":
         _report_json(result)
     else:
@@ -414,8 +422,8 @@ def openapi(output: Path | None) -> None:
 @click.option(
     "--residents",
     type=click.Path(path_type=Path),
-    default=DEFAULT_RESIDENTS_DIR,
-    show_default=True,
+    default=default_residents_dir,
+    show_default="$STEWARD_RESIDENTS or residents",
     help="Residents tree whose effective sets are listed.",
 )
 @click.option(
@@ -734,10 +742,10 @@ def doctor(residents: Path | None, db: Path | None) -> None:
     resident that claims work and schedules none is a resident nothing else checks.
     """
     defaulted = residents is None
-    residents = residents or DEFAULT_RESIDENTS_DIR
+    residents = residents or default_residents_dir()
     result = validate_paths([residents])
     if defaulted:
-        result = _require_residents(result, DEFAULT_RESIDENTS_DIR)
+        result = _require_residents(result, residents)
     if result.diagnostics:
         _report_text(result, [residents])
     if not result.ok:
@@ -1119,8 +1127,8 @@ def _render_entry(entry: JournalEntry) -> None:
 @click.option(
     "--residents",
     type=click.Path(path_type=Path),
-    default=DEFAULT_RESIDENTS_DIR,
-    show_default=True,
+    default=default_residents_dir,
+    show_default="$STEWARD_RESIDENTS or residents",
     help="Residents tree the manifest is read from.",
 )
 @click.option(
@@ -1248,8 +1256,8 @@ def _scheduler_options[F: Callable[..., None]](function: F) -> F:
             click.option(
                 "--residents",
                 type=click.Path(path_type=Path),
-                default=DEFAULT_RESIDENTS_DIR,
-                show_default=True,
+                default=default_residents_dir,
+                show_default="$STEWARD_RESIDENTS or residents",
                 help="Residents tree to schedule from.",
             ),
             click.option(
@@ -1365,10 +1373,12 @@ def _report_fires(reports: Sequence[FireReport], *, dry_run: bool) -> None:
             click.echo("")
         elif not report.fired:
             click.secho(f"skipped {report.scheduled.key}: {report.skipped_reason}", fg="yellow")
-        elif report.result is not None and report.result.ok:
+        elif report.result is not None and report.ok:
             click.secho(f"ok {report.scheduled.key} in {report.result.duration_s:.1f}s", fg="green")
         else:
-            detail = report.result.summary() if report.result else "no result"
+            detail = report.terminal_error or (
+                report.result.summary() if report.result else "no result"
+            )
             click.secho(f"failed {report.scheduled.key}: {detail}", fg="red", err=True)
 
 
@@ -1378,9 +1388,7 @@ def _fires_failed(reports: Sequence[FireReport]) -> bool:
     A skip is an honest scheduling decision (overlap, pause, or catch-up policy), not a
     process failure.  Dry runs never reach this predicate.
     """
-    return any(
-        report.fired and (report.result is None or not report.result.ok) for report in reports
-    )
+    return any(report.fired and not report.ok for report in reports)
 
 
 @scheduler.command("tick")
@@ -2581,8 +2589,8 @@ def operator_list(db: Path | None, output_format: str) -> None:
 @click.option(
     "--residents",
     type=click.Path(path_type=Path),
-    default=DEFAULT_RESIDENTS_DIR,
-    show_default=True,
+    default=default_residents_dir,
+    show_default="$STEWARD_RESIDENTS or residents",
     help="Residents tree the API validates and creates into.",
 )
 @click.option(

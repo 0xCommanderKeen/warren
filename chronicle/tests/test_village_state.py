@@ -942,6 +942,54 @@ class VillageProjectionTests(unittest.TestCase):
         self.assertEqual(7, types.count("tool_called"))
         self.assertEqual(3, types.count("chat_message_dropped"))
 
+    def test_history_share_keeps_append_order_across_channel_shapes(self):
+        # O = fleet work, A = ambient knock. Literal indices describe the newest
+        # records entitled to each share, including unused ambient capacity.
+        cases = [
+            ("", 4, 1, []),
+            ("OAO", 4, 1, [0, 1, 2]),
+            ("AAAAAA", 4, 1, [2, 3, 4, 5]),
+            ("OOOOOO", 4, 1, [2, 3, 4, 5]),
+            ("OAOAOAOA", 4, 1, [2, 4, 6, 7]),
+            ("OAAAAAA", 4, 1, [0, 4, 5, 6]),
+            ("OAOAOAOA", 4, 0, [0, 2, 4, 6]),
+            ("OAOAOAOA", 2, 4, [5, 7]),
+            ("OAOA", 0, 1, []),
+        ]
+        for shape, capacity, floor, expected in cases:
+            with self.subTest(shape=shape, capacity=capacity, floor=floor):
+                events = [
+                    event(
+                        "tool_called" if kind == "O" else "chat_message_dropped",
+                        # Reverse event times to distinguish append order from time.
+                        minutes=-index,
+                        source="steward" if kind == "A" else "claude-code",
+                        tool="Read",
+                        route="telegram",
+                        address="@life_agent_bot",
+                        reason="not an operator",
+                        **{"from": "87654321"},
+                    )
+                    for index, kind in enumerate(shape)
+                ]
+                state = project_village(
+                    [event(
+                        "resident_declared", source="steward", name="Burrow",
+                        char="Monk", accent="#123456", role="keeper",
+                        summary=None, resident_id="burrow", uid="0198-uid", home=2,
+                    )] + events,
+                    [RESIDENT], NOW,
+                    ProjectionPolicy(
+                        events_per_villager=capacity,
+                        ambient_events_per_villager=floor,
+                    ),
+                )
+                [villager] = state["villagers"]
+                self.assertEqual(
+                    [events[index]["ts"] for index in expected],
+                    [item["ts"] for item in villager["history"]],
+                )
+
     def test_snapshot_is_bounded_deterministic_and_json_serializable(self):
         policy = ProjectionPolicy(events_per_villager=2, tasks=2, diagnostics=2)
         events = [

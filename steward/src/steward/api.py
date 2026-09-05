@@ -88,7 +88,7 @@ from steward.routes.deps import Deps
 from steward.routes.residents import (
     ResidentPost,
 )
-from steward.routes.routines import last_run_view, latest_run_requests
+from steward.routes.routines import last_run_view
 from steward.run_lifecycle import RUN_LEASE_GRACE_S
 from steward.runners import build_runner
 from steward.runs import AlreadyRunningError
@@ -123,7 +123,6 @@ __all__ = [
     "RetirePipeline",
     "create_app",
     "last_run_view",
-    "latest_run_requests",
     "run_server",
 ]
 
@@ -431,9 +430,11 @@ def _fire_outcome(report: FireReport) -> tuple[str, dict[str, Any]]:
     detail: dict[str, Any] = {"run_id": report.run_id}
     if not report.fired:
         return f"skipped: {report.skipped_reason}", detail
-    if report.result is not None and report.result.ok:
+    if report.ok:
         return "ran", detail
-    detail["error"] = report.result.summary() if report.result is not None else "no result"
+    detail["error"] = report.terminal_error or (
+        report.result.summary() if report.result is not None else "no result"
+    )
     return "failed", detail
 
 
@@ -627,7 +628,7 @@ def create_app(  # noqa: PLR0913 — injectable collaborators are the public tes
             CORSMiddleware,
             allow_origins=list(settings.cors_origins),
             allow_credentials=False,
-            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_methods=["GET", "POST", "PUT", "OPTIONS"],
             allow_headers=["Authorization", "Content-Type"],
         )
     app.state.store = db

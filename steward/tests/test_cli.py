@@ -17,6 +17,7 @@ from conftest import (
     REPO_ROOT,
     SECOND_RESIDENT_UID,
     VALID_RESIDENT_UID,
+    VALID_SOUL,
     ResidentWriter,
     ScratchRepo,
     SkillWriter,
@@ -34,7 +35,8 @@ from steward.journal import latest_entry, write_entry
 from steward.manifest import load_manifest
 from steward.operator_auth import OPERATOR_CREDENTIAL_PREFIX
 from steward.prompt import JOURNAL_MAX_CHARS, assemble_preamble
-from steward.scheduler import STALE_TICK_AFTER_S, SchedulerState
+from steward.runners import Outcome, RunResult
+from steward.scheduler import STALE_TICK_AFTER_S, FireReport, SchedulerState, load_scheduled
 from steward.skills import effective_skills, library_for
 from steward.store import Store
 
@@ -1416,6 +1418,9 @@ def test_scheduler_run_stops_after_max_ticks(
     assert result.exit_code == 0, result.output
 
 
+@pytest.mark.parametrize(
+    "terminal_error", [None, "run ownership lost: terminal outcome already chosen"]
+)
 @pytest.mark.parametrize("command", [("tick",), ("run", "--max-ticks", "1")])
 @pytest.mark.parametrize(
     ("outcomes", "expected"),
@@ -1423,18 +1428,26 @@ def test_scheduler_run_stops_after_max_ticks(
 )
 def test_scheduler_commands_carry_fire_outcomes(  # noqa: PLR0913, PLR0917
     runner: CliRunner,
+    write_resident: ResidentWriter,
+    terminal_error: str | None,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     command: tuple[str, ...],
     outcomes: tuple[bool | None, ...],
     expected: int,
 ) -> None:
+    path = write_resident(mock_resident())
+    [scheduled] = load_scheduled(path.parent)
     reports = [
-        SimpleNamespace(
+        FireReport(
+            run_id=f"run-{index}",
+            terminal_error=terminal_error,
             fired=ok is not None,
-            scheduled=SimpleNamespace(key=f"agent/routine-{index}"),
+            scheduled=scheduled,
             result=(
-                SimpleNamespace(ok=ok, duration_s=0.1, summary=lambda: "exit 7")
+                RunResult(
+                    outcome=Outcome.OK if ok else Outcome.FAILED, duration_s=0.1, error="exit 7"
+                )
                 if ok is not None
                 else None
             ),
@@ -1453,6 +1466,9 @@ def test_scheduler_commands_carry_fire_outcomes(  # noqa: PLR0913, PLR0917
 
     result = runner.invoke(main, ["scheduler", *command, "--residents", str(tmp_path)])
 
+    if terminal_error and any(ok is not None for ok in outcomes):
+        expected = 1
+        assert terminal_error in result.output
     assert result.exit_code == expected, result.output
     cleanup.assert_called_once_with()
 
@@ -4244,6 +4260,57 @@ def tapping_manifest() -> dict[str, Any]:
     data = valid_manifest()
     data["notifications"] = {"transport": "ntfy", "on": ["needs_human"], "note": "Miha's phone"}
     return data
+
+
+@pytest.mark.parametrize("explicit_seed", [False, True])
+def test_notify_list_defaults_to_live_checkout_when_seed_disagrees(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    explicit_seed: bool,
+) -> None:
+    """A bare operator command must not verify the image's seed back to them."""
+    write_resident(tapping_manifest())
+    checkout = tmp_path / "checkout" / "steward" / "residents"
+    write_resident(root=checkout)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("STEWARD_RESIDENTS", str(checkout))
+
+    args = ["notify", "list"] + (["--residents", "residents"] if explicit_seed else [])
+    result = runner.invoke(main, args)
+
+    assert result.exit_code == 0, result.output
+    expected = "test-agent: ntfy — active" if explicit_seed else "test-agent: taps nobody"
+    assert expected in result.output
+
+
+@pytest.mark.parametrize("command", [["validate"], ["doctor"], ["skills"], ["journal", "live"]])
+def test_other_cli_defaults_read_live_checkout(
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_bin: StubWriter,
+    command: list[str],
+) -> None:
+    """Positional defaults and individually declared options use the same tree."""
+    write_resident()
+    manifest = valid_manifest()
+    manifest["id"] = "live"
+    manifest["agent_id"] = "claude-code:live"
+    manifest["memory"]["path"] = str(tmp_path / "memory")
+    checkout = tmp_path / "checkout" / "steward" / "residents"
+    write_resident(manifest, root=checkout, soul=VALID_SOUL.replace("test-agent", "live"))
+    stub_bin("claude", CURRENT_CLAUDE)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("STEWARD_RESIDENTS", str(checkout))
+
+    result = CliRunner().invoke(main, command)
+
+    assert result.exit_code == 0, result.output
+    assert (str(checkout) if command == ["validate"] else "live") in result.output
+    assert "test-agent" not in result.output
 
 
 def test_notify_list_prints_the_address_an_operator_has_to_subscribe_to(

@@ -27,9 +27,11 @@ from steward import runners as r
 from steward import scheduler as s
 from steward import sessions as ss
 from steward import skills as sk
+from steward.api import ManualRuns
 from steward.board import Dispatcher
 from steward.budgets import BudgetGuard
 from steward.claims import ResidentClaims
+from steward.run_lifecycle import RunTransitions
 from steward.session_auth import (
     SESSION_CREDENTIAL_PREFIX,
     SESSION_TOKEN_ENV,
@@ -2439,6 +2441,7 @@ def delivering(write_resident: ResidentWriter, tmp_path: Path):
         outcome: r.Outcome = r.Outcome.OK,
         deliverer: RecordingDeliverer | None = None,
         routine: dict = DELIVERED,
+        runner_factory: s.RunnerFactory | None = None,
     ) -> tuple[s.Scheduler, RecordingDeliverer, Store]:
         data = manifest_with(routine)
         data["routes"].append(PHONE)
@@ -2451,9 +2454,15 @@ def delivering(write_resident: ResidentWriter, tmp_path: Path):
             state=s.SchedulerState(path=tmp_path / "state.json"),
             workdir=tmp_path,
             registry=store,
-            runner_factory=lambda _spec, _placement: r.MockRunner(
-                behavior=lambda _req: r.RunResult(
-                    outcome=outcome, output=output, exit_status=0 if outcome is r.Outcome.OK else 1
+            claims=ResidentClaims(store),
+            runner_factory=runner_factory
+            or (
+                lambda _spec, _placement: r.MockRunner(
+                    behavior=lambda _req: r.RunResult(
+                        outcome=outcome,
+                        output=output,
+                        exit_status=0 if outcome is r.Outcome.OK else 1,
+                    )
                 )
             ),
             deliverer=deliverer,
@@ -2482,6 +2491,64 @@ def test_a_finished_delivered_routine_hands_its_message_over(delivering) -> None
     assert deliverer.handed == [("test-agent", "digest", "Two things happened today.")]
     assert report.delivery == s.Delivery(status=s.DELIVERED)
     assert _run_row(store, report.run_id).delivery == s.DELIVERED
+
+
+@pytest.mark.parametrize("manual", [False, True])
+@pytest.mark.parametrize("watchdog_wins", [False, True])
+def test_terminal_winner_controls_delivery_and_reporting(
+    delivering, tmp_path: Path, *, manual: bool, watchdog_wins: bool
+) -> None:
+    def late_success(_request: r.RunRequest) -> r.RunResult:
+        if watchdog_wins:
+            [run] = store.open_runs()
+            terminal = ev.RunContext(
+                agent_id=run.agent_id, project=run.project, routine=run.ref, run_id=run.run_id
+            ).failed(error="watchdog: owner disappeared", duration_s=180)
+            assert RunTransitions(store).watchdog_claim(
+                run.run_id,
+                terminal,
+                now=datetime.now(UTC) + timedelta(minutes=5),
+                grace_s=120,
+            )
+        return r.RunResult(outcome=r.Outcome.OK, output="Late success", exit_status=0)
+
+    engine, deliverer, store = delivering(
+        runner_factory=lambda _spec, _placement: r.MockRunner(behavior=late_success)
+    )
+    if manual:
+        store.log_request(request_id="request", method="POST", path="/run", outcome="accepted")
+        runs = ManualRuns(scheduler=engine, store=store)
+        try:
+            runs.submit(engine.scheduled[0], "request")
+            runs.wait()
+        finally:
+            runs.shutdown()
+        request = store.request("request")
+        assert request is not None
+        assert request.outcome == ("failed" if watchdog_wins else "ran")
+        if watchdog_wins:
+            assert "terminal outcome" in request.detail["error"]
+        run_id = request.detail["run_id"]
+    else:
+        report = _fire_digest(engine)
+        assert report.ok is not watchdog_wins
+        assert report.result is not None
+        assert report.result.ok  # Keep the raw runner result.
+        assert report.delivery == (None if watchdog_wins else s.Delivery(status=s.DELIVERED))
+        run_id = report.run_id
+
+    assert deliverer.handed == ([] if watchdog_wins else [("test-agent", "digest", "Late success")])
+    row = _run_row(store, run_id)
+    assert row.delivery == (None if watchdog_wins else s.DELIVERED)
+    assert row.closed_at is not None
+    assert row.terminal_published_at is not None
+    terminal_type = ev.ROUTINE_FAILED if watchdog_wins else ev.ROUTINE_FINISHED
+    assert json.loads(row.terminal_event or "{}")["type"] == terminal_type
+    assert [e["type"] for e in emitted(tmp_path / "events.jsonl")] == [
+        ev.ROUTINE_STARTED,
+        terminal_type,
+    ]
+    assert ResidentClaims(store).holder("test-agent") is None
 
 
 @pytest.mark.parametrize("output", ["NOTHING", "  NOTHING\n", "", "   \n"])

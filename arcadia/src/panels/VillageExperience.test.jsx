@@ -467,6 +467,13 @@ describe("entering village rooms", () => {
     view.rerender(<VillageExperience snapshot={next} />);
     expect(interiorProps.building.id).toBe("workshop");
     expect(interiorProps.agents.map((agent) => agent.name)).toEqual(["Guest"]);
+    expect(interiorProps.villagers.map((agent) => agent.name)).toEqual(["Keeper", "Guest"]);
+    view.rerender(<VillageExperience snapshot={{ ...next, villagers: next.villagers.slice(0, 1) }} />);
+    expect(interiorProps.agents).toEqual([]);
+    expect(interiorProps.villagers.map((agent) => agent.name)).toEqual(["Keeper"]);
+    view.rerender(<VillageExperience snapshot={{ ...next, villagers: [] }} />);
+    expect(interiorProps.agents).toEqual([]);
+    expect(interiorProps.villagers.map((agent) => agent.id)).toEqual(["claude:keeper"]);
   });
   it("keeps two projects in one workshop instead of creating project buildings", () => {
     const data = atWork();

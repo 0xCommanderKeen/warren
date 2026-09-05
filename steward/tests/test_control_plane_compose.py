@@ -88,6 +88,7 @@ def test_the_daemons_read_the_checkout_and_may_not_write_it(
 def test_nothing_reads_the_tree_baked_into_the_image(services: dict[str, Any]) -> None:
     """The image's residents/ is the seed a new burrow is cloned from, and nothing serves it."""
     for name, service in services.items():
+        assert service["environment"]["STEWARD_RESIDENTS"] == residents_of(service), name
         assert "/app/residents" not in " ".join(service["command"]), name
         assert "/app/skills" not in " ".join(service["command"]), name
 

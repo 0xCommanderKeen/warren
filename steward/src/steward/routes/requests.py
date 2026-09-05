@@ -16,7 +16,9 @@ def router(deps: Deps) -> APIRouter:
     routes = APIRouter(responses={401: {"model": RefusalResponse}})
 
     @routes.get("/requests", response_model=RequestListResponse)
-    def list_requests(limit: int = REQUESTS_DEFAULT_LIMIT) -> dict[str, Any]:
+    def list_requests(
+        limit: int = REQUESTS_DEFAULT_LIMIT, resident: str | None = None
+    ) -> dict[str, Any]:
         """Return accepted requests and what became of them, newest first.
 
         The endpoint that makes "accepted" survivable as an answer. Every mutating call
@@ -26,8 +28,8 @@ def router(deps: Deps) -> APIRouter:
         rather than deciding on its own that a 202 went well.
         """
         window = max(1, min(limit, REQUESTS_MAX_LIMIT))
-        rows = deps.db.requests()[-window:]
-        return {"requests": [record.to_dict() for record in reversed(rows)]}
+        rows = deps.db.recent_requests(limit=window, resident=resident)
+        return {"requests": [record.to_dict() for record in rows]}
 
     @routes.get(
         "/requests/{request_id}",

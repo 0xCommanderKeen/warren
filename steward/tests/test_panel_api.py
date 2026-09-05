@@ -26,6 +26,7 @@ the API is not.
 
 import copy
 import json
+import sqlite3
 import subprocess
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -39,7 +40,7 @@ from jsonschema import Draft202012Validator
 
 from conftest import REPO_ROOT, ResidentWriter, valid_manifest
 from steward import events as ev
-from steward.api import ApiConfig, create_app, latest_run_requests
+from steward.api import ApiConfig, create_app
 from steward.deploy import DeployTarget
 from steward.nursery import (
     DeclareStage,
@@ -343,34 +344,6 @@ def test_the_request_log_needs_the_token(panel: PanelFactory) -> None:
     assert anonymous(panel()).get("/requests").status_code == 401
 
 
-def test_the_newest_request_per_routine_wins() -> None:
-    def record(request_id: str, routine: str, outcome: str) -> RequestRecord:
-        return RequestRecord(
-            request_id=request_id,
-            received_at="2026-08-24T10:00:00.000Z",
-            method="POST",
-            path="/x",
-            outcome=outcome,
-            detail={"routine": routine},
-        )
-
-    indexed = latest_run_requests(
-        [
-            record("a", "one/tick", "failed"),
-            record("b", "one/tick", "ran"),
-            record("c", "two/tick", "queued"),
-            RequestRecord("d", "…", "POST", "/jobs", "posted", {"task_id": "t"}),
-        ]
-    )
-    assert indexed["one/tick"]["request_id"] == "b"
-    assert set(indexed) == {"one/tick", "two/tick"}
-
-
-# --------------------------------------------------------------------------------------
-# what the resident view now carries
-# --------------------------------------------------------------------------------------
-
-
 def test_a_resident_carries_its_voice(panel: PanelFactory) -> None:
     body = panel().client.get("/residents/test-agent").json()
     assert body["voice"] == "Flat, factual, short."
@@ -623,6 +596,53 @@ def test_raising_a_retired_resident_is_refused_by_its_own_code(panel: PanelFacto
     assert response.status_code == 409
     assert response.json()["detail"]["error"] == "resident_retired"
     assert "retired: false" in response.json()["detail"]["message"]
+
+
+def test_request_window_filters_resident_and_clamps_large_ledger(panel: PanelFactory) -> None:
+    built = panel()
+    built.store.log_request(
+        request_id="hob", method="POST", path="/residents/hob/pause", outcome="ran"
+    )
+    for index in range(510):
+        built.store.log_request(
+            request_id=f"other-{index}",
+            method="POST",
+            path="/residents/hobbit/pause",
+            outcome="ran",
+        )
+    assert [
+        r["request_id"]
+        for r in built.client.get("/requests?resident=hob&limit=1").json()["requests"]
+    ] == ["hob"]
+    assert len(built.client.get("/requests").json()["requests"]) == 50
+    assert len(built.client.get("/requests?limit=9999").json()["requests"]) == 500
+    assert len(built.client.get("/requests?limit=-1").json()["requests"]) == 1
+
+
+def test_routine_summary_hydrates_only_latest_declared_requests(
+    panel: PanelFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = panel()
+    for index in range(10):
+        built.store.log_request(
+            request_id=str(index),
+            method="POST",
+            path="/jobs",
+            outcome="queued",
+            detail={"routine": "test-agent/daily-summary"},
+        )
+    original = RequestRecord.from_row
+    hydrated: list[str] = []
+
+    def track(row: sqlite3.Row) -> RequestRecord:
+        record = original(row)
+        hydrated.append(record.request_id)
+        return record
+
+    monkeypatch.setattr(RequestRecord, "from_row", track)
+    rows = built.client.get("/routines").json()["routines"]
+    assert rows[0]["last_request"]["request_id"] == "9"
+    assert hydrated == ["9"]
 
 
 def test_run_receipt_and_request_ledger_validate_exported_contract(panel: PanelFactory) -> None:
