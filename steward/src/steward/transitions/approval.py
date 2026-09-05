@@ -125,7 +125,6 @@ class ApprovalOutboxWorker:
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            failed = False
             try:
                 self.transitions.reconcile_announcements()
                 while not self._stop.is_set() and (
@@ -141,14 +140,17 @@ class ApprovalOutboxWorker:
                     except Exception:
                         self.transitions.store.release_approval_effects(record.request_id, token)
                         raise
+                due = self.transitions.store.next_approval_work_at()
+                timeout = self.poll_interval
+                if due is not None:
+                    deadline = datetime.fromisoformat(due)
+                    timeout = min(timeout, max(0.0, (deadline - datetime.now(UTC)).total_seconds()))
             except Exception:
                 log.exception("approval outbox pass failed; it will retry")
-                failed = True
-            due = self.transitions.store.next_approval_work_at()
-            timeout = 0.1 if failed else self.poll_interval
-            if due is not None:
-                deadline = datetime.fromisoformat(due)
-                timeout = min(timeout, max(0.0, (deadline - datetime.now(UTC)).total_seconds()))
+                # Producer wakes and overdue work must not turn a persistent failure
+                # into a busy loop. Shutdown alone interrupts this bounded backoff.
+                self._stop.wait(0.1)
+                continue
             self._wake.wait(timeout)
             self._wake.clear()
 

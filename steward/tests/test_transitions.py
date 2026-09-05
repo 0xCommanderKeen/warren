@@ -8,6 +8,7 @@ fact reaches the emitter on the winning branch, and that no fact reaches it on a
 
 import ast
 import json
+import sqlite3
 import threading
 import time
 from collections.abc import Iterator
@@ -942,6 +943,85 @@ def test_worker_retries_an_injected_error_before_atomic_effect_completion(
         worker.close()
     assert attempted == 2
     assert store.approval_announcement_state(raised.request_id) == "complete"
+
+
+@pytest.mark.parametrize("failure", ["query", "malformed", "naive"])
+def test_worker_recovers_from_scheduling_failure(
+    store: Store, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    failed = threading.Event()
+    completed = threading.Event()
+    original = store.next_approval_work_at
+    attempts = 0
+
+    def schedule() -> str | None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            failed.set()
+            if failure == "query":
+                raise sqlite3.OperationalError("injected scheduling failure")
+            return "invalid" if failure == "malformed" else "2026-09-01T00:00:00"
+        return original()
+
+    def complete(record: ApprovalRecord, token: str) -> bool:
+        result, _ = store.complete_approval_effects(record, token)
+        completed.set()
+        return result
+
+    monkeypatch.setattr(store, "next_approval_work_at", schedule)
+    worker = ApprovalOutboxWorker(tr.ApprovalTransitions(store, ev.NullEmitter()), complete)
+    worker.start()
+    try:
+        assert failed.wait(1)
+        raised = store.create_approval_request(
+            agent_id=CLAIMANT, project=PROJECT, action="send_email", message="ask"
+        )
+        store.decide(raised.request_id, "approve")
+        worker.notify()
+        assert completed.wait(2)
+        assert worker.alive
+        assert store.approval_announcement_state(raised.request_id) == "complete"
+    finally:
+        worker.close()
+
+
+@pytest.mark.parametrize("failure", ["query", "malformed", "delivery"])
+def test_worker_backs_off_persistent_failure_and_closes_promptly(
+    store: Store, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, failure: str
+) -> None:
+    attempts: list[float] = []
+    retried = threading.Event()
+    worker = ApprovalOutboxWorker(
+        tr.ApprovalTransitions(store, ev.NullEmitter()),
+        lambda _record, _token: True,
+        poll_interval=10,
+    )
+
+    def fail() -> str:
+        attempts.append(time.monotonic())
+        worker.notify()  # a producer wake must not bypass failure backoff
+        if len(attempts) >= 2:
+            retried.set()
+        if failure != "malformed":
+            raise sqlite3.OperationalError("persistent failure")
+        return "invalid"
+
+    if failure == "delivery":
+        monkeypatch.setattr(store, "claim_approval_effects", fail)
+        monkeypatch.setattr(store, "next_approval_work_at", lambda: ev.utc_now_iso(NOW))
+    else:
+        monkeypatch.setattr(store, "next_approval_work_at", fail)
+    worker.start()
+    try:
+        assert retried.wait(2)
+        assert worker.alive
+        assert attempts[1] - attempts[0] >= 0.08
+        worker.close(timeout=1)
+        assert not worker.alive
+        assert "approval outbox pass failed; it will retry" in caplog.text
+    finally:
+        worker.close()
 
 
 def test_idle_worker_polls_for_expired_work_created_by_another_store(
