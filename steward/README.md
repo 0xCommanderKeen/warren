@@ -687,6 +687,27 @@ skills/
   <name>/SKILL.md                             the shared library both draw on
 ```
 
+`steward/residents/` and `steward/skills/` are the tracked seed declarations and
+shared library. A deployed burrow uses its own authoritative checkout, as described
+in [the deployment guide](../deploy/README.md#the-residents-checkout).
+
+`steward/local/` is ignored development scratch, not a second declaration source.
+Its historical `burrow-builder`, `life-agent`, and `pip` copies and the `skills`
+symlink are no longer tracked. The old builder has no current seed counterpart;
+`life-agent` describes Hob under an older identity, while its settings and the old
+Pip's local memory paths, routes, and schedules differ from the current seeds.
+These copies are not migrated into `residents/`: use the current declarations and
+make deliberate edits there instead of copying old operational settings back.
+Untracking with `git rm --cached` preserves the working files where that command
+runs; other clones should save any local copies they want before updating to the
+commit that removes them.
+
+Ignore rules apply to untracked files. They do **not** hide edits to tracked files
+from `git status`; untracking the scratch copies is what makes the existing
+`local/` exclusion apply. The repository root also shares cache, coverage,
+`demo/`, `.tmp/`, and `.claude/` exclusions across clones. Local coverage and demo
+data are disposable outputs, not checked-in fixtures or declaration sources.
+
 Each manifest declares the resident's soul identity, charter (mission, duties, hard
 rules, escalation policy), and the capability dimensions chronicle renders — skills,
 memory, routes, app grants, and the tools a session may reach — plus the runner steward
