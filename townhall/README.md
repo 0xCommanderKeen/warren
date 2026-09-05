@@ -38,7 +38,10 @@ which of the two this tab is carrying.
 ## Pages
 
 - **Fleet** — read-only telemetry over Chronicle's snapshot, plus the uid-addressed agent
-  record at `/agents/:uuid`. The one page that needs no credential.
+  record at `/agents/:uuid`. Inactive transient sessions are hidden by default; **Show
+  inactive** reveals them. Residents and agents with pending approvals, open tasks (as
+  claimant or poster), or running routines stay visible. Retained activity and direct
+  record links remain available. The one page that needs no credential.
 - **Residents** — the fleet steward could validate; one resident's whole record (soul,
   charter, effective skills, routines, budget, journal, inbox); the nursery form that
   declares a new one; and the declaration editor, which writes manifest fields or the YAML
