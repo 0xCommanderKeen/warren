@@ -898,9 +898,15 @@ pending structured approval alongside one observed failure;
 `test_discord_events_render_lines_without_changing_villager_state_or_mood`
 pins ambient-event neutrality. `test_retention_vectors.py` exercises
 `mood-lifecycle-adversarial.json` for retained collision/lifecycle evidence,
-not projected glyph values. Its module docstring lists the older mood vectors
-that are still unused; those fixtures do not establish current glyph or
-sufficiency expectations.
+not projected glyph values. Its `RestoredMoodVectorTests` also runs the seven
+remaining mood vectors: authority order, future sufficiency, grouped unrelated
+appends, lifecycle ambiguity, and ordinary/adversarial/regression rotation.
+These tests pin current glyphs and signals, including the `"3"` failure label,
+zero evidence span, root-only interaction, and pending structured needs. The
+authority-order vector explicitly records an orphan close disappearing during
+rotation: evidence count falls from three to two while signals and glyph stay
+unchanged. Grouped rotation compares semantic authority rather than capsule
+ordinals, which depend on the rotation boundaries.
 
 The retention machinery below preserves legacy browser mood authority. Its
 plain-knock, distinct-witness, collision, and overflow rules are storage
