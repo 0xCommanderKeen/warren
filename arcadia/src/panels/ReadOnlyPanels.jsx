@@ -8,12 +8,12 @@ function Empty({ children }) {
 
 function Panel({ title, note, children, wide = false }) {
   return (
-    <section className={`${wide ? "col-span-3" : "col-span-2"} min-w-0 border border-[#1d3328] bg-[#faf6eb] p-4 shadow-[4px_4px_0_#1d3328] max-md:col-span-1`} aria-label={title}>
+    <section className={`record-panel ${wide ? "record-panel-wide" : ""}`} aria-label={title}>
       <header className="mb-4 border-b border-[#b7aa8c] pb-2.5">
         <h2 className="text-xl font-normal">{title}</h2>
         <p className={metadata}>{note}</p>
       </header>
-      {children}
+      <div className="record-content" tabIndex={0} role="region" aria-label={`${title} entries`}>{children}</div>
     </section>
   );
 }
@@ -24,11 +24,12 @@ function villagerName(snapshot, agentId) {
 
 export function ReadOnlyPanels({ snapshot }) {
   return (
-    <div className="mx-auto mt-8 grid max-w-7xl grid-cols-6 gap-4 max-md:grid-cols-2 max-sm:grid-cols-1" aria-label="Village records">
+    <div className="records-grid" aria-label="Village records">
       <Panel title="Notice board" note="Recent artifacts across the village">
-        {snapshot.artifacts.length ? <ul className={recordList}>{snapshot.artifacts.map((artifact) => (
+        {snapshot.artifacts.length ? <ul className={recordList}>{snapshot.artifacts.toSorted((a, b) => b.ts.localeCompare(a.ts)).map((artifact) => (
           <li className={record} key={`${artifact.agent_id}:${artifact.ts}:${artifact.artifact}`}>
-            <strong className="[overflow-wrap:anywhere] font-normal">{artifact.artifact}</strong>
+            <strong className="[overflow-wrap:anywhere] font-normal" title={artifact.artifact}>{artifact.artifact.split("/").filter(Boolean).at(-1) || artifact.artifact}</strong>
+            <details className="artifact-path"><summary>Full path</summary><span>{artifact.artifact}</span></details>
             <span className={metadata}>{villagerName(snapshot, artifact.agent_id)} · {artifact.project}</span>
             <time className={`${metadata} [overflow-wrap:anywhere]`} dateTime={artifact.ts}>{artifact.ts}</time>
           </li>
@@ -46,7 +47,7 @@ export function ReadOnlyPanels({ snapshot }) {
       </Panel>
 
       <Panel title="Routine ledger" note="Observed routine runs">
-        {snapshot.routines.length ? <ul className={recordList}>{snapshot.routines.map((run) => (
+        {snapshot.routines.length ? <ul className={recordList}>{snapshot.routines.toSorted((a, b) => b.updated_at.localeCompare(a.updated_at)).map((run) => (
           <li className={record} key={run.run_id}>
             <strong className="font-normal">{run.routine}</strong>
             <span className={metadata}>{run.state}{run.outcome ? ` · ${run.outcome}` : ""}{run.duration_s !== null ? ` · ${run.duration_s}s` : ""}</span>

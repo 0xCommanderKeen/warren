@@ -7,7 +7,7 @@ const map = JSON.parse(mapJson);
 
 describe("village map", () => {
   it("keeps every walkable tile connected to the street", () => {
-    expect(validateReachability(map)).toEqual({ walkable: 148, reachable: 148 });
+    expect(validateReachability(map)).toEqual({ walkable: 180, reachable: 180 });
   });
 
   it("rejects open ground walled away from the street", () => {
@@ -36,7 +36,7 @@ describe("village snapshot model", () => {
 
     expect(villagers.map(({ id, dwelling, x, y }) => ({ id, dwelling, x, y }))).toEqual([
       { id: "resident", dwelling: { kind: "home", label: "Home 2", x: 464, y: 96 }, x: 464, y: 112 },
-      { id: "visitor-a", dwelling: { kind: "lodge", label: "Lodge", x: 320, y: 288 }, x: 320, y: 304 },
+      { id: "visitor-a", dwelling: { kind: "lodge", label: "Lodge", x: 320, y: 288 }, x: 304, y: 304 },
       { id: "visitor-b", dwelling: { kind: "lodge", label: "Lodge", x: 320, y: 288 }, x: 336, y: 304 },
     ]);
   });
@@ -81,5 +81,24 @@ describe("village snapshot model", () => {
     ], []);
 
     expect({ x: villager.x, y: villager.y }).toEqual({ x: 304, y: 112 });
+  });
+});
+
+describe("population safety", () => {
+  it("keeps a large visitor population inside walkable map bounds", () => {
+    const visitors = Array.from({ length: 60 }, (_, i) => ({ id: `visitor-${i}`, residency: "visitor", state: "resting" }));
+    for (const v of buildVillageModel(map, visitors)) {
+      expect(v.x).toBeGreaterThan(16);
+      expect(v.x).toBeLessThan(map.width * map.tilewidth - 16);
+      expect(v.y).toBeLessThan(map.height * map.tileheight - 16);
+      const index = Math.floor(v.y / map.tileheight) * map.width + Math.floor(v.x / map.tilewidth);
+      expect(map.layers.find(l => l.name === "Collision").data[index]).not.toBe(3);
+    }
+  });
+
+  it("keeps a working villager at the doorstep while an approval is pending", () => {
+    const [v] = buildVillageModel(map, [{ id: "worker", residency: "resident", home: 0, state: "working" }], [{ agent_id: "worker", request_id: "yes", state: "pending" }]);
+    expect(v.moving).toBe(false);
+    expect(v.route).toEqual([]);
   });
 });

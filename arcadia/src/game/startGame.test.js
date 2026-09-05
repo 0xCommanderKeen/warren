@@ -8,7 +8,7 @@ const doubles = vi.hoisted(() => ({
 vi.mock("phaser", () => ({
   default: {
     AUTO: "auto",
-    Scale: { RESIZE: "resize", CENTER_BOTH: "center" },
+    Scale: { FIT: "fit", RESIZE: "resize", CENTER_BOTH: "center" },
     Game: class Game {
       constructor(config) {
         this.config = config;
@@ -47,6 +47,8 @@ describe("startGame", () => {
 
     expect(doubles.games).toHaveLength(1);
     expect(doubles.scenes).toHaveLength(1);
+    expect(doubles.games[0].config.scale.mode).toBe("fit");
+    expect(doubles.games[0].config.width / doubles.games[0].config.height).toBe(5 / 3);
     expect(doubles.games[0].config.scene).toEqual([doubles.scenes[0]]);
     expect(doubles.scenes[0].initialSnapshot).toBe(initial);
 

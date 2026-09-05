@@ -3,7 +3,7 @@ import { pendingApprovals } from "./contract/approvals.js";
 import {
   ContractValidationError, parseSnapshot, UnsupportedSchemaVersionError,
 } from "./contract/parseSnapshot.js";
-import { PhaserGame } from "./game/PhaserGame.jsx";
+import { VillageOverview } from "./panels/VillageOverview.jsx";
 import { ReadOnlyPanels } from "./panels/ReadOnlyPanels.jsx";
 import { createStateTransport } from "./transport/createStateTransport.js";
 
@@ -22,7 +22,8 @@ function ContractMismatch({ error }) {
 }
 
 export function backendFromLocation(search = window.location.search) {
-  return new URLSearchParams(search).get("backend") || "/chronicle";
+  if (import.meta.env.DEV) return new URLSearchParams(search).get("backend") || "/chronicle";
+  return "/chronicle";
 }
 
 export function LiveApp({
@@ -33,12 +34,17 @@ export function LiveApp({
   const [envelope, setEnvelope] = useState(null);
   const [contractError, setContractError] = useState(null);
   const [transportError, setTransportError] = useState(null);
+  const [connectionStatus, setConnectionStatus] = useState("connecting");
 
   useEffect(() => {
     const transport = transportFactory({
       fetch: globalThis.fetch.bind(globalThis),
       EventSource: window.EventSource,
       baseUrl,
+      onStatus: (status) => {
+        setConnectionStatus(status);
+        if (status === "live") setTransportError(null);
+      },
       onEnvelope: (nextEnvelope) => {
         setEnvelope(nextEnvelope);
         setContractError(null);
@@ -65,7 +71,7 @@ export function LiveApp({
       </main>
     );
   }
-  return <App envelope={envelope} stewardClient={stewardClient} />;
+  return <App envelope={envelope} stewardClient={stewardClient} connectionStatus={transportError ? "reconnecting" : connectionStatus} />;
 }
 
 function StewardSnapshotBridge({ client, snapshot }) {
@@ -152,7 +158,7 @@ function ApprovalKnocks({ snapshot, stewardClient }) {
     <section
       aria-busy={submittedRequestId !== null}
       aria-label="Approval knocks"
-      className="absolute top-3 left-3 z-3 grid max-h-[calc(100%-1.5rem)] w-[min(28rem,calc(100%-1.5rem))] gap-2 overflow-auto"
+      className="approval-knocks"
     >
       {!credentialsReady ? (
         <form className="border-2 border-[#2a1817] bg-[#fff8e7] p-3 shadow-[5px_5px_0_#785a25]" onSubmit={unlock}>
@@ -180,7 +186,7 @@ function ApprovalKnocks({ snapshot, stewardClient }) {
             <p className={`${mono} text-[#9a3f32]`}>Knock · {villager?.name || approval.agent_id}</p>
             <h2 className="my-1 text-xl font-normal">{approval.message}</h2>
             {approval.detail && Object.keys(approval.detail).length > 0 ? (
-              <p className="mb-2 font-mono text-xs text-[#566158]">{JSON.stringify(approval.detail)}</p>
+              <details className="approval-detail"><summary>Request details</summary><pre>{JSON.stringify(approval.detail, null, 2)}</pre></details>
             ) : null}
             <div className="flex flex-wrap gap-2">
               {approval.options.map((option, optionIndex) => {
@@ -213,7 +219,7 @@ function ApprovalKnocks({ snapshot, stewardClient }) {
   );
 }
 
-export function App({ envelope, stewardClient = null }) {
+export function App({ envelope, stewardClient = null, connectionStatus = "live" }) {
   if (envelope == null) {
     return (
       <main className="grid min-h-screen place-items-center bg-[#eee5d1] p-4 text-[#15241c]">
@@ -230,33 +236,20 @@ export function App({ envelope, stewardClient = null }) {
   }
 
   return (
-    <main className="min-h-screen bg-[#eee5d1] p-[clamp(1rem,3vw,2.5rem)] font-serif text-[#15241c]">
+    <main className="arcadia-shell">
       <StewardSnapshotBridge client={stewardClient} snapshot={snapshot} />
-      <header className="mx-auto mb-4 flex max-w-7xl items-end justify-between max-sm:flex-col max-sm:items-start max-sm:gap-2">
-        <div>
-          <p className={mono}>Chronicle · generation {snapshot.generation}</p>
-          <h1 className="text-[clamp(2.5rem,7vw,5rem)] font-normal tracking-[-0.06em]">Arcadia</h1>
-        </div>
-        <p className={mono}>{snapshot.villagers.length} villager online</p>
+      <header className="masthead">
+        <a className="wordmark" href="/" aria-label="Arcadia home"><span aria-hidden="true">♧</span> WARREN / ARCADIA</a>
+        <nav aria-label="Main navigation"><a href="#village">Village</a><a href="#records">Village records</a><a href="/observatory/">Townhall ↗</a></nav>
       </header>
-
-      <section className="relative mx-auto aspect-[5/3] max-w-7xl overflow-hidden border border-[#1d3328] bg-[#9db57a] shadow-[10px_10px_0_#1d3328] max-sm:aspect-[4/5]" aria-label="Village">
-        <PhaserGame snapshot={snapshot} />
-        <ApprovalKnocks snapshot={snapshot} stewardClient={stewardClient} />
-        <div className="pointer-events-none absolute right-3 bottom-3 z-2 flex max-w-[calc(100%-1.5rem)] flex-wrap justify-end gap-1.5" aria-label="Villagers">
-          {snapshot.villagers.map((villager) => (
-            <article className="grid grid-cols-[auto_1fr_auto] items-center gap-2 border border-[#1d3328] bg-[rgb(250_246_235/88%)] px-2.5 py-2 shadow-[2px_2px_0_rgb(29_51_40/70%)] max-sm:grid-cols-[auto_1fr]" key={villager.id}>
-              <span className="h-7 w-2 bg-[var(--villager-accent,#6a7b67)]" style={{ "--villager-accent": villager.accent }} aria-hidden="true" />
-              <div>
-                <h2 className="text-sm font-normal">{villager.name}</h2>
-                <p className="font-mono text-xs text-[#566158] max-sm:hidden">{villager.project || "Wandering"}</p>
-              </div>
-              <span className={`${mono} text-[#785a25] max-sm:hidden`}>{villager.state}</span>
-            </article>
-          ))}
-        </div>
+      <section className="village-intro">
+        <div><p className="eyebrow">A little place for the work to happen</p><h1>Arcadia</h1><p>Your residents, their visitors, and the life between tasks.</p></div>
+        <div className="village-summary"><span className={`connection connection-${connectionStatus}`} role="status" aria-label="Village connection"><i />{connectionStatus === "live" ? "Live village" : "Reconnecting · showing last snapshot"}</span><p>{snapshot.villagers.filter(v => v.state === "working").length} working <span> / </span>{pendingApprovals(snapshot.approvals).length} awaiting an answer</p></div>
       </section>
-      <ReadOnlyPanels snapshot={snapshot} />
+      <VillageOverview snapshot={snapshot} />
+      <ApprovalKnocks snapshot={snapshot} stewardClient={stewardClient} />
+      <section id="records" className="records-section"><div className="section-heading"><div><p className="eyebrow">The village almanac</p><h2>What’s been happening</h2></div><p>Work, routines, and the things left behind.</p></div><ReadOnlyPanels snapshot={snapshot} /></section>
+      <footer className="village-footer"><span>Arcadia · a window into Warren</span><span>Pixel art by pixel-boy &amp; AAA · Ninja Adventure</span></footer>
     </main>
   );
 }

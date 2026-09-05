@@ -9,7 +9,7 @@ Arcadia is allowed to read only these Chronicle endpoints:
 - `GET /state` — complete snapshots, or `204` when unchanged.
 - `GET /state/stream` — server-sent `snapshot` and `reset` envelopes.
 
-It does not consume `/events` or recreate Chronicle's projection decisions. The deployed client uses the same-origin `/chronicle` prefix (`/burrow` 301s there for a release after warren#361); `?backend=` can select another compatible prefix. During development, Vite proxies `/chronicle` to `http://127.0.0.1:8737`; set `CHRONICLE_URL` to use another Chronicle origin.
+It does not consume `/events` or recreate Chronicle's projection decisions. The deployed client uses the same-origin `/chronicle` prefix (`/burrow` 301s there for a release after warren#361); `?backend=` can select another compatible prefix in development only. Production builds always use `/chronicle`, so a link cannot substitute another state feed. During development, Vite proxies `/chronicle` to `http://127.0.0.1:8737`; set `CHRONICLE_URL` to use another Chronicle origin.
 
 The app loads `/state`, then opens `/state/stream` from the returned generation and cursor. Reconnects first catch up from the last applied boundary and then reopen the stream. Unsupported `schema_version` values replace the village with a visible contract-mismatch screen instead of applying unknown state.
 
@@ -38,14 +38,24 @@ pnpm install
 pnpm dev
 ```
 
-The running app always loads live Chronicle state; the contract fixture is compatibility test data only and is never bundled into the app. The village map is authored as a Tiled JSON export in `public/assets/village.tmj`; tile properties define collision, and the `Places` object layer defines homes, the shared visitor Lodge, street, and work anchors. Placeholder SVG tiles keep the asset pipeline replaceable while the scene architecture settles.
+The running app always loads live Chronicle state; the contract fixture is compatibility test data only and is never bundled into the app. The village map is authored as a Tiled JSON export in `public/assets/village.tmj`; tile properties define collision, and the `Places` object layer defines homes, the shared visitor Lodge, street, and work anchors. The map provides terrain, collision, home and Lodge anchors, and scenery. The scene renders the bundled Ninja Adventure houses, trees and animated characters, and fits the complete 640×384 map to its container at every viewport width. Resident sprites and homes persist across snapshots; only added, removed, or moved villagers change their objects or routes.
+
+## Village interface
+
+The village map stays clear of the people list and approval prompts. Select a character on the map or a person in the searchable sidebar to see their latest activity. Filter the list by residents or working villagers. Pause motion from the map toolbar; reduced-motion preferences start it paused. Selection and paused motion survive snapshot updates.
+
+The connection badge distinguishes the live stream from reconnecting with the last snapshot. Approval answers still go through the non-optimistic Steward boundary below the village, with details expandable before deciding. Village records show recent work first and scroll inside bounded, keyboard-focusable panels; artifact filenames expand to reveal their full paths.
 
 ## Verification
 
 ```sh
 pnpm test
 pnpm build
+pnpm exec playwright install chromium
+pnpm test:browser
 ```
+
+`pnpm test:browser` runs the production build at desktop, tablet, and phone widths, checks canvas fitting, overflow, resident selection, motion controls, stream updates, and the production backend restriction. Set `PLAYWRIGHT_CHANNEL=chrome` to use an installed Chrome locally. CI installs Chromium and runs both suites.
 
 `pnpm test` parses Chronicle's complete fixture and checks that an unsupported contract version produces a visible error instead of a partially rendered village.
 

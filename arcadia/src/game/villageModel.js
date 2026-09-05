@@ -112,15 +112,25 @@ export function buildVillageModel(map, snapshotVillagers, snapshotApprovals = []
   const knockingSlots = new Map([...pendingAgentIds]
     .toSorted()
     .map((id, index, ids) => [id, (index - (ids.length - 1) / 2) * 16]));
-  let visitorIndex = 0;
+  const walkable = walkability(map);
+  const visitorDoor = place(map, "lodge-door");
+  const visitorSlots = walkable.flatMap((open, index) => {
+    const x = (index % map.width) * map.tilewidth + map.tilewidth / 2;
+    const y = Math.floor(index / map.width) * map.tileheight + map.tileheight / 2;
+    if (!open || y < map.tileheight * 5) return [];
+    // Keep people out from under the houses and the lodge roof.
+    if (placeObjects(map).some(p => ["home", "lodge"].includes(property(p, "kind")) && Math.abs(p.x - x) < 38 && y > p.y - 68 && y < p.y + 8)) return [];
+    return [{ x, y }];
+  }).sort((a, b) => Math.hypot(a.x - visitorDoor.x, a.y - visitorDoor.y) - Math.hypot(b.x - visitorDoor.x, b.y - visitorDoor.y) || a.y - b.y || a.x - b.x);
+  const visitorPositions = new Map(snapshotVillagers.filter(v => v.residency !== "resident").toSorted((a, b) => a.id.localeCompare(b.id)).map((v, index) => [v.id, visitorSlots[index % visitorSlots.length] || visitorDoor]));
 
   return snapshotVillagers.map((villager) => {
     const isResident = villager.residency === "resident";
     const anchor = isResident ? place(map, "home", villager.home) : lodge;
     const door = isResident ? place(map, "door", villager.home) : place(map, "lodge-door");
-    const offset = isResident ? 0 : visitorIndex++ * 16;
-    const moving = villager.state === "working";
+    const position = isResident ? door : visitorPositions.get(villager.id);
     const knockingOffset = knockingSlots.get(villager.id);
+    const moving = villager.state === "working" && knockingOffset === undefined;
 
     return {
       ...villager,
@@ -130,10 +140,10 @@ export function buildVillageModel(map, snapshotVillagers, snapshotApprovals = []
         x: anchor.x,
         y: anchor.y,
       },
-      x: knockingOffset === undefined ? door.x + offset : doorstep.x + knockingOffset,
-      y: knockingOffset === undefined ? door.y : doorstep.y,
+      x: knockingOffset === undefined ? position.x : doorstep.x + knockingOffset,
+      y: knockingOffset === undefined ? position.y : doorstep.y,
       moving,
-      route: moving ? routeBetween(map, door, work) : [],
+      route: moving ? routeBetween(map, position, work) : [],
     };
   });
 }

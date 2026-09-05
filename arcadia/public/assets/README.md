@@ -20,8 +20,8 @@ used. CC0 asks for nothing, but the attribution travels with the files regardles
   under the SIL Open Font License 1.1. `fonts/CousineSnapshot-LICENSE.txt` is that license
   and must stay beside the font.
 
-## Map and placeholder tiles
+## Map and terrain
 
 - `village.tmj` — the village map, authored as a Tiled JSON export. Arcadia's own.
-- `village-tiles.svg` — placeholder tiles the scene renders today, kept until the pixel art
-  above is wired into the scene. Arcadia's own.
+- `village-tiles.svg` — grass and path textures used by the terrain layer. Arcadia's own.
+  Buildings, characters and scenery use the CC0 pixel art above.

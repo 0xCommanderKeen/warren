@@ -11,13 +11,16 @@ export function startGame(parent, snapshot) {
     height: 384,
     backgroundColor: "#d8c59e",
     scale: {
-      mode: Phaser.Scale.RESIZE,
+      mode: Phaser.Scale.FIT,
       autoCenter: Phaser.Scale.CENTER_BOTH,
     },
     pixelArt: true,
     scene: [scene],
   });
   return {
+    selectVillager(id) { scene.selectVillager(id); },
+    setSelectionHandler(callback) { scene.onSelectVillager = callback; },
+    setMotionPaused(paused) { scene.setMotionPaused(paused); },
     applySnapshot(next) {
       scene.applySnapshot(next);
     },

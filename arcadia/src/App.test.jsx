@@ -14,6 +14,7 @@ vi.mock("./game/PhaserGame.jsx", () => ({
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 
 class FakeEventSource {
@@ -393,7 +394,7 @@ describe("Arcadia", () => {
     expect(JSON.stringify({ ...localStorage, ...sessionStorage })).not.toMatch(
       /expired-secret|replacement-secret/,
     );
-    expect(screen.getByRole("status")).toHaveTextContent(
+    expect(within(screen.getByRole("region", { name: "Approval knocks" })).getByRole("status")).toHaveTextContent(
       "Answer sent. Waiting for Steward's confirming state",
     );
   });
@@ -473,5 +474,42 @@ describe("Arcadia", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Steward credentials are required");
     expect(screen.getByLabelText("Steward token")).toHaveValue("");
     expect(screen.getByRole("button", { name: "Approve Deploy?" })).toBeDisabled();
+  });
+});
+
+describe("village usability", () => {
+  it("ignores crafted backend overrides in production", () => {
+    vi.stubEnv("DEV", false);
+    expect(backendFromLocation("?backend=https%3A%2F%2Funtrusted.example")).toBe("/chronicle");
+    vi.stubEnv("DEV", true);
+    expect(backendFromLocation("?backend=%2Flocal-preview")).toBe("/local-preview");
+  });
+
+  it("shows a reconnecting badge without clearing the village and recovers on stream open", async () => {
+    let options;
+    render(<LiveApp transportFactory={o => { options = o; return { start: vi.fn().mockResolvedValue(), close: vi.fn() }; }} />);
+    options.onEnvelope(fixture);
+    options.onStatus("live");
+    await waitFor(() => expect(screen.getByRole("status", { name: "Village connection" })).toHaveTextContent("Live village"));
+    options.onError(new Error("Network lost"));
+    options.onStatus("reconnecting");
+    await waitFor(() => expect(screen.getByRole("status", { name: "Village connection" })).toHaveTextContent("Reconnecting"));
+    expect(screen.getByTestId("village-canvas")).toBeVisible();
+    options.onStatus("live");
+    await waitFor(() => expect(screen.getByRole("status", { name: "Village connection" })).toHaveTextContent("Live village"));
+  });
+
+  it("filters villagers, opens a dossier, and retains it through a snapshot update", () => {
+    const view = render(<App envelope={fixture} />);
+    fireEvent.change(screen.getByRole("searchbox", { name: "Find a villager" }), { target: { value: "Keeper" } });
+    const person = within(screen.getByRole("complementary", { name: "Villagers" })).getByRole("button", { name: /Keeper/ });
+    fireEvent.click(person);
+    expect(screen.getByRole("region", { name: "Selected villager" })).toHaveTextContent("Keeper");
+    view.rerender(<App envelope={structuredClone(fixture)} />);
+    expect(person).toHaveAttribute("aria-pressed", "true");
+    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "nobody-matches" } });
+    expect(screen.getByText("No villagers match this view.")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Close villager details" }));
+    expect(screen.queryByRole("region", { name: "Selected villager" })).toBeNull();
   });
 });
