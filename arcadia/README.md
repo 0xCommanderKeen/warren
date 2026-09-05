@@ -21,13 +21,13 @@ for each mount or backend change.
 
 ## Steward writes
 
-[`src/steward/StewardClient.js`](src/steward/StewardClient.js) is Arcadia's only Steward write boundary. It owns job posts, approval decisions, resident declarations, and manual routine runs. Feature code supplies declarations or decisions to that client; it must not call Steward directly.
+[`src/steward/StewardClient.js`](src/steward/StewardClient.js) is Arcadia's only Steward write boundary. It owns approval decisions. Feature code supplies decisions to that client; it must not call Steward directly.
 
 The Steward URL is supplied when the client is created. **The shipped client is same-origin, always**: `?steward=` and `VITE_STEWARD_URL` are read only under `import.meta.env.DEV`, so Vite eliminates both from a built bundle, and the client refuses to send credentials to a base that is not this origin anyway (warren#256). A deployed Arcadia needs neither — `deploy/nginx.conf` proxies Steward's write routes behind the deployed origin. In `pnpm dev`, the dev server proxies the same Steward routes using `STEWARD_URL` (default `http://127.0.0.1:8801`). The browser can therefore use its own origin; the development-only URL overrides remain available. The approval prompt hands its bearer token to `setCredentials`; the value can be replaced or cleared at runtime and lives only inside that client instance. Arcadia never writes it to web storage, markup, URLs, or logs. A `401` clears the rejected token and reopens the prompt so an operator can replace it without reloading the page.
 
-Writes are deliberately non-optimistic. A valid Steward receipt leaves the client in `awaiting_confirmation`; the village continues to render Chronicle's last complete snapshot. Pass later Chronicle snapshots to `confirm`. Only the matching projected job, approval, routine run, or resident appearance releases the write lock. The client never reads Chronicle's internal `/events` endpoint.
+Writes are deliberately non-optimistic. A valid Steward receipt leaves the client in `awaiting_confirmation`; the village continues to render Chronicle's last complete snapshot. Pass later Chronicle snapshots to `confirm`. Only the matching resolved approval with the submitted decision releases the write lock. The client never reads Chronicle's internal `/events` endpoint.
 
-Only Steward's pre-mutation `401` and `422` refusals release the lock for retry. Network failures, other statuses, malformed receipts, and server/proxy failures are ambiguous and keep writes blocked, because sending again could duplicate work. If the request or receipt retains an exact usable identity, a later matching Chronicle snapshot can reconcile it without another write. Ambiguous routine runs remain blocked because Steward's receipt does not expose the projected run ID.
+Only Steward's pre-mutation `401` and `422` refusals release the lock for retry. Network failures, other statuses, malformed receipts, and server/proxy failures are ambiguous and keep writes blocked, because sending again could duplicate work. The requested approval identity and decision allow a later matching Chronicle snapshot to reconcile an ambiguous outcome without another write.
 
 ## Time of day
 
