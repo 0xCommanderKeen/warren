@@ -26,6 +26,13 @@ import tomllib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+# The entrypoint preserves the operator's files. The CLI may subsequently migrate
+# its own config format, so check these values before starting it.
+assert Path("/root/.codex/auth.json").read_text() == '{"OPENAI_API_KEY":"synthetic-test-key"}'
+saved_config = tomllib.loads(Path("/root/.codex/config.toml").read_text())
+assert saved_config["sandbox_mode"] == "danger-full-access"
+assert saved_config["approval_policy"] == "on-request"
+
 requests = []
 api_calls = []
 command = '''set -eu
@@ -120,12 +127,10 @@ assert Path("/memory/probe").read_text() == "persisted"
 assert api_calls == [("/skills", "Bearer probe-session-only")]
 assert len(requests) == 2
 assert "probe-passed" in json.dumps(requests[-1]["input"])
-# Codex may rewrite config.toml privately as container root. Verify persistence
-# from the account that owns the runtime, not the host's unrelated runner UID.
+# Codex may rewrite config.toml privately as container root. Inspect its resulting
+# state from that account without requiring the host's unrelated UID to read it.
 assert Path("/root/.codex/auth.json").read_text() == '{"OPENAI_API_KEY":"synthetic-test-key"}'
-saved_config = tomllib.loads(Path("/root/.codex/config.toml").read_text())
-assert saved_config["sandbox_mode"] == "danger-full-access"
-assert saved_config["approval_policy"] == "on-request"
+assert tomllib.loads(Path("/root/.codex/config.toml").read_text())
 assert Path("/root/.codex").stat().st_mode & 0o777 == 0o700
 print("CODEX_RECEIPT_START")
 print(result.stdout, end="")
