@@ -38,14 +38,15 @@ for (const viewport of [
     expect(box.y + box.height).toBeLessThanOrEqual(viewport.height - 9);
     const face = await profile.locator(".ve-portrait-face").boundingBox();
     expect(face.width).toBeGreaterThan(viewport.width < 650 ? 25 : 35);
-    for (let i = 0; i < 12; i++) {
-      await page.keyboard.press("Tab");
-      expect(
-        await profile.evaluate((dialog) =>
-          dialog.contains(document.activeElement),
-        ),
-      ).toBe(true);
-    }
+    // Exercise both actual wrap boundaries instead of twelve arbitrary stops.
+    // Repeated paint/automation round trips are costly in CI's software renderer.
+    const close = profile.getByRole("button", { name: "Close villager details" });
+    await close.focus();
+    await page.keyboard.press("Shift+Tab");
+    expect(await profile.evaluate(dialog => dialog.contains(document.activeElement))).toBe(true);
+    await expect(close).not.toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(close).toBeFocused();
     await profile.locator(".agent-profile-content").evaluate((element) => {
       element.scrollTop = element.scrollHeight;
     });
