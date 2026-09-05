@@ -461,7 +461,7 @@ def test_a_deploy_leaves_a_request_the_ledger_can_poll(panel: PanelFactory) -> N
 
     assert record["path"] == "/residents"
     assert record["outcome"] == "deployed"
-    assert record["detail"] == {"resident": "note-keeper"}
+    assert record["detail"] == {"resident": "note-keeper", "master_token_slot": "current"}
 
 
 def test_declaring_without_deploying_says_declared_in_the_same_log(

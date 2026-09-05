@@ -59,6 +59,7 @@ from steward.chat import RoutineDelivery
 from steward.claims import ONE_SESSION_PER_RESIDENT, ResidentClaims
 from steward.deploy import Transport
 from steward.manifest import SessionGrant, validate_manifest
+from steward.master_auth import PREVIOUS_ENV, UNTIL_ENV, MasterTokens
 from steward.nursery import (
     CommitIdentity,
     provision_resident,
@@ -196,6 +197,8 @@ class ApiConfig:
     #: its own branch so the history it is authoritative for exists somewhere that is not
     #: one disk on a NAS. The push is best effort and never fails a write.
     push: au.PushTarget | None = None
+    token_previous: str | None = None
+    token_previous_until: str | None = None
     approval_poll_interval_s: float = 1.0
     approval_close_timeout_s: float = 5.0
 
@@ -217,6 +220,8 @@ class ApiConfig:
             residents_dir=Path(configured_residents) if configured_residents else Path("residents"),
             db_path=Path(db_path) if db_path is not None else None,
             token=source.get(TOKEN_ENV),
+            token_previous=source.get(PREVIOUS_ENV),
+            token_previous_until=source.get(UNTIL_ENV),
             allow_open=allow_open,
             cors_origins=parse_origins(source.get(CORS_ENV)),
             workdir=Path(workdir) if workdir is not None else None,
@@ -308,6 +313,21 @@ def resolve_token(token: str | None, *, allow_open: bool) -> str | None:
     if cleaned is None and not allow_open:
         raise ApiError(NO_TOKEN_MESSAGE)
     return cleaned
+
+
+def configured_master_tokens(settings: ApiConfig, now: Callable[[], datetime]) -> MasterTokens:
+    """Validate rotation together with the API's existing open-mode policy."""
+    token = resolve_token(settings.token, allow_open=settings.allow_open)
+    if settings.allow_open and (
+        settings.token_previous is not None or settings.token_previous_until is not None
+    ):
+        raise ApiError("rotation is incompatible with --allow-open")
+    try:
+        return MasterTokens(
+            token, settings.token_previous, settings.token_previous_until, now, compare_digest
+        )
+    except ValueError as exc:
+        raise ApiError(str(exc)) from exc
 
 
 # --------------------------------------------------------------------------------------
@@ -524,6 +544,7 @@ def create_app(  # noqa: PLR0913 — injectable collaborators are the public tes
     """
     settings = config if config is not None else ApiConfig.from_env()
     token = resolve_token(settings.token, allow_open=settings.allow_open)
+    master_tokens = configured_master_tokens(settings, now)
     residents_dir = Path(settings.residents_dir)
     library = library_for(residents_dir, settings.skills_dir)
 
@@ -604,6 +625,7 @@ def create_app(  # noqa: PLR0913 — injectable collaborators are the public tes
                     operator_principal,
                     session_grants,
                     compare_digest,
+                    master_tokens=master_tokens,
                 )
             ),
         ],
@@ -615,7 +637,12 @@ def create_app(  # noqa: PLR0913 — injectable collaborators are the public tes
         lifespan=lifespan,
     )
     app.add_exception_handler(RequestValidationError, _validation_handler)
-    app.add_middleware(_ApprovalBodyDepthMiddleware, token=token, compare_token=compare_digest)
+    app.add_middleware(
+        _ApprovalBodyDepthMiddleware,
+        token=token,
+        compare_token=compare_digest,
+        master_tokens=master_tokens,
+    )
     if settings.cors_origins:
         app.add_middleware(
             CORSMiddleware,

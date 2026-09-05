@@ -741,6 +741,9 @@ def doctor(residents: Path | None, db: Path | None) -> None:
     are work nobody will ever pick up. Board claimants are pre-flighted here too — a
     resident that claims work and schedules none is a resident nothing else checks.
     """
+    from steward.master_auth import rotation_status  # noqa: PLC0415 — doctor-only diagnostic
+
+    click.echo("master token: " + rotation_status(os.environ, datetime.now(UTC)))
     defaulted = residents is None
     residents = residents or default_residents_dir()
     result = validate_paths([residents])

@@ -1464,3 +1464,35 @@ views need no reload at all; they re-read the tree on every request.
 process goes on running the last declarations that did — the same judgement the daemon
 makes, for the same reason. Swapping in only what parsed would quietly retire every
 resident whose manifest happened to be mid-edit.
+
+### Rotate the master token
+
+Configure `STEWARD_TOKEN` with the new secret, `STEWARD_TOKEN_PREVIOUS` with the old
+secret, and `STEWARD_TOKEN_PREVIOUS_UNTIL` with an explicit UTC deadline, for example
+`2026-09-07T12:00:00Z`. The old token is accepted only before that instant, even without
+a restart. All three settings are required for rotation; open mode cannot be combined
+with rotation. Remove both previous-token settings when finished. Expired configuration
+is allowed at startup but does not enable the expired token.
+
+1. Inventory consumers without printing credentials: the API's environment, service
+   configuration, scripts using `STEWARD_URL`, and CI secret names. Do not assume every
+   daemon uses the master token. Resident sessions use their own credentials.
+2. Generate/store the new secret securely. Configure the API with new/current plus
+   old/previous and the deadline, then recreate **the API**. The shared compose `.env`
+   is read at container creation, so editing it alone does not update a running process.
+3. Verify both credentials against a read endpoint, then migrate identified clients/CI
+   separately. Avoid secrets in shell history, command arguments, or diagnostic output.
+4. Monitor the API's structured `master_token_slot` log field (`current`/`previous`;
+   at most one message per slot per minute). Accepted write receipts carry the slot too.
+   `steward doctor` reports active/expired previous-token configuration on the machine
+   where it runs. Neither silence in the log nor a clean local doctor proves all clients
+   have migrated; exercise each inventoried consumer.
+5. Remove the two previous settings and recreate the API. Verify new-token success and
+   old-token 401. If migration needs rollback before the deadline, restore the old token
+   as current and remove the previous settings, then recreate the API and revert migrated
+   clients. Never extend overlap indefinitely to hide an unknown consumer.
+
+Operator credentials and session grants are unchanged. Both accepted master tokens receive
+identical approval-body guards. Token values and token-derived identifiers are never included
+in rotation audit output. This runbook is an operational procedure; passing implementation
+checks does not mean a live rotation has been performed.
