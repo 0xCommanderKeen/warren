@@ -22,6 +22,9 @@ on:
 
 permissions:
   contents: read
+  # paths-filter lists a pull request's files through the API, not git — this is what
+  # lets the `image` job below decide without it.
+  pull-requests: read
 
 concurrency:
   group: steward-${{ github.ref }}
@@ -34,8 +37,27 @@ defaults:
 jobs:
   check:
     runs-on: ubuntu-latest
+    outputs:
+      image-inputs-changed: ${{ steps.image-inputs.outputs.image }}
     steps:
       - uses: actions/checkout@v7
+
+      # Did this pull request touch anything the resident image is built from? The build
+      # context is docker/resident/ and the Makefile supplies the pins and the platform;
+      # nothing else in the tree reaches the image. chronicle/hooks/** is deliberately
+      # absent: the image COPYs the vendored emitter, not the source, and an emitter
+      # change that is not re-vendored into docker/resident/ in the same PR fails the
+      # byte comparison in Tests below — a re-vendored one trips this filter by itself.
+      # Pushes to main skip the question; the `image` job runs on every one of them.
+      - uses: dorny/paths-filter@v4
+        id: image-inputs
+        if: github.event_name == 'pull_request'
+        with:
+          filters: |
+            image:
+              - 'steward/docker/resident/**'
+              - 'steward/Makefile'
+              - '.github/workflows/steward.yml'
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -73,11 +95,21 @@ jobs:
   # repository: their first run after any change was on somebody's laptop or on the NAS.
   # Build only — there is no registry in this fleet, so nothing is pushed and `make
   # image-ship` stays a human's deliberate act.
+  #
+  # It is a test of the Dockerfile, so it runs where tests run: on the pull request that
+  # changes the Dockerfile's inputs, before the merge, not after. But it used to run on
+  # every steward PR, a minute of docker for Python changes that could not have reached
+  # the image — so a PR now pays for it only when `check`'s filter saw an input move.
+  # Every push to main still builds, unconditionally: that is the backstop for the
+  # filter being wrong, and main is where a wrong filter would be found out.
   image:
     # After `check`, not beside it: tests/test_resident_image.py reads the pin, the digest
     # and the vendored emitter off the files in a millisecond, and there is no sense
     # spending minutes on a build when a millisecond already said no.
     needs: check
+    if: >-
+      github.event_name == 'push'
+      || needs.check.outputs.image-inputs-changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
