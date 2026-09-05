@@ -19,12 +19,13 @@ died with the viewer (warren#219) and is not reconstructed. Every assertion belo
 was checked against current behavior before being written — no fixture and no
 code was edited to make them agree.
 
-`mood-authority-order.json`, `mood-future-sufficiency.json`,
-`mood-grouped-unrelated.json`, `mood-lifecycle-ambiguity.json`,
-`mood-rotation.json`, `mood-rotation-adversarial.json` and
-`mood-rotation-regressions.json` are still unread: their deleted tests leaned on
-the Node half or on rotation scaffolding that needs more than a fixture to
-restore. They are kept, not wired, and named in warren#250 as follow-up.
+The seven remaining mood vectors are exercised by `RestoredMoodVectorTests`.
+They cover authority append order, future sufficiency, grouped unrelated
+appends, lifecycle ambiguity, and ordinary/adversarial/boundary rotation.
+Current projection differences from the retired browser rules are explicit:
+plain knocks and approval closes do not set need/interaction signals, and
+sufficiency counts events without a time span. Removing an orphan close can
+therefore change the reported evidence count even when signals are unchanged.
 
 `task-ledger.json` is the one fixture here that was not rescued: it was recorded
 for warren#277, when a delegated job started opening a board row and rotation had
@@ -80,7 +81,9 @@ class ProjectionWitnessVectorTests(unittest.TestCase):
         agent could start carrying witnesses forward unnoticed.
         """
         departed = next(
-            item for item in load("retention-parity.json") if not item["projection_witnesses"]
+            item
+            for item in load("retention-parity.json")
+            if not item["projection_witnesses"]
         )
         self.assertEqual(
             "session_ended", departed["events"][-1]["type"], "vector still departs"
@@ -513,6 +516,239 @@ class MoodLifecycleVectorTests(unittest.TestCase):
         decoded = [json.loads(line) for line in rotated.lines]
         self.assertIn(events[0], decoded, "rotation keeps the displaced knock")
         self.assertIn(events[6], decoded, "rotation keeps the collision owner")
+
+
+class RestoredMoodVectorTests(unittest.TestCase):
+    """The seven remaining vectors against current Python retention and projection.
+
+    Capsule ordinals depend on rotation boundaries. Compare semantic authority,
+    not bytes across different groupings. Likewise, removed orphan closes can
+    change the projection's event count without changing any operational signal.
+    """
+
+    def lines(self, events):
+        return [json.dumps(event, separators=(",", ":")) for event in events]
+
+    def rotate(self, events, now):
+        return self.rotate_lines(self.lines(events), now)
+
+    def rotate_lines(self, lines, now):
+        return retention.carry_forward(lines, epoch_ms(now), retention.POLICY)
+
+    def events(self, retained):
+        return [
+            record
+            for line in retained.lines
+            if "_burrow_internal" not in (record := json.loads(line))
+        ]
+
+    def moods(self, events, now):
+        return {
+            row["id"]: row["mood"]
+            for row in project_village(events, [], now)["villagers"]
+        }
+
+    def assert_moods_survive(self, events, now):
+        retained = self.rotate(events, now)
+        self.assertEqual(
+            self.moods(events, now), self.moods(self.events(retained), now)
+        )
+        self.assertEqual(
+            retained.lines,
+            self.rotate_lines(retained.lines, now).lines,
+            "repeating rotation without appends must be stable",
+        )
+        return retained
+
+    def event(self, agent, stamp, kind, **payload):
+        return {
+            "v": 0,
+            "ts": stamp,
+            "source": "codex",
+            "agent_id": agent,
+            "project": "burrow",
+            "type": kind,
+            "payload": payload,
+        }
+
+    def pending(self, agent, stamp, request_id):
+        return self.event(
+            agent,
+            stamp,
+            "needs_human",
+            message=f"Question {request_id}",
+            request_id=request_id,
+            action="deploy",
+            detail=None,
+            options=["approve", "deny"],
+        )
+
+    def test_rotation_preserves_blocked_need_work_buckets_and_terminal_reset(self):
+        fixture = load("mood-rotation.json")
+        retained = self.assert_moods_survive(fixture["events"], fixture["now"])
+        self.assertEqual(set(range(8)), retained.witnesses["moods"])
+        mood = self.moods(self.events(retained), fixture["now"])["codex:mood"]
+        self.assertEqual("!", mood["glyph"])
+        self.assertEqual(10, mood["signals"]["workload"]["density"])
+        self.assertEqual(0, mood["signals"]["failure"]["streak"])
+        self.assertEqual(2, mood["signals"]["failure"]["failures"])
+        self.assertEqual("mood-r", mood["signals"]["unresolvedNeed"]["request_id"])
+
+    def test_adversarial_rotation_keeps_outcomes_and_discards_orphan_closes(self):
+        fixture = load("mood-rotation-adversarial.json")
+        events = fixture["events"]
+        retained = self.assert_moods_survive(events, fixture["now"])
+        self.assertEqual(
+            set(range(7)) | set(range(11, 21)), retained.witnesses["moods"]
+        )
+        self.assertEqual([*events[:7], *events[11:]], self.events(retained))
+        moods = self.moods(self.events(retained), fixture["now"])
+        failure = moods["codex:mood-interrupted"]["signals"]["failure"]
+        self.assertEqual(0, failure["streak"], "heartbeats interrupt failures")
+        self.assertEqual("3", failure["failuresLabel"])
+        self.assertEqual(
+            "old",
+            moods["codex:mood-adversarial"]["signals"]["interaction"]["level"],
+            "recent orphan closes are not root prompts",
+        )
+
+    def test_authority_order_keeps_pending_orphan_and_append_newest_root(self):
+        fixture = load("mood-authority-order.json")
+        events, now = fixture["events"], fixture["now"]
+        retained = self.rotate(events, now)
+        self.assertEqual(
+            [events[i] for i in (1, 4, 7, 8, 9)], retained.capsule["events"]
+        )
+        self.assertEqual({1, 2, 4, 5, 9, 10}, retained.witnesses["moods"])
+        before, after = self.moods(events, now), self.moods(self.events(retained), now)
+        for agent in before:
+            with self.subTest(agent=agent):
+                self.assertEqual(before[agent]["signals"], after[agent]["signals"])
+                self.assertEqual(before[agent]["glyph"], after[agent]["glyph"])
+        self.assertEqual("!", after["codex:orphan-first"]["glyph"])
+        self.assertEqual(
+            7 * 60 * 60 * 1000,
+            after["codex:multiple-roots"]["signals"]["interaction"]["logAgeMs"],
+            "the last appended root wins despite its older timestamp",
+        )
+        # Current _mood counts all events: dropping the orphan close changes this
+        # field. Do not claim full-object parity or restore the old span rule.
+        self.assertEqual(3, before["codex:orphan-first"]["evidence"]["count"])
+        self.assertEqual(2, after["codex:orphan-first"]["evidence"]["count"])
+
+    def test_future_superseder_keeps_sufficiency_without_the_plain_knock(self):
+        fixture = load("mood-future-sufficiency.json")
+        initial, now = fixture["initial"], fixture["now"]
+        first = self.rotate(initial, now)
+        after = self.rotate_lines([*first.lines, *self.lines([fixture["append"]])], now)
+        complete = [*initial, fixture["append"]]
+        self.assertEqual(self.moods(complete, now), self.moods(self.events(after), now))
+        selected = [complete[i] for i in self.rotate(complete, now).witnesses["moods"]]
+        self.assertEqual(initial[:6], sorted(selected, key=complete.index))
+        mood = self.moods(self.events(after), now)[fixture["agent_id"]]
+        self.assertTrue(mood["enoughEvidence"])
+        self.assertEqual({"count": 6, "spanMs": 0}, mood["evidence"])
+        self.assertFalse(mood["signals"]["unresolvedNeed"]["observed"])
+        self.assertEqual(initial[3]["ts"], mood["anchor"])
+
+    def test_unrelated_grouped_appends_preserve_authority_and_do_not_age_owner(self):
+        fixture = load("mood-grouped-unrelated.json")
+        initial, now = fixture["initial"], fixture["now"]
+        first = self.rotate(initial, now)
+        grouped = self.rotate_lines(
+            [*first.lines, *self.lines(fixture["unrelated"])], now
+        )
+        incremental = first
+        for event in fixture["unrelated"]:
+            incremental = self.rotate_lines(
+                [*incremental.lines, *self.lines([event])], now
+            )
+        whole = self.rotate([*initial, *fixture["unrelated"]], now)
+        owner = initial[0]["agent_id"]
+        expected = self.moods(initial, now)[owner]
+        for result in (whole, grouped, incremental):
+            with self.subTest(raw_count=result.capsule["raw_count"]):
+                self.assertEqual(initial, result.capsule["events"])
+                self.assertFalse(result.capsule["overflow"])
+                self.assertEqual(expected, self.moods(self.events(result), now)[owner])
+                self.assertEqual(3, len(self.moods(self.events(result), now)))
+
+    def test_ambiguous_close_retains_candidates_but_projection_uses_pending_requests(
+        self,
+    ):
+        fixture = load("mood-lifecycle-ambiguity.json")
+        events = fixture["scenarios"]["ambiguous_close"]
+        retained = self.assert_moods_survive(events, fixture["now"])
+        self.assertEqual(events[:-1], retained.capsule["events"])
+        self.assertTrue({0, 1}.issubset(retained.witnesses["moods"]))
+        state = project_village(self.events(retained), [], fixture["now"])
+        self.assertEqual("collision", state["approvals"][0]["state"])
+        mood = self.moods(self.events(retained), fixture["now"])["codex:ambiguous"]
+        self.assertEqual("recent-0", mood["signals"]["unresolvedNeed"]["request_id"])
+        self.assertFalse(mood["signals"]["interaction"]["observed"])
+
+    def test_post_close_collision_keeps_both_candidates_under_pending_pressure(self):
+        fixture = load("mood-lifecycle-ambiguity.json")
+        case = fixture["scenarios"]["post_close_collision"]
+        start = datetime.datetime.fromisoformat(case["pending_start"])
+        pending = [
+            self.pending(
+                case["anchor"]["agent_id"],
+                (start + datetime.timedelta(minutes=i))
+                .isoformat(timespec="milliseconds")
+                .replace("+00:00", "Z"),
+                f"pending-{i}",
+            )
+            for i in range(case["pending_count"])
+        ]
+        events = [*case["events"], *pending, case["anchor"]]
+        retained = self.assert_moods_survive(events, fixture["now"])
+        self.assertEqual(
+            [*case["events"][:3], case["events"][4], *pending],
+            retained.capsule["events"],
+        )
+        self.assertTrue({0, 1, 2, 4}.issubset(retained.witnesses["moods"]))
+        mood = self.moods(self.events(retained), fixture["now"])[
+            case["anchor"]["agent_id"]
+        ]
+        self.assertEqual("pending-0", mood["signals"]["unresolvedNeed"]["request_id"])
+        self.assertFalse(mood["signals"]["interaction"]["observed"])
+
+    def test_plain_timestamp_anchor_keeps_its_append_later_boundary(self):
+        fixture = load("mood-rotation-regressions.json")
+        case = fixture["plain"]
+        events = [
+            self.event(
+                case["agent_id"],
+                case["knock"],
+                "needs_human",
+                message="Legacy question",
+            ),
+            self.event(case["agent_id"], case["boundary"], "idle"),
+            self.event(case["agent_id"], case["failure"], "tool_failed", tool="Bash"),
+        ]
+        retained = self.assert_moods_survive(events, fixture["now"])
+        self.assertEqual({0, 1, 2}, retained.witnesses["moods"])
+        mood = self.moods(self.events(retained), fixture["now"])[case["agent_id"]]
+        self.assertEqual(case["knock"], mood["anchor"])
+        self.assertFalse(mood["signals"]["unresolvedNeed"]["observed"])
+        self.assertEqual(1, mood["signals"]["failure"]["streak"])
+
+    def test_oldest_need_survives_beyond_the_retention_approval_capacity(self):
+        fixture = load("mood-rotation-regressions.json")
+        case = fixture["capacity"]
+        events = [self.pending(case["agent_id"], case["oldest"], "oldest")]
+        events.extend(
+            self.pending(case["agent_id"], fixture["now"], f"recent-{i}")
+            for i in range(case["recent_count"])
+        )
+        retained = self.assert_moods_survive(events, fixture["now"])
+        self.assertNotIn(0, retained.witnesses["approvals"])
+        self.assertIn(0, retained.witnesses["moods"])
+        self.assertIn(events[0], retained.capsule["events"])
+        mood = self.moods(self.events(retained), fixture["now"])[case["agent_id"]]
+        self.assertEqual("oldest", mood["signals"]["unresolvedNeed"]["request_id"])
+        self.assertEqual("!", mood["glyph"])
 
 
 if __name__ == "__main__":

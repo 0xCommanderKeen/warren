@@ -306,7 +306,7 @@ def _capsule_identity_equal(left, right):
 def _mood_keep_indexes(
     parsed, eligible_agents, authority_uncertain=False, overflow_state=None
 ):
-    """Independent bounded witnesses for the pure browser mood reducer.
+    """Independent bounded witnesses for retained mood evidence.
 
     These indexes are evidence only. The caller intersects agent IDs with its
     ordinary presence projection, so routine/task facts cannot manufacture a
