@@ -114,7 +114,7 @@ export function createStewardClient({ baseUrl = "", fetch: fetchImpl = fetch } =
     // before `writeState` is touched means a refused base cannot park an unresolved write
     // and block every later one. `import.meta.env.DEV` is `false` in every built bundle, so
     // what ships refuses unconditionally; the escape is only for a human running vite, whose
-    // dev server proxies Chronicle but not Steward.
+    // dev server can target a separately configured Steward.
     if (!import.meta.env.DEV && !isSameOrigin(baseUrl)) {
       throw new StewardWriteError(
         `Refusing to send Steward credentials to ${normalizedBaseUrl(baseUrl)}: that is not this origin`,

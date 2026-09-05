@@ -124,6 +124,32 @@ def _approval_keep_indexes(parsed, capacity=KEEP_APPROVALS):
     return keep, isolated
 
 
+def _paired_approval_keep_indexes(parsed, keep):
+    """Complete every approval lifecycle another retention family selected.
+
+    Ordinary history can retain a knock outside the approval panel's raw tail,
+    including when Mood authority overflows. Carrying that knock alone revives
+    an answered request. Reuse the canonical first-close/collision selector over
+    the full segment, restricted to already-retained request IDs: at most the
+    canonical knock, one collision, and one close per selected request.
+    """
+    request_ids = {
+        shape.request_id
+        for index, event in parsed
+        if index in keep and (shape := structured_approval(event)) is not None
+    }
+    if not request_ids:
+        return set()
+    candidates = [
+        (index, event)
+        for index, event in parsed
+        if event["type"] in {"needs_human", "needs_human_resolved"}
+        and event["payload"].get("request_id") in request_ids
+    ]
+    paired, _ = _approval_keep_indexes(candidates, capacity=None)
+    return paired - keep
+
+
 def _journal_approval_keep_indexes(parsed, retained_journal_indexes):
     """Approval truth required by retained journal residents.
 

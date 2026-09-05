@@ -744,6 +744,13 @@ both files against the Python that owns them: identity against
 `retention_approvals._approval_lifecycle_identity`, lifecycle against the single close
 `retention_approvals._approval_keep_indexes` carries forward.
 
+Any structured knock retained by ordinary history, journal, or mood rules also
+carries its canonical request, first matching close, and collision witness from
+the complete segment. This pairing runs after the selectors, even outside the
+approval panel's raw tail and when mood authority overflows. It adds at most three
+canonical witnesses per already-retained request ID; an answered knock cannot
+become pending merely because another family retained its opening (#526).
+
 The panel keeps at most five newest confirmed request cards (action, detail and
 decision) alongside any newer pending queue. Closing one card therefore does not erase
 the decision while another remains actionable, and keyed rerenders move keyboard focus
