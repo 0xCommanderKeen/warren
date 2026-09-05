@@ -150,19 +150,6 @@ def _legacy_config():
     )
 
 
-VIEWER_EVENT_TYPES = {
-    "resident_declared",
-    "resident_retired",
-    "task_started",
-    "tool_called",
-    "tool_failed",
-    "artifact_produced",
-    "needs_human",
-    "idle",
-    "session_ended",
-}
-
-
 def read_villagers(villagers_dir=None):
     """Validated residents plus legacy soul files for v0 client compatibility."""
     out = read_residents(villagers_dir)["residents"]
@@ -230,96 +217,29 @@ _notification_store = notification_persistence.NotificationPersistence(
 _delivery_id_pattern = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 
 
-def villager_names(events, villagers_dir=None):
-    """Resolve stable names for a fleet.
+def villager_names(events, villagers_dir=None, *, evaluated_at=None, policy=None):
+    """Name the eligible fleet using the authoritative projection and allocation.
 
-    Resident manifests and legacy project souls are assigned once within the fleet;
-    fallback names come from the projection's shared identity algorithm.
+    Historical callers evaluate at their newest valid event; live notification callers
+    supply the current clock, using the same default policy as /state.
     """
-    latest = {}
-    parent_by_agent = {}
-    for event in events:
-        if isinstance(event, dict) and event.get("agent_id"):
-            agent_id = str(event["agent_id"])
-            latest[agent_id] = event
-            payload = event.get("payload") or {}
-            if isinstance(payload, dict) and payload.get("parent_agent_id"):
-                parent_by_agent[agent_id] = str(payload["parent_agent_id"])
+    from protocol import validate_event
+    from village_state import ProjectionPolicy, project_village
 
-    soul_by_agent = {}
-    soul_by_project = {}
-
-    def is_resident(soul):
-        return (
-            soul.get("valid") is True
-            and soul.get("manifest_version") == 1
-            and type(soul.get("home")) is int
+    events = [event for event in events if validate_event(event) is None]
+    if not events:
+        return {}
+    if evaluated_at is None:
+        evaluated_at = max(
+            datetime.datetime.fromisoformat(event["ts"].replace("Z", "+00:00"))
+            for event in events
         )
-
-    def index_soul(index, key, soul):
-        current = index.get(key)
-        if current is None or is_resident(soul) or not is_resident(current):
-            index[key] = soul
-
-    for soul in read_villagers(villagers_dir):
-        meta = soul.get("meta") or {}
-        if meta.get("agent_id"):
-            index_soul(soul_by_agent, meta["agent_id"], soul)
-        if meta.get("project"):
-            index_soul(soul_by_project, meta["project"], soul)
-
-    # Steward declarations are the primary identity source. A retirement removes the
-    # declaration; a later launch may declare the resident again after an explicit revival.
-    declared = {}
-    for event in events:
-        if not isinstance(event, dict) or not event.get("agent_id"):
-            continue
-        if event.get("type") == "resident_declared":
-            declared[str(event["agent_id"])] = {"meta": dict(event.get("payload") or {})}
-        elif event.get("type") == "resident_retired":
-            active = declared.get(str(event["agent_id"]))
-            payload = event.get("payload") or {}
-            meta = (active or {}).get("meta") or {}
-            if active is not None and all(
-                payload.get(field) == meta.get(field) for field in ("resident_id", "uid")
-            ):
-                declared.pop(str(event["agent_id"]), None)
-
-    names = {}
-    used_souls = set()
-    assigned = {}
-    # Exact identities are reserved first, independently of lexical event order.
-    for agent_id in sorted(latest):
-        if latest[agent_id].get("type") == "session_ended":
-            continue
-        soul = declared.get(agent_id) or soul_by_agent.get(agent_id)
-        soul_key = soul and (soul.get("file") or f"declared:{agent_id}")
-        if soul and soul_key not in used_souls:
-            assigned[agent_id] = soul
-            used_souls.add(soul_key)
-    for agent_id in sorted(latest):
-        if agent_id in assigned or latest[agent_id].get("type") == "session_ended":
-            continue
-        if agent_id in parent_by_agent:
-            continue
-        project = str(latest[agent_id].get("project") or "unknown")
-        soul = soul_by_project.get(project)
-        soul_key = soul and soul.get("file")
-        if soul and soul_key not in used_souls:
-            assigned[agent_id] = soul
-            used_souls.add(soul_key)
-    for agent_id in sorted(latest):
-        event = latest[agent_id]
-        if event.get("type") == "session_ended":
-            continue
-        project = str(event.get("project") or "unknown")
-        soul = assigned.get(agent_id)
-
-        name = fallback_identity(agent_id).name
-        if soul and (soul.get("meta") or {}).get("name"):
-            name = soul["meta"]["name"]
-        names[agent_id] = name
-    return names
+    identities = read_residents(villagers_dir)
+    state = project_village(
+        events, identities, evaluated_at,
+        dataclasses.replace(policy or ProjectionPolicy(), villagers=len(events)),
+    )
+    return {item["id"]: item["name"] for item in state["villagers"]}
 
 
 def _fleet_events(event, runtime):
@@ -337,33 +257,19 @@ def _fleet_events(event, runtime):
                 parsed = json.loads(line)
             except (TypeError, ValueError):
                 continue
-            if (
-                isinstance(parsed, dict)
-                and parsed.get("agent_id")
-                and parsed.get("type") in VIEWER_EVENT_TYPES
-            ):
+            if isinstance(parsed, dict) and parsed.get("agent_id"):
                 events.append(parsed)
     except (OSError, UnicodeDecodeError):
         pass
     events.append(event)
-    latest = {str(item["agent_id"]): item for item in events}
-    visible_agents = set()
-    for agent_id, item in latest.items():
-        try:
-            timestamp = str(item.get("ts") or "").replace("Z", "+00:00")
-            event_time = datetime.datetime.fromisoformat(timestamp).timestamp()
-        except (TypeError, ValueError):
-            event_time = 0
-        drop_seconds = config.drop_seconds
-        if item is event or time.time() - event_time <= drop_seconds:
-            visible_agents.add(agent_id)
-    return [item for item in events if str(item["agent_id"]) in visible_agents]
+    return events
 
 
 def villager_name(event, runtime):
     agent_id = str(event.get("agent_id") or "")
     return villager_names(
-        _fleet_events(event, runtime), runtime.config.villagers_dir
+        _fleet_events(event, runtime), runtime.config.villagers_dir,
+        evaluated_at=datetime.datetime.fromtimestamp(time.time(), datetime.UTC),
     ).get(agent_id, fallback_identity(agent_id).name)
 
 

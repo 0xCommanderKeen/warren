@@ -94,8 +94,9 @@ class NotificationTests(unittest.TestCase):
         agent_id="agent-a", project="burrow", message="help", ts="2026-08-24T12:00:00Z"
     ):
         return {
-            "v": 1,
-            "ts": ts,
+            "v": 0,
+            "source": "claude-code",
+            "ts": ts.replace("Z", ".000Z") if "." not in ts else ts,
             "agent_id": agent_id,
             "project": project,
             "type": "needs_human",
@@ -456,10 +457,10 @@ class NotificationTests(unittest.TestCase):
             self.claim_knock(event), "durable exact replay stays claimed once"
         )
 
-    def test_project_soul_is_consumed_once_across_the_fleet(self):
-        self.write_soul(
-            "project.md",
-            project=PROJECT_AGENT["match"]["project"],
+    def test_project_resident_is_consumed_once_across_the_fleet(self):
+        self.write_resident(
+            "project.resident.json",
+            {"project": PROJECT_AGENT["match"]["project"]},
             name=PROJECT_AGENT["soul"]["name"],
         )
         first = self.event(agent_id="a", project=PROJECT_AGENT["match"]["project"])
@@ -476,6 +477,26 @@ class NotificationTests(unittest.TestCase):
             self.assertEqual(PROJECT_AGENT["soul"]["name"], self.villager_name(first))
             self.assertEqual("Juniper", self.villager_name(second))
 
+    def test_notification_fleet_includes_routine_activity_before_allocating_home(self):
+        self.write_resident("project.resident.json", {"project": "burrow"})
+        first = self.event(agent_id="a")
+        first["type"] = "routine_finished"
+        first["source"] = "steward"
+        first["payload"] = {"routine": "daily", "run_id": "run-1", "outcome": "done", "duration_s": 1, "artifacts": []}
+        second = self.event(agent_id="q")
+        self.write_events(first, second)
+        with mock.patch.object(serve.time, "time", return_value=1787574600):
+            self.assertEqual("Juniper", self.villager_name(second))
+
+    def test_notification_uses_authoritative_absence_policy_with_custom_drop_setting(self):
+        self.write_resident("project.resident.json", {"project": "burrow"})
+        event = self.event(agent_id="a")
+        self.write_events(event)
+        config = serve.dataclasses.replace(self.runtime.config, drop_seconds=1)
+        with (mock.patch.object(self.runtime, "config", config),
+              mock.patch.object(serve.time, "time", return_value=1787574600)):
+            self.assertEqual("Resident", self.villager_name(event))
+
     def test_fallback_names_use_the_projected_identity_algorithm(self):
         first = self.event(agent_id="a")
         second = self.event(agent_id="q", ts="2026-08-24T12:00:01Z")
@@ -489,11 +510,10 @@ class NotificationTests(unittest.TestCase):
         event = self.event(agent_id="agent-U0001f407")
         self.assertEqual("Thistle", serve.villager_names([event])["agent-U0001f407"])
 
-    def test_exact_soul_is_not_reused_by_another_agent(self):
-        self.write_soul(
-            "resident.md",
-            agent_id="resident",
-            project=PROJECT_AGENT["match"]["project"],
+    def test_exact_resident_is_not_reused_by_another_agent(self):
+        self.write_resident(
+            "resident.resident.json",
+            {"agent_id": "resident"},
             name=PROJECT_AGENT["soul"]["name"],
         )
         ephemeral = self.event(agent_id="ephemeral")
@@ -538,9 +558,9 @@ class NotificationTests(unittest.TestCase):
         self.assertNotIn('"password": "', rendered)
 
     def test_child_lineage_survives_later_events_for_notification_names(self):
-        self.write_soul(
-            "project.md",
-            project=PROJECT_AGENT["match"]["project"],
+        self.write_resident(
+            "project.resident.json",
+            {"project": PROJECT_AGENT["match"]["project"]},
             name=PROJECT_AGENT["soul"]["name"],
         )
         project = PROJECT_AGENT["match"]["project"]
@@ -550,6 +570,7 @@ class NotificationTests(unittest.TestCase):
         )
         child_start["type"] = "task_started"
         child_start["payload"] = {
+            "prompt": "review",
             "parent_agent_id": "z-parent",
             "agent_type": "reviewer",
         }
