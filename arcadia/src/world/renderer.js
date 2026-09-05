@@ -10,7 +10,7 @@ import { readCameraPreferences, saveCameraPreferences } from "./viewPreferences.
 const keyOf = selection => selection ? `${selection.kind}:${selection.id}` : "";
 
 // One scene owns rendering and motion; React supplies complete presentation state.
-export function createVillageRenderer(host, { onSelect, onError }) {
+export function createVillageRenderer(host, { onSelect, onError, onCameraChange }) {
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "default" });
   renderer.setClearColor(0xece9dd, 1);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -64,7 +64,25 @@ export function createVillageRenderer(host, { onSelect, onError }) {
   let first = true, frameCount = 0, frameSampleAt = performance.now(), colorsDirty = true;
   let saveTimer = null, savePending = false;
   const cameraPose = () => ({ position: camera.position.toArray(), target: controls.target.toArray(), zoom: camera.zoom });
-  function publishCamera() { canvas.dataset.camera = JSON.stringify(cameraPose()); }
+  let cameraNotifyTimer = null, pendingCameraPose = null, lastCameraNotice = -Infinity, lastNotifiedCamera = "";
+  function notifyCamera() {
+    cameraNotifyTimer = null;
+    if (disposed || !pendingCameraPose) return;
+    const serialized = JSON.stringify(pendingCameraPose);
+    if (serialized === lastNotifiedCamera) return;
+    lastNotifiedCamera = serialized;
+    lastCameraNotice = performance.now();
+    onCameraChange?.(pendingCameraPose);
+  }
+  function publishCamera() {
+    const pose = cameraPose();
+    canvas.dataset.camera = JSON.stringify(pose);
+    if (!onCameraChange) return;
+    pendingCameraPose = pose;
+    const remaining = 150 - (performance.now() - lastCameraNotice);
+    if (remaining <= 0) { clearTimeout(cameraNotifyTimer); notifyCamera(); }
+    else if (cameraNotifyTimer === null) cameraNotifyTimer = setTimeout(notifyCamera, remaining);
+  }
   function saveCamera() {
     saveTimer = null;
     if (disposed || first || host.clientWidth < 2 || host.clientHeight < 2) return;
@@ -528,6 +546,7 @@ export function createVillageRenderer(host, { onSelect, onError }) {
     if (disposed) return;
     if (savePending) saveCamera();
     clearTimeout(saveTimer);
+    clearTimeout(cameraNotifyTimer);
     controls.removeEventListener("change", cameraChanged);
     controls.removeEventListener("end", queueCameraSave);
     disposed = true; cancelAnimationFrame(frame); observer.disconnect(); controls.dispose();

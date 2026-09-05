@@ -581,6 +581,7 @@ describe("personal work cards and building previews", () => {
 });
 
 it("follows a selected agent between workshop, home and the outdoor square", () => {
+  vi.useFakeTimers();
   const first = snapshot();
   first.approvals = [];
   first.villagers[0].state = "working";
@@ -592,11 +593,14 @@ it("follows a selected agent between workshop, home and the outdoor square", () 
   const resting = structuredClone(first);
   resting.villagers[0].state = "resting";
   view.rerender(<VillageExperience snapshot={resting} />);
+  expect(screen.getByText(/Next view:/)).toBeInTheDocument();
+  act(() => vi.advanceTimersByTime(900));
   expect(interiorProps.building.id).toBe(`home:${resting.villagers[0].id}`);
   expect(screen.getByRole("navigation", { name: "Your location" })).toHaveTextContent("Following Keeper");
   const waiting = structuredClone(resting);
   waiting.approvals = snapshot().approvals;
   view.rerender(<VillageExperience snapshot={waiting} />);
+  act(() => vi.advanceTimersByTime(900));
   expect(screen.queryByRole("region", { name: "Building interior" })).not.toBeInTheDocument();
   expect(rendererProps.follow).toBe(true);
   fireEvent.click(screen.getByRole("button", { name: "Village overview" }));

@@ -11,6 +11,9 @@ Arcadia presents Chronicle's real agents as a miniature village. Original geomet
 - `occupancy.js` derives building counts from current destinations rather than dwelling memberships. Scene labels and accessible building previews share this source.
 - `InteriorWorld.jsx` presents furnished cutaway rooms and the current occupants of a home, lodge, or shared workshop. Room occupants come from Chronicle destinations; empty rooms remain explorable. The exterior scene stays mounted while inside, preserving navigation.
 - `renderer.js` owns the WebGL scene, camera, picking, projected labels, instancing, and resource cleanup. `VillageWorld.jsx` is its React lifecycle boundary.
+- `WorkshopBoard.jsx` maps only recorded task states to columns; failed work is explicitly labeled failed. Task selection and agent navigation are separate, and reminder links can open an exact task record.
+- `visitBriefing.js` compares a fixed visit baseline with retained snapshots and keeps first visits/log resets quiet. Storage contains bounded IDs/states and snapshot boundaries, not messages. Unseen completed/failed tasks require a timestamp at or after the baseline; known state transitions remain evidence. Returning users see still-pending requests until marking them seen for the visit.
+- `VillageNavigator.jsx` supplies input-safe Alt+0–3 shortcuts and a small SVG map based on actual geometry. Throttled camera callbacks update it; the map is mounted inside the canvas container to avoid layout shifts.
 - `viewPreferences.js` validates display preferences and exterior camera poses. Camera restore clamps targets to current world bounds; settled movement saves are debounced and skip hidden views.
 - `VillageArchive.jsx` browses completed tasks, artifacts, and journal entries using only recorded project/claimant metadata. Paths can be copied; external links require HTTP(S).
 - `AgentAttention.jsx` shares one approval provider between contextual and global forms, preserving authentication, ambiguous-write locks, and Chronicle confirmation. Failed work comes from recorded states and events, with no invented recovery writes.
@@ -22,7 +25,7 @@ Home positions, room allocations, camera and display preferences persist per bro
 
 Local-clock light blends between dawn, day, dusk, and night. Actual working/resting occupancy controls evening windows. State determines destinations; initial load places agents at their current destination without invented historical travel. Indoor occupants are hidden outside once at their destination; clicking buildings or selecting an indoor agent opens the appropriate room. Notices require new snapshot generations and do not replay on initial load or log reset. The scene supplies no fabricated conversations, tasks, weather, or social events.
 
-Follow mode opens the selected agent’s projected destination and provides a persistent location breadcrumb. Choosing another view or overview stops following.
+Follow mode briefly previews the next view, then opens the selected agent’s projected destination and provides a persistent location breadcrumb. Choosing another view or overview stops following.
 
 The directory and civic buttons expose scene selections to keyboard and assistive-technology users. Reduced motion starts paused; lighter rendering disables shadows and limits frame frequency. WebGL failure keeps the operational interface available.
 

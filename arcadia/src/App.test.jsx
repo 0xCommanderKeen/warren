@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { UnsupportedSchemaVersionError } from "./contract/parseSnapshot.js";
 import { App, LiveApp, backendFromLocation } from "./App.jsx";
 import fixture from "./contract/fixtures/complete-v1.js";
@@ -10,6 +10,8 @@ import { createStateTransport } from "./transport/createStateTransport.js";
 vi.mock("./world/VillageWorld.jsx", () => ({
   VillageWorld: () => <div data-testid="village-canvas" />,
 }));
+
+beforeEach(() => localStorage.clear());
 
 afterEach(() => {
   cleanup();
@@ -316,7 +318,7 @@ describe("Arcadia", () => {
     expect(stewardClient.decideApproval).toHaveBeenCalledWith("approval-1", {
       decision: "approve",
     });
-    expect(screen.getByText("Deploy?")).toBeInTheDocument();
+    expect(within(knocks).getByText("Deploy?")).toBeInTheDocument();
 
     const confirmed = structuredClone(fixture);
     confirmed.snapshot.approvals[0] = {

@@ -1505,3 +1505,5 @@
 .ve-location-bar button:focus-visible { outline:2px solid #587e65; outline-offset:3px; }
 .ve-following { margin-left:auto; color:#365543; display:flex; align-items:center; gap:9px; }
 @media(max-width:600px) { .ve-following { margin-left:0; flex-basis:100%; } }
+
+.ve-follow-destination { margin:0 0 12px; padding:8px 12px; border-left:3px solid #b99654; background:#f4efdc; color:#4b604e; font:12px/1.5 Cousine,monospace; }

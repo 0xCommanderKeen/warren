@@ -314,7 +314,7 @@ test("following enters the agent's next room and stops at overview", async ({ pa
   await expect(room).toHaveAttribute("data-building", "home:claude:resident-0");
   await expect(room).toHaveAttribute("data-focus-agent", "claude:resident-0");
   await expect(page.getByRole("navigation", { name: "Your location" })).toContainText("Following Villager 000");
-  await page.getByRole("button", { name: "Village overview" }).click();
+  await page.getByRole("button", { name: "Village overview", exact: true }).click();
   await expect(page.locator('canvas[data-renderer="three"]')).toBeVisible();
   await expect(page.getByRole("button", { name: "Stop following" })).toHaveCount(0);
   clean(observed);
@@ -330,5 +330,59 @@ test("archive opens recorded work and returns to the village", async ({ page }) 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await archive.getByRole("button", { name: "Back to village", exact: true }).click();
   await expect(page.locator('canvas[data-renderer="three"]')).toBeVisible();
+  clean(observed);
+});
+
+test("workshop board opens a real task and locates its claimant", async ({ page }) => {
+  const observed = await load(page);
+  await ready(page);
+  await page.getByRole("button", { name: "Workshop", exact: true }).click();
+  const board = page.getByRole("region", { name: "Workshop task board" });
+  await board.getByRole("button", { name: /Freeze contract/ }).click();
+  await expect(board.getByRole("region", { name: "Selected task" })).toContainText("python");
+  await expect(page.getByRole("region", { name: "Selected villager" })).toContainText("Keeper");
+  await board.getByRole("button", { name: "Locate claimant Keeper" }).click();
+  await expect(page.getByRole("region", { name: "Selected villager" })).toContainText("Keeper");
+  clean(observed);
+});
+
+test("return briefing reports retained changes and can be marked seen", async ({ page }) => {
+  const envelope = structuredClone(fixture);
+  const observed = await load(page, envelope);
+  await ready(page);
+  await expect(page.getByRole("region", { name: "Since your last visit" })).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => Boolean(localStorage.getItem("arcadia:visit:v1")))).toBe(true);
+  envelope.snapshot.generation += 1;
+  envelope.snapshot.tasks[0].state = "done";
+  envelope.snapshot.tasks[1].state = "failed";
+  await page.reload();
+  await ready(page);
+  const briefing = page.getByRole("region", { name: "Since your last visit" });
+  await briefing.locator("summary").click();
+  await expect(briefing).toContainText("Freeze contract");
+  await expect(briefing).toContainText("Deploy?");
+  await briefing.getByRole("button", { name: "Draft the letter" }).click();
+  await expect(page.getByRole("region", { name: "Selected task" })).toContainText("Draft the letter");
+  await briefing.getByRole("button", { name: "Mark seen" }).click();
+  await expect(briefing).toHaveCount(0);
+  clean(observed);
+});
+
+test("zoomed overview map and keyboard shortcuts navigate without stealing search input", async ({ page }) => {
+  const observed = await load(page);
+  await ready(page);
+  await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+  await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+  const map = page.getByRole("group", { name: "Village overview map" });
+  await expect(map).toBeVisible();
+  await map.getByRole("button", { name: "Locate Visitor lodge on map" }).click();
+  await expect(page.getByTestId("interior-canvas")).toHaveAttribute("data-building", "lodge:0");
+  await page.getByRole("button", { name: "Back to village", exact: true }).click();
+  await page.getByRole("searchbox").focus();
+  await page.keyboard.press("Alt+Digit3");
+  await expect(page.getByRole("region", { name: "Village archive" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Go to Workshop" }).focus();
+  await page.keyboard.press("Alt+Digit3");
+  await expect(page.getByRole("region", { name: "Village archive" })).toBeVisible();
   clean(observed);
 });

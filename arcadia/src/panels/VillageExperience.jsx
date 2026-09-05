@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { WorkshopBoard } from "./WorkshopBoard.jsx";
+import { VisitBriefing } from "./VisitBriefing.jsx";
+import { VillageNavigator } from "./VillageNavigator.jsx";
 import { VillageArchive } from "./VillageArchive.jsx";
 import { AgentAttention } from "./AgentAttention.jsx";
 import { readDisplayPreferences, saveDisplayPreferences } from "../world/viewPreferences.js";
@@ -363,6 +366,11 @@ export function VillageExperience({ snapshot, stewardClient }) {
   const [quality, setQuality] = useState(preferences.quality);
   useEffect(() => saveDisplayPreferences({ quality, paused }), [quality, paused]);
   const [follow, setFollow] = useState(false);
+  const [followDestination, setFollowDestination] = useState(null);
+  const [cameraView, setCameraView] = useState({ zoom: 1 });
+  const [mapHost, setMapHost] = useState(null);
+  const [taskRequest, setTaskRequest] = useState(null);
+  const [taskFocusAgentId, setTaskFocusAgentId] = useState(null);
   const [cameraCommand, setCameraCommand] = useState(null);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState(null);
@@ -447,6 +455,8 @@ export function VillageExperience({ snapshot, stewardClient }) {
       setSelection(next);
       setFollow(false);
       setRoomCameraCommand(null);
+      setTaskRequest(null);
+      setTaskFocusAgentId(null);
       if (!next) return;
       const target =
         next.kind === "building"
@@ -464,6 +474,7 @@ export function VillageExperience({ snapshot, stewardClient }) {
     },
     [world],
   );
+  const highlightTaskAgent = useCallback(next => { setSelection(next); setFollow(false); setTaskFocusAgentId(next?.id || null); }, []);
   const selectedAgent =
     selection?.kind === "agent"
       ? world.agents.find((a) => a.id === selection.id)
@@ -479,13 +490,15 @@ export function VillageExperience({ snapshot, stewardClient }) {
     }
   }, [selection, selectedAgent, selectedBuilding]);
   useEffect(() => {
-    if (!follow || !selectedAgent) return;
+    if (!follow || !selectedAgent) { setFollowDestination(null); return; }
     const nextRoom = selectedAgent.indoor ? selectedAgent.buildingId : null;
-    if (roomId !== nextRoom) {
-      setRoomId(nextRoom);
-      setRoomCameraCommand(null);
-    }
-  }, [follow, selectedAgent?.id, selectedAgent?.buildingId, selectedAgent?.indoor, roomId]);
+    if (roomId === nextRoom) { setFollowDestination(null); return; }
+    const enter = () => { setRoomId(nextRoom); setRoomCameraCommand(null); setFollowDestination(null); };
+    if (paused || globalThis.matchMedia?.("(prefers-reduced-motion: reduce)").matches) { enter(); return; }
+    setFollowDestination(world.buildings.find(building => building.id === selectedAgent.buildingId)?.name || "The village");
+    const timer = setTimeout(enter, 850);
+    return () => clearTimeout(timer);
+  }, [follow, selectedAgent?.id, selectedAgent?.buildingId, selectedAgent?.indoor, roomId, paused]);
   const overview = () => {
     setRoomId(null);
     setRoomCameraCommand(null);
@@ -549,6 +562,10 @@ export function VillageExperience({ snapshot, stewardClient }) {
   const working = world.agents.filter((a) => a.state === "working").length;
   return (
     <div id="village" className="ve-experience">
+      <VisitBriefing snapshot={snapshot} onSelectAgent={select}
+        onOpenArchive={() => select({ kind: "building", id: "archive" })}
+        onOpenTask={id => { select({ kind: "building", id: "workshop" }); setTaskRequest(previous => ({ id, nonce: (previous?.nonce || 0) + 1 })); }}
+        onReviewApprovals={() => document.getElementById("approvals")?.scrollIntoView({ block: "start", behavior: paused ? "auto" : "smooth" })} />
       <header className="ve-introduction">
         <h2>The clearing</h2>
         <p>
@@ -565,6 +582,9 @@ export function VillageExperience({ snapshot, stewardClient }) {
         <span>{room?.name || (selectedAgent ? world.buildings.find(b => b.id === selectedAgent.buildingId)?.name : "The clearing")}</span>
         {follow && selectedAgent && <span className="ve-following" role="status">Following {selectedAgent.name} <button onClick={() => setFollow(false)}>Stop following</button></span>}
       </nav>
+      {followDestination && <p className="ve-follow-destination" role="status">Next view: {followDestination}</p>}
+      <VillageNavigator world={world} selection={selection} onSelect={select} onOverview={overview}
+        mapHost={mapHost} camera={cameraView} roomId={roomId} visible={!room && cameraView.zoom > 1.4} />
       <div className="ve-main">
         <section
           className="ve-world-panel"
@@ -608,7 +628,7 @@ export function VillageExperience({ snapshot, stewardClient }) {
                   key={room.id}
                   building={room}
                   agents={roomAgents}
-                  focusAgentId={follow ? selectedAgent?.id : null}
+                  focusAgentId={follow ? selectedAgent?.id : room.kind === "workshop" ? taskFocusAgentId : null}
                   paused={paused}
                   quality={quality}
                   onSelect={select}
@@ -658,6 +678,7 @@ export function VillageExperience({ snapshot, stewardClient }) {
                   </div>
                 )}
               </div>
+              {room.kind === "workshop" && <WorkshopBoard snapshot={snapshot} onSelectAgent={select} taskRequest={taskRequest} onHighlightAgent={highlightTaskAgent} />}
               <div className="ve-room-roster" aria-label="People inside">
                 {roomAgents.length ? (
                   roomAgents.map((agent) => (
@@ -676,7 +697,7 @@ export function VillageExperience({ snapshot, stewardClient }) {
               </div>
             </section>
           )}
-          <div className="ve-canvas" hidden={Boolean(room)}>
+          <div className="ve-canvas" ref={setMapHost} hidden={Boolean(room)}>
             <VillageWorld
               world={world}
               selection={selection}
@@ -686,6 +707,7 @@ export function VillageExperience({ snapshot, stewardClient }) {
               follow={follow}
               cameraCommand={cameraCommand}
               onReady={onReady}
+              onCameraChange={setCameraView}
               onError={onError}
             />
             {!ready && !error && (
