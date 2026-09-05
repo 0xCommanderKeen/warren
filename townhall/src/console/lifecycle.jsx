@@ -25,7 +25,7 @@
  * what happened to the host along with it.
  */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "../navigation.jsx";
 import { routeTo } from "../routes.js";
 import { useSteward } from "../steward/context.jsx";
@@ -174,34 +174,47 @@ function Report({ kind, report, rehearsal }) {
  * `onDone` is handed steward's whole answer, because the panel above owns what is said
  * about a finished act — see the note at the top of this file.
  */
-function Act({ kind, residentId, name, onDone, children }) {
+function Act({ kind, residentUid, residentId, name, onDone, children }) {
   const { client } = useSteward();
   const act = ACTS[kind];
   const [plan, setPlan] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(null);
 
+  const live = useRef(false);
+  useEffect(() => {
+    live.current = true;
+    return () => { live.current = false; };
+  }, []);
+  const canConfirm = plan?.uid === residentUid && plan?.id === residentId && plan?.kind === kind;
+
   async function run(dryRun) {
+    if (!live.current || busy !== null || (!dryRun && !canConfirm)) return;
     setBusy(dryRun ? "rehearsing" : "running");
     setError(null);
     try {
       const answer = await act.call(client, residentId, {
         dry_run: dryRun,
-        ...(kind === "retire" && !dryRun ? { revision: plan?.revision } : {}),
+        ...(kind === "retire" && !dryRun ? { revision: plan?.report.revision } : {}),
       });
+      if (!live.current) return;
       if (dryRun) {
-        setPlan(answer);
+        if (answer.resident !== residentId) {
+          throw new Error("Steward's plan names a different resident. Rehearse again.");
+        }
+        setPlan({ uid: residentUid, id: residentId, kind, report: answer });
       } else {
         setPlan(null);
         onDone(answer);
       }
     } catch (caught) {
+      if (!live.current) return;
       setError(caught);
       // A refused *real* run leaves the plan on the screen: it is still the plan, and the
       // refusal is usually something to fix and ask again rather than start over.
       if (dryRun) setPlan(null);
     } finally {
-      setBusy(null);
+      if (live.current) setBusy(null);
     }
   }
 
@@ -209,11 +222,11 @@ function Act({ kind, residentId, name, onDone, children }) {
     <>
       {children}
       {error ? <Problem error={error} /> : null}
-      {plan ? <Report kind={kind} report={plan} rehearsal /> : null}
+      {plan ? <Report kind={kind} report={plan.report} rehearsal /> : null}
       <Actions>
         {plan ? (
           <>
-            <Button tone={act.tone} onClick={() => run(false)} disabled={busy !== null}>
+            <Button tone={act.tone} onClick={() => run(false)} disabled={busy !== null || !canConfirm}>
               {busy === "running" ? act.running : `${act.verb} ${name} for real`}
             </Button>
             <Button onClick={() => setPlan(null)} disabled={busy !== null}>
@@ -258,6 +271,11 @@ function commitOf(kind, report) {
  * two steps, and the first is a link to the editor.
  */
 export function LifecyclePanel({ resident, refresh }) {
+  // UID owns receipts; the path id also invalidates a plan if the resident is renamed.
+  return <ResidentLifecycle key={`${resident.uid}:${resident.id}`} resident={resident} refresh={refresh} />;
+}
+
+function ResidentLifecycle({ resident, refresh }) {
   const [done, setDone] = useState(null);
 
   const finish = (kind) => (answer) => {
@@ -301,6 +319,8 @@ export function LifecyclePanel({ resident, refresh }) {
       ) : null}
 
       <Act
+        key="provision"
+        residentUid={resident.uid}
         kind="provision"
         residentId={resident.id}
         name={resident.soul.name}
@@ -319,6 +339,8 @@ export function LifecyclePanel({ resident, refresh }) {
         <>
           <hr className="my-6 border-0 border-t border-rule" />
           <Act
+            key="retire"
+            residentUid={resident.uid}
             kind="retire"
             residentId={resident.id}
             name={resident.soul.name}
