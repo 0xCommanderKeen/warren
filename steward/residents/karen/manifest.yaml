@@ -48,19 +48,32 @@ skills:
   source: library
 - id: raise-resident
   source: library
-session_grants: []
+session_grants:
+- skills.write
+- residents.declare
+- residents.dry_run
 memory:
   kind: directory
   path: /data/residents/karen/memory
   journal: journal
   journal_keep: 30
-routes: []
+routes:
+- id: chat
+  kind: chat
+  address: telegram:hob
+  shared: true
+  status: active
+  note: Use the existing household bot; address @karen or karen:.
+- id: inbox
+  kind: delegation
+  address: steward:delegation
+  status: active
 app_grants: []
-tools: []
+tools: unrestricted
 workspace: []
 runner:
   kind: claude
-  placement: local
+  placement: container
   model: claude-opus-5
 routines: []
 board:
@@ -68,7 +81,8 @@ board:
   max_claims_per_wake: 1
   lease_s: 1800
   timeout_s: 900
-budgets: {}
+budgets:
+  daily_cost_usd: 5
 delegation:
   send: false
   to: []
@@ -76,3 +90,10 @@ notifications:
   'on':
   - needs_human
   status: active
+deploy:
+  host: dxp2800
+  user: Miha
+  path: ~/docker/warren/residents/karen
+  container: steward-karen
+  image: steward-resident:latest
+  mounts: []
