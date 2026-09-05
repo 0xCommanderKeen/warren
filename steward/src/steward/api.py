@@ -430,9 +430,11 @@ def _fire_outcome(report: FireReport) -> tuple[str, dict[str, Any]]:
     detail: dict[str, Any] = {"run_id": report.run_id}
     if not report.fired:
         return f"skipped: {report.skipped_reason}", detail
-    if report.result is not None and report.result.ok:
+    if report.ok:
         return "ran", detail
-    detail["error"] = report.result.summary() if report.result is not None else "no result"
+    detail["error"] = report.terminal_error or (
+        report.result.summary() if report.result is not None else "no result"
+    )
     return "failed", detail
 
 
