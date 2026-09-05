@@ -1,3 +1,4 @@
+import json
 import dataclasses
 import os
 import subprocess
@@ -146,7 +147,7 @@ class ConfigTests(unittest.TestCase):
         config = Config.from_env({"CHRONICLE_TOKEN": ""})
         self.assertEqual(config.token, "")
 
-    def test_import_does_not_parse_argv_or_environment(self):
+    def test_import_ignores_argv_and_tolerates_invalid_environment(self):
         environment = dict(os.environ)
         environment.update(
             CHRONICLE_MAX_LOG="not-an-integer",
@@ -154,7 +155,7 @@ class ConfigTests(unittest.TestCase):
             CHRONICLE_NOTIFY_TIMEOUT="not-a-float",
         )
         result = subprocess.run(
-            [sys.executable, "-c", "import serve; print(serve.PORT)", "not-a-port"],
+            [sys.executable, "-c", "import serve; print(serve.app.state.config.port)", "not-a-port"],
             cwd=Path(__file__).parents[1],
             env=environment,
             capture_output=True,
@@ -163,6 +164,27 @@ class ConfigTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "8737")
+
+    def test_runtime_projects_its_configured_residents_without_http_context(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            villagers = root / "villagers"
+            villagers.mkdir()
+            manifest = json.loads(
+                (
+                    Path(__file__).parent / "fixtures/project-agent.resident.json"
+                ).read_text(encoding="utf-8")
+            )
+            manifest["soul"]["name"] = "Configured Resident"
+            (villagers / "resident.resident.json").write_text(json.dumps(manifest))
+            runtime = serve.Runtime(
+                Config(events=root / "events.jsonl", villagers_dir=villagers)
+            )
+            snapshot = runtime.state_coordinator.evaluate()
+            self.assertEqual(
+                [item["meta"]["name"] for item in snapshot["residents"]],
+                ["Configured Resident"],
+            )
 
     def test_app_factory_isolates_storage_and_authentication(self):
         with tempfile.TemporaryDirectory() as temporary:

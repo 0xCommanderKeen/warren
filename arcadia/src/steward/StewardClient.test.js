@@ -186,22 +186,23 @@ describe("the credential never leaves this origin", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("sends no Authorization header off-origin, on any write", async () => {
-    shipped();
-    const fetch = vi.fn();
-    for (const baseUrl of ["https://evil.tld", "//evil.tld", "http://127.0.0.1:8802"]) {
-      const client = createStewardClient({ baseUrl, fetch });
-      client.setCredentials({ token: "secret" });
+  it.each(["https://evil.tld", "//evil.tld", "http://127.0.0.1:8802"])(
+    "rejects every approval write to %s before fetch", async (baseUrl) => {
+      shipped();
       for (const requestId of ["a-1", "a-2"]) {
+        const fetch = vi.fn().mockResolvedValue(response(202, {
+          status: "recorded", request_id: "request-1", approval_request_id: requestId, decision: "approve",
+        }));
+        // A fresh client ensures an earlier write's lock cannot hide a missing guard.
+        const client = createStewardClient({ baseUrl, fetch });
+        client.setCredentials({ token: "secret" });
         await expect(client.decideApproval(requestId, { decision: "approve" })).rejects.toMatchObject({
           code: "cross_origin_base",
         });
         expect(fetch).not.toHaveBeenCalled();
       }
-    }
-
-    expect(fetch).not.toHaveBeenCalled();
-  });
+    },
+  );
 
   it("does not wedge the client: a refusal leaves no write unresolved", async () => {
     // The refusal has to happen before any write is registered. A cross-origin base that

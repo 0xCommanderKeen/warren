@@ -95,6 +95,8 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+  sessionStorage.removeItem("townhall.steward.operator");
 });
 
 it("does not create a Chronicle stream after the owning app unmounts", async () => {
@@ -113,6 +115,32 @@ it("does not create a Chronicle stream after the owning app unmounts", async () 
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   expect(EventSource).not.toHaveBeenCalled();
+});
+
+it("ignores crafted service origins at the production fetch boundary", async () => {
+  vi.stubEnv("DEV", false);
+  sessionStorage.setItem("townhall.steward.operator", "operator-token");
+  window.history.replaceState({}, "", "/residents?backend=https://evil.tld&steward=https://evil.tld");
+  const fetch = vi.fn(async (url) => url === "/state"
+    ? { status: 200, json: async () => fixture }
+    : json(200, { residents: [], routines: [], errors: [] }));
+  const streams = [];
+  class EventSource {
+    constructor(url) { streams.push(url); }
+    addEventListener() {}
+    close() {}
+  }
+  vi.stubGlobal("fetch", fetch);
+  vi.stubGlobal("EventSource", EventSource);
+  render(<App />);
+
+  await waitFor(() => expect(fetch).toHaveBeenCalledWith("/residents", expect.objectContaining({
+    headers: expect.objectContaining({ Authorization: "Bearer operator-token" }),
+  })));
+  expect(fetch).toHaveBeenCalledWith("/state", expect.objectContaining({ cache: "no-store" }));
+  expect(fetch.mock.calls.every(([url]) => String(url).startsWith("/"))).toBe(true);
+  await waitFor(() => expect(streams).toHaveLength(1));
+  expect(streams[0]).toMatch(/^\/state\/stream/);
 });
 
 /* -- the mount ----------------------------------------------------------------------- */

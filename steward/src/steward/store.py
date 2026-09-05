@@ -2138,17 +2138,6 @@ class Store:
                 )
         return cursor.rowcount == 1
 
-    def next_approval_announcement_at(self) -> str | None:
-        """Earliest retry or live lease deadline; ``None`` means no pending work."""
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT MIN(CASE WHEN claimed_until IS NOT NULL THEN claimed_until "
-                "WHEN next_attempt_at IS NOT NULL THEN next_attempt_at ELSE ? END) AS due "
-                "FROM approval_announcements WHERE announced_at IS NULL",
-                (utc_now_iso(),),
-            ).fetchone()
-        return row["due"]
-
     def approval_announcement_state(self, request_id: str) -> str | None:
         """Return ``pending``, ``announced`` or ``complete`` for a queued decision."""
         with self._lock:

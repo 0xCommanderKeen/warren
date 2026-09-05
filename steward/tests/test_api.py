@@ -16,10 +16,11 @@ import re
 import subprocess
 import threading
 from collections.abc import Callable, Iterator
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import wait as wait_for_futures
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Unpack
 
 import httpx
 import pytest
@@ -70,9 +71,25 @@ from steward.input_bounds import (
 )
 from steward.manifest import Runner as RunnerSpec
 from steward.manifest import validate_tree
-from steward.nursery import RegisterStage, provision_resident, raise_resident, retire_resident
+from steward.nursery import (
+    NewResident,
+    NurseryReport,
+    RegisterStage,
+    RetireReport,
+    provision_resident,
+    raise_resident,
+    retire_resident,
+)
 from steward.operator_auth import new_operator_credential, operator_email
 from steward.org import NO_OPEN_ROUTE
+from steward.routes.deps import (
+    NurseryOptions,
+    NurseryPipeline,
+    ProvisionOptions,
+    ProvisionPipeline,
+    RetireOptions,
+    RetirePipeline,
+)
 from steward.run_lifecycle import RUN_LEASE_GRACE_S
 from steward.runners import MockRunner, Outcome, RunRequest, RunResult
 from steward.runs import RUN_ROUTINE, RUN_TASK
@@ -152,9 +169,9 @@ def api(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ApiFactory]:
         behavior: Callable[[RunRequest], RunResult] | None = None,
         db_path: Path | None = None,
         residents: bool = True,
-        nursery: Any = raise_resident,  # noqa: ANN401 — the pipeline seam, injected
-        provisioner: Any = provision_resident,  # noqa: ANN401 — the other door's seam
-        retirer: Any = retire_resident,  # noqa: ANN401 — the door back out (warren#331)
+        nursery: NurseryPipeline = raise_resident,
+        provisioner: ProvisionPipeline = provision_resident,
+        retirer: RetirePipeline = retire_resident,
         git: bool = True,
         push: au.PushTarget | None = None,
         transport: LocalTransport | None = None,
@@ -484,6 +501,106 @@ def test_the_in_process_guard_still_catches_a_second_submit(
             release.set()
             runs.wait(timeout=10.0)
             runs.shutdown()
+
+
+def test_completed_manual_runs_release_pending_futures(api: ApiFactory) -> None:
+    harness = api()
+    runs = harness.client.app.state.runs
+    for _ in range(30):
+        response = harness.client.post("/residents/test-agent/routines/daily-summary/run")
+        assert response.status_code == 202
+        harness.settle()
+    runs._pool.shutdown(wait=True)
+    assert not runs._futures
+    assert len(harness.events("routine_finished")) == 30
+
+
+def test_failed_manual_submission_releases_the_routine(api: ApiFactory) -> None:
+    harness = api()
+    runs = harness.client.app.state.runs
+    item = load_scheduled(harness.residents_dir)[0]
+    runs.shutdown()
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="cannot schedule new futures after shutdown"):
+            runs.submit(item, "not-submitted")
+    runs.wait()
+    assert not runs._futures
+
+
+def test_manual_run_completed_before_callback_registration(
+    api: ApiFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    harness = api()
+    runs = harness.client.app.state.runs
+    item = load_scheduled(harness.residents_dir)[0]
+    register = Future.add_done_callback
+
+    def after_completion(future: Future[None], callback: Callable[[Future[None]], object]) -> None:
+        # Force registration after completion. Moving registration under ManualRuns'
+        # lock makes the worker unable to finish and this bounded wait fail.
+        future.result(timeout=5.0)
+        register(future, callback)
+
+    monkeypatch.setattr(Future, "add_done_callback", after_completion)
+    for _ in range(2):
+        runs.submit(item, "immediate")
+        assert not runs._futures
+
+
+def test_manual_wait_observes_active_run_during_concurrent_submission(
+    api: ApiFactory, write_resident: ResidentWriter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    snapshot_taken = threading.Event()
+    finished = threading.Event()
+
+    def block(_request: RunRequest) -> RunResult:
+        entered.set()
+        assert release.wait(10.0)
+        return RunResult(outcome=Outcome.OK, exit_status=0)
+
+    harness = api(behavior=block)
+    harness.released.append(release)
+    other = valid_manifest()
+    other.update(
+        id="other-agent", uid=SECOND_RESIDENT_UID, agent_id="claude-code:other-agent", home=1
+    )
+    write_resident(
+        other,
+        root=harness.residents_dir,
+        soul=VALID_SOUL.replace("claude-code:test-agent", "claude-code:other-agent"),
+    )
+    runs = harness.client.app.state.runs
+    first, second = load_scheduled(harness.residents_dir)
+    runs.submit(first, "first")
+    assert entered.wait(5.0)
+
+    def observe_wait(pending: list[Future[None]], timeout: float) -> object:
+        assert len(pending) == 1
+        snapshot_taken.set()
+        return wait_for_futures(pending, timeout=timeout)
+
+    def wait() -> None:
+        runs.wait(timeout=5.0)
+        finished.set()
+
+    monkeypatch.setattr("steward.api.wait_for_futures", observe_wait)
+    waiter = threading.Thread(target=wait, daemon=True)
+    waiter.start()
+    try:
+        assert snapshot_taken.wait(5.0)
+        runs.submit(second, "second")
+        assert not finished.is_set()
+        runs.shutdown()
+    finally:
+        release.set()
+        waiter.join(timeout=5.0)
+        runs._pool.shutdown(wait=True)
+        monkeypatch.undo()
+    assert finished.is_set()
+    assert not runs._futures
+    assert len(harness.events("routine_finished")) == 2
 
 
 def test_a_run_now_is_refused_while_another_process_runs_the_resident(
@@ -3105,12 +3222,13 @@ def test_the_api_calls_the_same_pipeline_the_cli_does(
     """Verified by injection, not by convention: the route is handed the pipeline."""
     seen: list[dict[str, Any]] = []
 
-    def recorder(spec: Any, **kwargs: Any) -> Any:  # noqa: ANN401 — a recorder takes anything
+    def recorder(spec: NewResident, **kwargs: Unpack[NurseryOptions]) -> NurseryReport:
         seen.append({"spec": spec, **kwargs})
         return raise_resident(spec, **kwargs)
 
     host = LocalTransport(root=tmp_path / "nas")
-    harness = api(nursery=recorder, transport=host)
+    pipeline: NurseryPipeline = recorder
+    harness = api(nursery=pipeline, transport=host)
 
     harness.client.post("/residents", json=NEW_RESIDENT | {"deploy": True})
 
@@ -3210,12 +3328,13 @@ def test_the_provision_route_runs_the_pipeline_the_command_runs(
     """Verified by injection, not by convention — the same seam `POST /residents` has."""
     seen: list[dict[str, Any]] = []
 
-    def recorder(resident_id: str, **kwargs: Any) -> Any:  # noqa: ANN401 — a recorder takes anything
+    def recorder(resident_id: str, **kwargs: Unpack[ProvisionOptions]) -> NurseryReport:
         seen.append({"resident_id": resident_id, **kwargs})
         return provision_resident(resident_id, **kwargs)
 
     host = LocalTransport(root=tmp_path / "nas")
-    harness = api(provisioner=recorder, transport=host)
+    pipeline: ProvisionPipeline = recorder
+    harness = api(provisioner=pipeline, transport=host)
 
     harness.client.post("/residents/test-agent/provision")
 
@@ -3405,13 +3524,14 @@ def test_a_container_that_went_up_with_a_failing_check_says_both_halves(
 ) -> None:
     """Saying only "the container is up" would be a control panel's one unforgivable sin."""
 
-    def unschedulable(resident_id: str, **kwargs: Any) -> Any:  # noqa: ANN401 — a stub answers anything
+    def unschedulable(resident_id: str, **kwargs: Unpack[ProvisionOptions]) -> NurseryReport:
         report = provision_resident(resident_id, **kwargs)
         return dataclasses.replace(
             report, register=RegisterStage(problems=("claude is not on PATH",))
         )
 
-    harness = api(provisioner=unschedulable, transport=LocalTransport(root=tmp_path / "nas"))
+    pipeline: ProvisionPipeline = unschedulable
+    harness = api(provisioner=pipeline, transport=LocalTransport(root=tmp_path / "nas"))
 
     response = harness.client.post("/residents/test-agent/provision")
 
@@ -3561,12 +3681,13 @@ def test_the_retire_route_runs_the_pipeline_the_command_runs(
     """Verified by injection, not by convention — the seam both other doors have."""
     seen: list[dict[str, Any]] = []
 
-    def recorder(resident_id: str, **kwargs: Any) -> Any:  # noqa: ANN401 — a recorder takes anything
+    def recorder(resident_id: str, **kwargs: Unpack[RetireOptions]) -> RetireReport:
         seen.append({"resident_id": resident_id, **kwargs})
         return retire_resident(resident_id, **kwargs)
 
     host = LocalTransport(root=tmp_path / "nas")
-    harness = api(retirer=recorder, transport=host)
+    pipeline: RetirePipeline = recorder
+    harness = api(retirer=pipeline, transport=host)
     commit_tree(tmp_path)
 
     rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
@@ -3770,7 +3891,7 @@ def test_a_retirement_whose_commit_git_refused_says_which_side_it_stopped_on(
     """
     host = LocalTransport(root=tmp_path / "nas")
 
-    def unable_to_commit(resident_id: str, **kwargs: Any) -> Any:  # noqa: ANN401 — a stub answers anything
+    def unable_to_commit(resident_id: str, **kwargs: Unpack[RetireOptions]) -> RetireReport:
         def git(argv: list[str]) -> au.CommandOutcome:
             if "commit" in argv:
                 return au.CommandOutcome(argv=tuple(argv), exit_status=1, stderr="gpg failed")
@@ -3778,7 +3899,8 @@ def test_a_retirement_whose_commit_git_refused_says_which_side_it_stopped_on(
 
         return retire_resident(resident_id, git=git, **kwargs)
 
-    harness = api(retirer=unable_to_commit, transport=host)
+    pipeline: RetirePipeline = unable_to_commit
+    harness = api(retirer=pipeline, transport=host)
     commit_tree(tmp_path)
 
     rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()

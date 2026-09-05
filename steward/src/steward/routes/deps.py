@@ -1,18 +1,28 @@
 """Collaborators shared by steward's route factories."""
 
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NoReturn, NotRequired, Protocol, TypedDict
 
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 
 from steward import authoring as au
+from steward.board import Dispatcher
+from steward.budgets import BudgetGuard
+from steward.claims import ResidentClaims
+from steward.deploy import Transport
+from steward.events import Emitter
 from steward.manifest import Resident, ValidationResult
-from steward.nursery import CommitIdentity
+from steward.nursery import CommitIdentity, NewResident, NurseryReport, RetireReport
 from steward.operator_auth import OperatorPrincipal
 from steward.runners import build_runner
+from steward.scheduler import ScheduledRoutine, Scheduler
 from steward.session_auth import SessionPrincipal
+from steward.sessions import RunnerFactory
 from steward.store import Store, new_id
 from steward.transitions.approval import ApprovalOutboxWorker, ApprovalTransitions
 from steward.transitions.task import TaskTransitions
@@ -40,31 +50,167 @@ class _Body(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
 
+class WriteSettings(TypedDict):
+    """Authoring options shared by declaration and skill writes."""
+
+    identity: CommitIdentity
+    allow_uncommitted: bool
+    push: au.PushTarget | None
+
+
+class RetirementSettings(TypedDict):
+    """Common arguments for retirement planning and execution."""
+
+    residents_dir: Path
+    skills_dir: Path | None
+    transport: Transport | None
+    identity: CommitIdentity
+    resident_dirty_only: bool
+    revision_of: Callable[[Path], str]
+    emitter: Emitter
+
+
+class NurseryOptions(TypedDict):
+    """Options the declaration route supplies to its nursery."""
+
+    residents_dir: Path
+    skills_dir: Path | None
+    transport: Transport | None
+    provision: bool
+    commit: bool
+
+
+class ProvisionOptions(TypedDict):
+    """Options the provision route supplies to its nursery."""
+
+    residents_dir: Path
+    skills_dir: Path | None
+    transport: Transport | None
+    dry_run: bool
+
+
+class RetireOptions(RetirementSettings):
+    """Retirement options, including guards used only for execution."""
+
+    dry_run: bool
+    expected_revision: NotRequired[str | None]
+    durable_guard: NotRequired[AbstractContextManager[object] | None]
+
+
+class RouteSettings(Protocol):
+    """The configuration read by routes; frozen application settings also conform."""
+
+    @property
+    def skills_dir(self) -> Path | None:
+        """The optional shared skills library."""
+        ...
+
+    @property
+    def commit_identity(self) -> CommitIdentity | None:
+        """The fallback author of API commits."""
+        ...
+
+    @property
+    def allow_uncommitted_writes(self) -> bool:
+        """Whether declaration writes require a checkout."""
+        ...
+
+    @property
+    def push(self) -> au.PushTarget | None:
+        """The optional destination for declaration commits."""
+        ...
+
+
+class NurseryPipeline(Protocol):
+    """Declare and optionally provision a resident through the nursery."""
+
+    def __call__(  # noqa: PLR0913 — independent nursery options
+        self,
+        spec: NewResident,
+        *,
+        residents_dir: Path,
+        skills_dir: Path | None,
+        transport: Transport | None,
+        provision: bool,
+        commit: bool,
+    ) -> NurseryReport:
+        """Run the nursery pipeline."""
+        ...
+
+
+class ProvisionPipeline(Protocol):
+    """Provision an existing declaration."""
+
+    def __call__(
+        self,
+        resident_id: str,
+        *,
+        residents_dir: Path,
+        skills_dir: Path | None,
+        transport: Transport | None,
+        dry_run: bool,
+    ) -> NurseryReport:
+        """Run the nursery pipeline."""
+        ...
+
+
+class RetirePipeline(Protocol):
+    """Plan or perform retirement against the guarded declaration."""
+
+    def __call__(  # noqa: PLR0913 — independent nursery options
+        self,
+        resident_id: str,
+        *,
+        residents_dir: Path,
+        skills_dir: Path | None,
+        transport: Transport | None,
+        identity: CommitIdentity,
+        resident_dirty_only: bool,
+        revision_of: Callable[[Path], str],
+        emitter: Emitter,
+        dry_run: bool,
+        expected_revision: str | None = None,
+        durable_guard: AbstractContextManager[object] | None = None,
+    ) -> RetireReport:
+        """Run the guarded retirement pipeline."""
+        ...
+
+
+class RoutineRuns(Protocol):
+    """The run-now queue and the scheduler refreshed by the reload door."""
+
+    scheduler: Scheduler
+
+    def submit(self, item: ScheduledRoutine, request_id: str) -> None:
+        """Queue a manual run or refuse an overlapping one."""
+        ...
+
+
 @dataclass(slots=True)
 class Deps:
     """The single mutable collaborator graph every router closes over."""
 
-    settings: Any
+    settings: RouteSettings
     db: Store
-    sink: Any
+    sink: Emitter
     residents_dir: Path
-    now: Any
-    nursery: Any
-    provisioner: Any
-    retirer: Any
-    transport: Any
+    now: Callable[[], datetime]
+    nursery: NurseryPipeline
+    provisioner: ProvisionPipeline
+    retirer: RetirePipeline
+    transport: Transport | None
     tasks: TaskTransitions
     approvals: ApprovalTransitions
-    guard: Any
+    guard: BudgetGuard
     outbox: ApprovalOutboxWorker
-    runs: Any
-    hooks: Any
-    claims: Any
+    runs: RoutineRuns
+    hooks: Dispatcher
+    claims: ResidentClaims
     #: How a session is turned into a process. Held here because the *rehearsal* door
     #: (warren#446) launches one directly rather than through the scheduler or the chat
     #: bridge, and a route that reached for :func:`steward.runners.build_runner` itself
     #: would be a runner nobody could inject a mock into.
-    runner_factory: Any = build_runner
+    runner_factory: RunnerFactory = build_runner
 
     def accept(self, request: Request, outcome: str, detail: dict[str, Any] | None = None) -> str:
         """Log an accepted mutating request and return its trace id."""
@@ -95,7 +241,7 @@ class Deps:
             },
         )
 
-    def write_settings(self, request: Request) -> dict[str, Any]:
+    def write_settings(self, request: Request) -> WriteSettings:
         """Return the authoring knobs shared by resident and skill writes."""
         operator = getattr(request.state, "operator", None)
         session = getattr(request.state, "session", None)

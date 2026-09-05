@@ -13,6 +13,12 @@ It does not consume `/events` or recreate Chronicle's projection decisions. The 
 
 The app loads `/state`, then opens `/state/stream` from the returned generation and cursor. Reconnects first catch up from the last applied boundary and then reopen the stream. Unsupported `schema_version` values replace the village with a visible contract-mismatch screen instead of applying unknown state.
 
+A state transport instance has a terminal `close()`: it aborts pending requests,
+ignores late fetch/decoding results, and emits `disconnected` once. Its last accepted
+snapshot remains available for inspection. Calling `start()` after close rejects;
+create a fresh transport to reconnect. Arcadia's React effect creates a new instance
+for each mount or backend change.
+
 ## Steward writes
 
 [`src/steward/StewardClient.js`](src/steward/StewardClient.js) is Arcadia's only Steward write boundary. It owns approval decisions. Feature code supplies decisions to that client; it must not call Steward directly.
@@ -78,3 +84,9 @@ The production Compose/nginx shape, cutover, smoke check, and rollback procedure
 Use **Edit layout** to move buildings between plots with automatically reconnected streets, undo, and reset. Layout changes stay in this browser. The workshop includes recorded delegation history. Lodge interiors add project common tables while preserving personal beds; room controls cycle residents and add name/project search in crowded rooms. **Adaptive detail** starts with full rendering and selects the light profile after sustained slow frames.
 
 Selecting an agent opens a large profile; closing it returns to the same village position. Follow returns to the scene, while room cycling stays focused on the room. Village records and Requests open dedicated views instead of a long dashboard under the village. Scenic/Simple/Automatic now control visible scenery and shadows in both exterior and room views.
+
+Steward origin regressions run with Vite's development flag false and assert rejection
+before `fetch` for every write, using a fresh client so another write's lock cannot hide a
+missing origin guard. Same-origin credential delivery and development overrides remain
+covered. Deployment tests check nginx and route contracts; they do not infer credential
+security from JavaScript source text.

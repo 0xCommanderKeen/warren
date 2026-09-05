@@ -61,8 +61,6 @@ from steward.deploy import Transport
 from steward.manifest import SessionGrant, validate_manifest
 from steward.nursery import (
     CommitIdentity,
-    NurseryReport,
-    RetireReport,
     provision_resident,
     raise_resident,
     retire_resident,
@@ -84,7 +82,7 @@ from steward.routes.auth import (
     _auth_dependency,
     session_of,  # noqa: F401 — compatibility re-export
 )
-from steward.routes.deps import Deps
+from steward.routes.deps import Deps, NurseryPipeline, ProvisionPipeline, RetirePipeline
 from steward.routes.residents import (
     ResidentPost,
 )
@@ -125,21 +123,6 @@ __all__ = [
     "last_run_view",
     "run_server",
 ]
-
-#: How the API reaches the nursery. Injectable so a test can prove the endpoint and
-#: ``steward new-resident`` run *the same* pipeline rather than two that agree by
-#: convention — hand it a recorder and assert on what the route asked for.
-type NurseryPipeline = Callable[..., NurseryReport]
-
-#: How the API reaches the *other* nursery door — provision from a declared manifest.
-#: Injectable for the reason :data:`NurseryPipeline` is: a test proves the route and
-#: ``steward provision`` run one pipeline rather than two that happen to agree.
-type ProvisionPipeline = Callable[..., NurseryReport]
-
-#: And how it reaches the door back out again. Same seam, same reason: retirement is a
-#: mark, a commit, a ``docker compose down`` and two removals in one order, and a route
-#: with its own copy of that order would be a second place for it to be wrong.
-type RetirePipeline = Callable[..., RetireReport]
 
 log = logging.getLogger("steward.api")
 
@@ -366,7 +349,7 @@ class ManualRuns:
     max_workers: int = 4
     _pool: ThreadPoolExecutor = field(init=False)
     _inflight: set[str] = field(default_factory=set, init=False)
-    _futures: list[Future[None]] = field(default_factory=list, init=False)
+    _futures: set[Future[None]] = field(default_factory=set, init=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
 
     def __post_init__(self) -> None:
@@ -397,8 +380,18 @@ class ManualRuns:
                     "rather than queueing one, so ask again when it has finished"
                 )
             self._inflight.add(item.key)
-            future = self._pool.submit(self._fire, item, request_id)
-            self._futures.append(future)
+            try:
+                future = self._pool.submit(self._fire, item, request_id)
+            except Exception:
+                self._inflight.discard(item.key)
+                raise
+            self._futures.add(future)
+        # A finished future invokes this inline: never register under the lock.
+        future.add_done_callback(self._forget_future)
+
+    def _forget_future(self, future: Future[None]) -> None:
+        with self._lock:
+            self._futures.discard(future)
 
     def _fire(self, item: ScheduledRoutine, request_id: str) -> None:
         try:

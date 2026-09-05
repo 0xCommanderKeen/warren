@@ -1,5 +1,7 @@
 """Authentication remains scoped to event ingestion at the ASGI seam."""
 
+from pathlib import Path
+from config import Config
 import os
 import tempfile
 import unittest
@@ -27,14 +29,9 @@ class IngestAuthenticationTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.events = os.path.join(self.tmp.name, "events.jsonl")
-        self.events_patch = mock.patch.object(serve, "EVENTS", self.events)
-        self.events_patch.start()
-        self.addCleanup(self.events_patch.stop)
-
     def test_configured_token_accepts_bearer_or_legacy_header_only(self):
         with (
-            mock.patch.object(serve, "TOKEN", "s3cret"),
-            TestClient(serve.app) as client,
+            TestClient(serve.create_app(Config(events=Path(self.events), token="s3cret"))) as client,
         ):
             for headers in (
                 {},
@@ -60,7 +57,7 @@ class IngestAuthenticationTests(unittest.TestCase):
             self.assertEqual(client.get("/villagers").status_code, 200)
 
     def test_unconfigured_token_leaves_ingest_open(self):
-        with mock.patch.object(serve, "TOKEN", ""), TestClient(serve.app) as client:
+        with TestClient(serve.create_app(Config(events=Path(self.events)))) as client:
             self.assertEqual(client.post("/events", json=EVENT).status_code, 204)
             self.assertEqual(
                 client.post(

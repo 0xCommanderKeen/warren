@@ -118,11 +118,8 @@ def test_the_export_reads_no_environment(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_the_document_types_every_body_a_write_accepts() -> None:
     """Every mutating route with a body names a component, and every component has fields.
 
-    This is the half of the seam townhall can actually pin today: the request models are
-    real pydantic models, so a renamed field moves this artifact. Responses are annotated
-    `dict[str, Any]` and reach the document as open objects — `test_the_document_records_
-    that_responses_are_untyped` records that, and townhall's contract test says the same
-    thing from the other side.
+    Request models and the first response path name real components; remaining response
+    debt is tracked separately in docs/response-migration.md.
     """
     document = openapi_document()
     components = document["components"]["schemas"]
@@ -149,31 +146,41 @@ def test_the_document_types_every_body_a_write_accepts() -> None:
             assert components[name].get("properties"), f"{path} declares a body with no fields"
 
 
-def test_the_document_records_that_responses_are_untyped() -> None:
-    """Steward's handlers return `dict[str, Any]`, so the document pins no response shape.
-
-    Recorded rather than assumed. The moment a handler declares a response model this test
-    fails, which is the prompt to extend townhall's contract test to validate its fixtures
-    against the shape that has just become checkable.
-    """
-    open_object = {"type": "object", "additionalProperties": True}
-    typed = {
-        f"{method.upper()} {path} {code}"
-        for path, operations in openapi_document()["paths"].items()
-        for method, operation in operations.items()
-        for code, response in operation["responses"].items()
-        if code.startswith("2")
-        for schema in [response.get("content", {}).get("application/json", {}).get("schema")]
-        if schema is not None
-        # The generated title names the handler, and says nothing about the shape.
-        and {key: value for key, value in schema.items() if key != "title"} != open_object
+def test_success_responses_are_typed_or_explicitly_inventoried() -> None:
+    """New routes must publish a contract or make their migration debt reviewable."""
+    document = openapi_document()
+    expected_typed = {
+        "GET /requests 200": "RequestListResponse",
+        "GET /requests/{request_id} 200": "RequestResponse",
+        "GET /routines 200": "RoutineListResponse",
+        "POST /residents/{resident_id}/routines/{routine_id}/run 202": "RoutineRunReceipt",
     }
-
-    assert typed == set(), (
-        "steward now types a response, so its shape is finally checkable: extend "
-        "townhall/src/steward/contract.test.js to validate its fixtures against it, then "
-        f"record the newly typed route here — {sorted(typed)}"
-    )
+    remaining = set()
+    found_typed = {}
+    for path, operations in document["paths"].items():
+        for method, operation in operations.items():
+            for code, response in operation["responses"].items():
+                if not code.startswith("2"):
+                    continue
+                key = f"{method.upper()} {path} {code}"
+                schema = response.get("content", {}).get("application/json", {}).get("schema", {})
+                if "$ref" in schema:
+                    name = schema["$ref"].rsplit("/", 1)[-1]
+                    component = document["components"]["schemas"][name]
+                    assert component.get("properties"), key
+                    assert component.get("additionalProperties") is False, key
+                    found_typed[key] = name
+                else:
+                    remaining.add(key)
+    assert found_typed == expected_typed
+    inventory = (REPO_ROOT / "docs/response-migration.md").read_text(encoding="utf-8")
+    listed = [
+        line.removeprefix("- `").removesuffix("`")
+        for line in inventory.splitlines()
+        if line.startswith("- `")
+    ]
+    assert len(listed) == len(set(listed)), "duplicate migration entries"
+    assert remaining == set(listed), "type the response or update the finite migration inventory"
 
 
 def test_the_document_says_what_the_prose_says_about_the_credential() -> None:
