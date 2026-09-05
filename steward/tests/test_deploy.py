@@ -1,6 +1,7 @@
 """The transport seam and the compose fragment: everything the nursery ships, without a NAS."""
 
 import io
+import json
 import os
 import tarfile
 from collections.abc import Sequence
@@ -11,6 +12,7 @@ import pytest
 import yaml
 
 from conftest import ResidentWriter, valid_manifest
+from steward import deploy
 from steward.deploy import (
     BURROW_ENV,
     BURROW_HOME_ENV,
@@ -824,5 +826,33 @@ def test_codex_bundle_persists_only_its_own_auth_directory(write_resident) -> No
     assert "./codex:/root/.codex" in service["volumes"]
     assert service["environment"]["CODEX_HOME"] == "/root/.codex"
     assert files["codex/.keep"] == b""
+    assert service["security_opt"] == [
+        "no-new-privileges=true",
+        "apparmor=unconfined",
+        "seccomp=./codex-seccomp.json",
+    ]
+    profile = json.loads(files["codex-seccomp.json"])
+    assert profile["defaultAction"] == "SCMP_ACT_ERRNO"
+    assert set(profile["syscalls"][-1]["names"]) == {
+        "clone",
+        "unshare",
+        "setns",
+        "mount",
+        "umount2",
+        "pivot_root",
+    }
+    assert not service.get("privileged")
+    assert not service.get("cap_add")
     assert set(bundle_names(one)) == set(files)
     assert not any("auth.json" in name or "config.toml" in name for name in files)
+
+
+def test_a_changed_codex_seccomp_profile_changes_the_compose_service(
+    write_resident, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    one = resident(write_resident, runner={"kind": "codex"}, tools="unrestricted")
+    before = bundle_for(one, target_for(one.manifest), VILLAGE)
+    monkeypatch.setattr(deploy, "_CODEX_SECCOMP", deploy._CODEX_SECCOMP + b"\n")
+    after = bundle_for(one, target_for(one.manifest), VILLAGE)
+    assert before["codex-seccomp.json"] != after["codex-seccomp.json"]
+    assert before[COMPOSE_FILENAME] != after[COMPOSE_FILENAME]

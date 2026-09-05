@@ -60,6 +60,8 @@ jobs:
               - 'steward/Makefile'
               - '.github/workflows/steward.yml'
               - 'steward/src/steward/runners.py'
+              - 'steward/src/steward/deploy.py'
+              - 'steward/src/steward/templates/codex-*'
               - 'steward/tests/test_codex_runtime.py'
 
       - name: Install uv

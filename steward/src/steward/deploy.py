@@ -50,6 +50,7 @@ file, and the host's docker is what says whether the image exists. ``make image-
 how it gets there.
 """
 
+import hashlib
 import io
 import os
 import tarfile
@@ -136,6 +137,8 @@ SOUL_FILENAME = "soul.md"
 COMPOSE_HEADER = (Path(__file__).parent / "templates" / "resident-compose.yaml").read_text(
     encoding="utf-8"
 )
+
+_CODEX_SECCOMP = (Path(__file__).parent / "templates" / "codex-seccomp.json").read_bytes()
 
 #: The two variables that carry the village's address and its shared secret into the
 #: container are :data:`~steward.runners.CHRONICLE_URL_ENV` and
@@ -387,6 +390,18 @@ def render_compose(
         "extra_hosts": ["dockerhost:host-gateway"],
         "command": list(target.command),
     }
+    if resident.manifest.runner.kind == "codex":
+        # Bubblewrap needs nested namespaces and mounts. Keep Docker's syscall filter
+        # with only those operations added, and no privilege gain or added capabilities.
+        # Docker's AppArmor mount deny also blocks bubblewrap inside its own userns.
+        service["security_opt"] = [
+            "no-new-privileges=true",
+            "apparmor=unconfined",
+            "seccomp=./codex-seccomp.json",
+        ]
+        # A changed policy file must recreate the container even when its filename
+        # stays the same; Compose otherwise sees an unchanged service declaration.
+        service["labels"] = {"steward.codex-seccomp": hashlib.sha256(_CODEX_SECCOMP).hexdigest()}
     document = {"services": {target.service: service}}
     body = yaml.safe_dump(document, default_flow_style=False, sort_keys=True)
     return COMPOSE_HEADER + body
@@ -485,6 +500,7 @@ def bundle_for(
     }
     if resident.manifest.runner.kind == "codex":
         files["codex/.keep"] = b""
+        files["codex-seccomp.json"] = _CODEX_SECCOMP
     soul_path = resident.directory / resident.manifest.soul.file
     if soul_path.is_file():
         files[SOUL_FILENAME] = soul_path.read_bytes()
@@ -506,7 +522,9 @@ BUNDLE_NAMES: tuple[str, ...] = (
 
 def bundle_names(resident: Resident) -> tuple[str, ...]:
     """List staged files, including the selected runner's persistent login directory."""
-    return BUNDLE_NAMES + (("codex/.keep",) if resident.manifest.runner.kind == "codex" else ())
+    return BUNDLE_NAMES + (
+        ("codex/.keep", "codex-seccomp.json") if resident.manifest.runner.kind == "codex" else ()
+    )
 
 
 def bundle_changes(transport: Transport, files: Mapping[str, bytes], path: str) -> tuple[str, ...]:

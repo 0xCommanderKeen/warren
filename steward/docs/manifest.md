@@ -1174,8 +1174,20 @@ a person. This does not implement a Codex tool allowlist or additional workspace
 `--ignore-user-config` and `--ignore-rules` keep persisted user settings and saved approval
 rules from changing the unattended policy. Authentication still uses Codex's credential store.
 
+The container must permit Codex's nested user/PID/mount namespaces. Docker's default
+seccomp and AppArmor profiles block these on Linux, including dxp2800. Codex compose
+plans therefore declare `no-new-privileges=true`, `apparmor=unconfined`, and
+`seccomp=./codex-seccomp.json`. The bundled seccomp profile is Docker's upstream default
+at commit `61eaf32614c7c71b60bd8927d3e6a4ffc8ff1f31`, with only `clone`, `unshare`,
+`setns`, `mount`, `umount2`, and `pivot_root` allowed additionally. Docker capabilities
+are not expanded and the container is not privileged. Codex still enforces its workspace
+filesystem boundary. This trades Docker's outer AppArmor confinement for the nested
+sandbox; review these explicit settings in the provision plan. No host sysctl or global
+security policy is changed. Existing containers must be reprovisioned to receive them.
+The profile's source and Apache-2.0 license are retained under `src/steward/templates/`.
+
 A Codex container gets its own `./codex:/root/.codex` bind mount and
-`CODEX_HOME=/root/.codex`. The provisioning plan lists `codex/.keep`; the entrypoint makes
+`CODEX_HOME=/root/.codex`. The provisioning plan lists `codex/.keep` and `codex-seccomp.json`; the entrypoint makes
 the directory private (0700) and preserves its contents. Reprovisioning and image upgrades
 retain login credentials. The bundle never contains credentials or a generated user config.
 Extra mounts cannot mask this managed directory.

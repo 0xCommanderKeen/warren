@@ -5,10 +5,13 @@ import os
 from pathlib import Path
 
 import pytest
+import yaml
 
+from conftest import ResidentWriter, valid_manifest
 from steward.codex_usage import read_usage
+from steward.deploy import bundle_for, target_for
 from steward.manifest import Runner as RunnerSpec
-from steward.manifest import ToolGrant
+from steward.manifest import ToolGrant, load_manifest
 from steward.runners import CodexRunner, RunRequest, run_argv
 
 # The fixture server and CLI run in one disposable container with --network none.
@@ -120,8 +123,19 @@ print(result.stdout, end="")
 @pytest.mark.skipif(
     not os.environ.get("CODEX_RUNTIME_IMAGE"), reason="requires built resident image"
 )
-def test_codex_exec_uses_memory_api_token_and_returns_usage(tmp_path: Path) -> None:
+def test_codex_exec_uses_memory_api_token_and_returns_usage(
+    tmp_path: Path, write_resident: ResidentWriter
+) -> None:
     image = os.environ["CODEX_RUNTIME_IMAGE"]
+    resident = load_manifest(write_resident(valid_manifest() | {"runner": {"kind": "codex"}}))
+    bundle = bundle_for(resident, target_for(resident.manifest), {})
+    service = yaml.safe_load(bundle["docker-compose.yaml"])["services"][resident.id]
+    (tmp_path / "codex-seccomp.json").write_bytes(bundle["codex-seccomp.json"])
+    security_args = [
+        item
+        for option in service["security_opt"]
+        for item in ("--security-opt", option.replace("seccomp=./", f"seccomp={tmp_path}/"))
+    ]
     auth = tmp_path / "auth.json"
     auth.write_text('{"OPENAI_API_KEY":"synthetic-test-key"}')
     config = tmp_path / "config.toml"
@@ -145,6 +159,7 @@ def test_codex_exec_uses_memory_api_token_and_returns_usage(tmp_path: Path) -> N
             "none",
             "--platform",
             "linux/amd64",
+            *security_args,
             "-v",
             f"{tmp_path}:/root/.codex",
             "-e",
