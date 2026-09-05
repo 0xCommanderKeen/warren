@@ -77,6 +77,7 @@ export function matchRoute(route) {
     if (parts.length === 2 && parts[1] === "new") return { page: "skillNew", params: {} };
     if (parts.length === 2) return { page: "skill", params: { name: parts[1] } };
   }
+  if (parts[0] === "org" && parts.length === 1) return { page: "org", params: {} };
   if (parts[0] === "routines" && parts.length === 1) return { page: "routines", params: {} };
   if (parts[0] === "approvals" && parts.length === 1) return { page: "approvals", params: {} };
   if (parts[0] === "board" && parts.length === 1) return { page: "board", params: {} };
@@ -114,6 +115,7 @@ export const routeTo = {
   skills: () => "/skills",
   skill: (name) => `/skills/${encodeURIComponent(name)}`,
   skillNew: () => "/skills/new",
+  org: () => "/org",
   routines: () => "/routines",
   approvals: () => "/approvals",
   board: () => "/board",
@@ -125,15 +127,19 @@ export const routeTo = {
 export const NAV = [
   { index: "01", label: "Fleet", nav: "fleet", route: routeTo.fleet(), pages: ["fleet", "agent"] },
   { index: "02", label: "Residents", nav: "residents", route: routeTo.residents(), pages: ["residents", "resident", "residentNew", "residentDeclaration"] },
-  { index: "03", label: "Routines", nav: "routines", route: routeTo.routines(), pages: ["routines"] },
-  { index: "04", label: "Approvals", nav: "approvals", route: routeTo.approvals(), pages: ["approvals"] },
-  { index: "05", label: "Board", nav: "board", route: routeTo.board(), pages: ["board"] },
-  { index: "06", label: "Skills", nav: "skills", route: routeTo.skills(), pages: ["skills", "skill", "skillNew"] },
-  { index: "07", label: "Budgets", nav: "budgets", route: routeTo.budgets(), pages: ["budgets"] },
+  // Third, right after the residents themselves: the chart is what those declarations
+  // add up to, and it reads as a summary of the page above it rather than a section of
+  // its own errand (warren#441).
+  { index: "03", label: "Org", nav: "org", route: routeTo.org(), pages: ["org"] },
+  { index: "04", label: "Routines", nav: "routines", route: routeTo.routines(), pages: ["routines"] },
+  { index: "05", label: "Approvals", nav: "approvals", route: routeTo.approvals(), pages: ["approvals"] },
+  { index: "06", label: "Board", nav: "board", route: routeTo.board(), pages: ["board"] },
+  { index: "07", label: "Skills", nav: "skills", route: routeTo.skills(), pages: ["skills", "skill", "skillNew"] },
+  { index: "08", label: "Budgets", nav: "budgets", route: routeTo.budgets(), pages: ["budgets"] },
   // Last, because it is the only entry that is not a thing you go and do — but in the rail
   // rather than folded into the fleet, because a knock at a resident's bot is an outsider's
   // doing and the fleet page is about what the fleet itself is up to (warren#279).
-  { index: "08", label: "Diagnostics", nav: "diagnostics", route: routeTo.diagnostics(), pages: ["diagnostics"] },
+  { index: "09", label: "Diagnostics", nav: "diagnostics", route: routeTo.diagnostics(), pages: ["diagnostics"] },
 ];
 
 /** Which sidebar entry owns a page, or null when none does (the 404). */

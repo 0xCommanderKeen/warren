@@ -325,6 +325,25 @@ class ProtocolContractTest(unittest.TestCase):
         declared["source"] = "claude-code"
         self.assertEqual(validate_event(declared), "resident lifecycle events require source steward")
 
+    def test_a_written_secret_names_the_slot_and_can_carry_nothing_else(self):
+        """warren#462. The village is the most-read surface the fleet has: a name, never a
+        value, and an extra field is refused rather than passed through."""
+        written = {
+            "v": 0, "ts": "2026-09-04T21:05:00.000Z", "source": "steward",
+            "agent_id": "steward:api", "project": "steward", "type": "secret_written",
+            "payload": {"secret": "STEWARD_CHAT_TOKEN_DISCORD_HOB"},
+        }
+        self.assertIsNone(validate_event(written))
+
+        leaked = {**written, "payload": {**written["payload"], "value": "shhh"}}
+        self.assertEqual(validate_event(leaked), "invalid secret fields")
+
+        blank = {**written, "payload": {"secret": "  "}}
+        self.assertEqual(validate_event(blank), "invalid payload.secret")
+
+        forged = {**written, "source": "claude-code"}
+        self.assertEqual(validate_event(forged), "secret events require source steward")
+
 
 if __name__ == "__main__":
     unittest.main()

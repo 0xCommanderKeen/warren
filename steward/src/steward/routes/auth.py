@@ -48,6 +48,10 @@ def _session_grant_for(method: str, path: str) -> SessionGrant | None:
         resident_id = path.removeprefix("/residents/").removesuffix("/provision")
         if resident_id and "/" not in resident_id:
             return SessionGrant.RESIDENTS_DRY_RUN
+    if method == "POST" and path.startswith("/residents/") and path.endswith("/rehearse"):
+        resident_id = path.removeprefix("/residents/").removesuffix("/rehearse")
+        if resident_id and "/" not in resident_id:
+            return SessionGrant.RESIDENTS_REHEARSE
     if method == "PUT" and path.startswith("/residents/") and path.endswith("/declaration"):
         # The grant gets the session as far as the route and no further (warren#437). What
         # actually opens this door is an approved, unspent request naming this exact edit,
@@ -85,6 +89,14 @@ _SESSION_REFUSALS: tuple[tuple[str, str], ...] = (
         ),
     ),
     (
+        "/secrets",
+        (
+            "a credential is an identity: a session that could set one could give itself, "
+            "or take, another resident's bot — which is the boundary app_grants exists to "
+            "hold"
+        ),
+    ),
+    (
         "/skills",
         (
             "a skill is a capability somebody granted; a session that could write one would "
@@ -110,6 +122,14 @@ _SESSION_REFUSALS: tuple[tuple[str, str], ...] = (
         (
             "firing a routine is a human act; a session's own work arrives through the "
             "board and its inbox"
+        ),
+    ),
+    (
+        "/rehearse",
+        (
+            "a rehearsal runs a model turn and spends the caller's budget; the free "
+            "residents.dry_run grant reads a plan and buys nothing that costs money, so "
+            "rehearsing needs residents.rehearse and is never implied by it"
         ),
     ),
     (

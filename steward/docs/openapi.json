@@ -750,6 +750,24 @@
         "title": "ProvisionPost",
         "type": "object"
       },
+      "RehearsePost": {
+        "additionalProperties": false,
+        "description": "The one message a rehearsal answers.\n\nNothing else, and deliberately no knobs: the declaration in the tree is the rest of\nthe request, and a rehearsal that let the caller vary the charter, the skills or the\ntools would be rehearsing something other than what would be provisioned.",
+        "properties": {
+          "message": {
+            "description": "What to say to the resident. Shape it like its first real message.",
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "title": "RehearsePost",
+        "type": "object"
+      },
       "ResidentManifest": {
         "additionalProperties": false,
         "description": "The versioned declaration that makes a villager a resident.",
@@ -1390,12 +1408,29 @@
         "title": "Runner",
         "type": "object"
       },
+      "SecretBody": {
+        "additionalProperties": false,
+        "description": "The one thing a caller sends, and the one thing steward never sends back.\n\nDeliberately *unconstrained* at the schema layer, which is the opposite of every other\nbody in this API. Pydantic reports a length violation by echoing the offending\n``input`` into the 422 response \u2014 which for this one field would put the credential in\na response body, and from there into whatever logged it. The bounds still apply; they\nare applied by :func:`steward.secrets.write_secret`, which refuses by *naming the rule*\nand never quotes what it refused.",
+        "properties": {
+          "value": {
+            "description": "The credential itself. Stored, never returned by any route.",
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "title": "SecretBody",
+        "type": "object"
+      },
       "SessionGrant": {
         "description": "A write door an authenticated resident session may cross.",
         "enum": [
           "skills.write",
           "residents.declare",
           "residents.dry_run",
+          "residents.rehearse",
           "residents.grant_skill"
         ],
         "title": "SessionGrant",
@@ -1973,6 +2008,35 @@
           }
         ],
         "summary": "Post Job"
+      }
+    },
+    "/org": {
+      "get": {
+        "description": "Return the fleet as nodes and delegation edges, computed from the manifests.\n\nA projection of :func:`~steward.manifest.validate_path` and nothing else \u2014 no\nledger, no host, no clock \u2014 so two calls a second apart over an unchanged tree\nanswer the same bytes, and a resident that gained a grant this morning is on the\nchart without anybody having redrawn it.\n\nA manifest steward could not read is not a node \u2014 it never became a\n:class:`~steward.manifest.Resident` \u2014 so the chart is drawn from the residents\nvalidation produced and the refusals are reported beside it in ``errors``, the way\n``GET /residents`` reports them. A fleet that has gone quiet says why rather than\nanswering an empty chart. (``errors`` also carries the diagnostics validation\nraises *about* a tree whose residents did load, such as two residents claiming one\nhome; those residents are on the chart, and the complaint is right there with it.)",
+        "operationId": "get_org_org_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Org Org Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Org"
       }
     },
     "/reload": {
@@ -2691,6 +2755,66 @@
         "summary": "Provision Declared Resident"
       }
     },
+    "/residents/{resident_id}/rehearse": {
+      "post": {
+        "description": "Answer one message from a declaration, and keep nothing (warren#446).\n\nThe behavioural half of the dry run. ``POST /residents/{id}/provision`` with\n``dry_run: true`` proves the *plan* \u2014 the image, the host, the mounts, the next\nfires \u2014 and says nothing about whether the charter reads right. This runs one\nthrowaway turn from the same declaration, with its charter, soul and skills\nassembled into the prompt exactly as a real launch would assemble them, and\nreturns what the resident said.\n\nNothing else happens. No container, no mounts, no memory directory, no session\ncredential, no events, and no run row against the resident being rehearsed: it is\nexactly as unprovisioned afterwards as it was before. See\n:mod:`steward.rehearsal` for what each of those absences is protecting.\n\n**The one thing it costs is money**, which is why the door is its own grant. A\nsession pays out of its *own* budget line rather than the declaration's \u2014 the\nresident being rehearsed does not exist yet, and the caller is who chose to spend\na model turn \u2014 so a caller whose budget is spent or paused is refused here as it\nwould be refused a session of its own. That check is advisory in exactly the way\n``guard.allow`` is at every other route: it reads the ledger before the turn and\nwrites to it after, so simultaneous requests can each see an unspent budget. What\nbounds a rehearsal absolutely is the per-turn timeout and the empty tool grant,\nnot the daily cap.",
+        "operationId": "rehearse_declared_resident_residents__resident_id__rehearse_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resident_id",
+            "required": true,
+            "schema": {
+              "title": "Resident Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RehearsePost"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Rehearse Declared Resident Residents  Resident Id  Rehearse Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Rehearse Declared Resident"
+      }
+    },
     "/residents/{resident_id}/retire": {
       "post": {
         "description": "End a resident: mark it retired in git, stop its container, remove its token.\n\nThe counterpart of ``POST /residents/{id}/provision`` (warren#331), and the reason\nit had to exist: retirement is not a manifest edit. Writing ``retired: true``\nthrough ``PUT \u2026/declaration`` marks the resident and leaves its container running\nwith a live village token on the host \u2014 the half that matters most left undone \u2014\nso a control panel that could only edit declarations could show a retired badge it\nhad no way to make true.\n\n**The order is the safety argument, and it is the nursery's, not this route's.**\n``retired: true`` is what takes the resident out of the scheduler, the board,\ndelegation and the watchdog; stopping the container first would leave a window in\nwhich the watchdog notices it die and dutifully puts it back. So: mark, commit,\n``docker compose down``, then remove the ``.env`` and the compose file \u2014 in that\norder, by one pipeline ``steward retire`` also calls.\n\n**This one commits through the nursery**, unlike ``POST /residents``, which asks the\npipeline not to and commits afterwards through :mod:`steward.authoring`. The reason\nis the order above: retirement's commit belongs *between* the mark and the stop, and\nthe only code inside that sequence is the pipeline. What comes with the nursery's\ncommit is the nursery's dirty-worktree refusal, which is named rather than hidden \u2014\na server that committed a retirement into a checkout somebody was half-way through\nwould be a server nobody can revert one decision in.\n\n**200, not 202**, for the reason provision answers 200: by the time this returns the\ncontainer is down and the credential is gone. There is nothing left to acknowledge.",
@@ -2844,6 +2968,95 @@
           }
         ],
         "summary": "List Routines"
+      }
+    },
+    "/secrets": {
+      "get": {
+        "description": "List every credential slot, whether it is filled, and which route wants it.\n\nHuman callers only, unlike almost every other read in this API. A ``GET`` is safe\nby method and a session credential reaches every safe method, so the refusal has to\nbe made here rather than by the gate \u2014 and it is worth making: no value is exposed,\nbut the *inventory* is. One resident could otherwise enumerate which slot carries\nevery other resident's identity and which of them are filled, which is the shape of\nknowledge ``app_grants`` exists to keep on the human side.\n\nThree sources of names, unioned: the slots declared chat routes ask for, the files\nin the secrets directory, and the ``STEWARD_CHAT_TOKEN_*`` variables in this\nprocess's environment. A slot no route claims is listed all the same \u2014 that is what\na half-finished provisioning looks like, and hiding it would hide the thing an\noperator came here to see.",
+        "operationId": "list_secrets_secrets_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Secrets Secrets Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Secrets"
+      }
+    },
+    "/secrets/{name}": {
+      "put": {
+        "description": "Store one credential in its own private file. Returns that it was stored.\n\nEverything a caller learns is that the write happened, and the request id it\nhappened under. The name is echoed because the caller chose it; the value is not,\nbecause a response body is the easiest thing in this system to end up in a log.",
+        "operationId": "write_secret_secrets__name__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SecretBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Write Secret Secrets  Name  Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Write Secret"
       }
     },
     "/skills": {

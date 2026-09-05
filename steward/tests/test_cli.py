@@ -617,6 +617,110 @@ def test_doctor_says_when_a_local_placement_has_no_emitter_to_run(
     )
 
 
+def test_doctor_says_when_a_local_sessions_events_cannot_be_delivered_from_here(
+    runner: CliRunner,
+    stub_bin: StubWriter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    write_resident: ResidentWriter,
+) -> None:
+    """Hooks that fire are half the answer; whether they deliver is the other (warren#449).
+
+    A locally placed session inherits no `CHRONICLE_TOKEN`, so against a token-guarded
+    village every per-session event 401s and journals to an outbox nothing drains. Without
+    this line the symptom is an empty village three days later. Yellow and uncounted — the
+    operator may have chosen it — but never silent, and carrying the outbox's own reading
+    so it says *how long* rather than only *whether*.
+    """
+    stub_bin("claude", CURRENT_CLAUDE)
+    emitter = tmp_path / "chronicle-emit.py"
+    emitter.write_text("", encoding="utf-8")
+    stub_bin("python3", 'echo "chronicle emitter outbox: stalled; 41/500 queued"')
+    monkeypatch.setenv("STEWARD_SESSION_EMITTER", str(emitter))
+    monkeypatch.setenv("CHRONICLE_URL", "http://dxp2800:8737")
+    monkeypatch.setenv("CHRONICLE_TOKEN", "shared-ingest-secret")
+    monkeypatch.delenv("STEWARD_SESSION_ENV_PASSTHROUGH", raising=False)
+    monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state.json"))
+    manifest = write_resident({**valid_manifest(), "id": "local"}, directory="local")
+
+    result = runner.invoke(
+        main, ["doctor", str(manifest.parent.parent), "--db", str(tmp_path / "steward.db")]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert f"local: per-session events via {emitter}" in result.output
+    assert "rejected 401" in result.output
+    assert "~/.chronicle/events.jsonl" in result.output
+    assert "chronicle emitter outbox: stalled; 41/500 queued (read here)" in result.output
+    # The secret itself is never a thing a report prints.
+    assert "shared-ingest-secret" not in result.output
+
+
+def test_doctor_warns_without_an_outbox_reading_when_the_emitter_cannot_answer(
+    runner: CliRunner,
+    stub_bin: StubWriter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    write_resident: ResidentWriter,
+) -> None:
+    """The mixed case an operator on an old emitter actually hits (warren#449).
+
+    `--status` is a flag the vendored emitter grew late, and a copy that predates it exits
+    0 having printed nothing. The evidence is optional; the warning is not, and the line
+    has to say the reading is missing rather than trail off looking like a reading of zero.
+    """
+    stub_bin("claude", CURRENT_CLAUDE)
+    emitter = tmp_path / "chronicle-emit.py"
+    emitter.write_text("", encoding="utf-8")
+    stub_bin("python3", "exit 0")
+    monkeypatch.setenv("STEWARD_SESSION_EMITTER", str(emitter))
+    monkeypatch.setenv("CHRONICLE_URL", "http://dxp2800:8737")
+    monkeypatch.setenv("CHRONICLE_TOKEN", "shared-ingest-secret")
+    monkeypatch.delenv("STEWARD_SESSION_ENV_PASSTHROUGH", raising=False)
+    monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state.json"))
+    manifest = write_resident({**valid_manifest(), "id": "local"}, directory="local")
+
+    result = runner.invoke(
+        main, ["doctor", str(manifest.parent.parent), "--db", str(tmp_path / "steward.db")]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "rejected 401" in result.output
+    assert "no outbox reading here" in result.output
+
+
+def test_doctor_stays_quiet_about_delivery_when_the_village_wants_no_token(
+    runner: CliRunner,
+    stub_bin: StubWriter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    write_resident: ResidentWriter,
+) -> None:
+    """The warning has to be able to *not* fire, or it is decoration rather than a report.
+
+    Where this host holds no ingest token the village wants none and the hook events land,
+    so there is nothing to warn about and the emitter is never even asked for its outbox.
+    """
+    stub_bin("claude", CURRENT_CLAUDE)
+    emitter = tmp_path / "chronicle-emit.py"
+    emitter.write_text("", encoding="utf-8")
+    stub_bin("python3", 'echo "chronicle emitter outbox: stalled; 41/500 queued"')
+    monkeypatch.setenv("STEWARD_SESSION_EMITTER", str(emitter))
+    monkeypatch.setenv("CHRONICLE_URL", "http://localhost:8737")
+    monkeypatch.delenv("CHRONICLE_TOKEN", raising=False)
+    monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state.json"))
+    manifest = write_resident({**valid_manifest(), "id": "local"}, directory="local")
+
+    result = runner.invoke(
+        main, ["doctor", str(manifest.parent.parent), "--db", str(tmp_path / "steward.db")]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert f"local: per-session events via {emitter}" in result.output
+    assert "rejected 401" not in result.output
+    assert "chronicle emitter outbox" not in result.output
+
+
 @pytest.mark.usefixtures("on_operator_burrow")
 def test_doctor_is_red_when_the_container_has_no_emitter_to_run(
     runner: CliRunner, stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2980,6 +3084,7 @@ def delegation_fleet(write_resident: ResidentWriter) -> Path:
     receiver["uid"] = SECOND_RESIDENT_UID
     receiver["id"] = "receiver-agent"
     receiver["agent_id"] = "claude-code:receiver-agent"
+    receiver["home"] = 1
     receiver["soul"]["name"] = "Recy"
     receiver["routes"] = [
         *receiver["routes"],
@@ -4249,3 +4354,140 @@ def test_notify_test_says_where_it_landed(
     assert result.exit_code == 0
     assert "sent —" in result.output
     assert [tap.kind for tap in sent] == ["test"]
+
+
+# --------------------------------------------------------------------------------------
+# steward org (warren#441)
+# --------------------------------------------------------------------------------------
+
+
+ORG_SOUL = """---
+agent_id: claude-code:receiver-agent
+name: Recy
+char: Monk
+accent: "#a68a4f"
+role: test bot
+---
+A villager that exists only inside a test.
+"""
+
+
+def org_tree(write_resident: ResidentWriter, tmp_path: Path) -> Path:
+    """Build a sender and the receiver its manifest names, in one throwaway tree."""
+    sender = valid_manifest()
+    sender["delegation"] = {"send": True, "to": ["receiver-agent"]}
+    write_resident(sender)
+    receiver = valid_manifest()
+    receiver["uid"] = SECOND_RESIDENT_UID
+    receiver["id"] = "receiver-agent"
+    receiver["agent_id"] = "claude-code:receiver-agent"
+    receiver["home"] = 1
+    receiver["soul"]["name"] = "Recy"
+    receiver["budgets"] = {"daily_cost_usd": 5.0}
+    receiver["deploy"] = {"mounts": [{"host": "~/Life", "container": "/vault", "mode": "rw"}]}
+    receiver["routes"] = [
+        *receiver["routes"],
+        {"id": "inbox", "kind": "delegation", "address": "steward:delegation", "status": "active"},
+    ]
+    write_resident(receiver, soul=ORG_SOUL)
+    return tmp_path / "residents"
+
+
+def test_org_prints_the_receiver_indented_under_the_resident_that_may_send_to_it(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    tree = org_tree(write_resident, tmp_path)
+
+    result = runner.invoke(main, ["org", "--residents", str(tree)])
+
+    assert result.exit_code == 0
+    lines = result.output.splitlines()
+    assert lines[0].startswith("test-agent (")
+    receiver = next(line for line in lines if line.strip().startswith("receiver-agent ("))
+    assert receiver.startswith("  "), receiver
+
+
+def test_org_says_no_cap_and_none_rather_than_going_quiet(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """Unlimited must not read as unknown, and neither must "touches nothing"."""
+    tree = org_tree(write_resident, tmp_path)
+
+    output = runner.invoke(main, ["org", "--residents", str(tree)]).output
+
+    assert "budget: no cap" in output
+    assert "mounts: none" in output
+    assert "budget: $5/day" in output
+    assert "mounts: /vault (rw)" in output
+
+
+def test_org_names_the_receivers_rather_than_leaving_them_to_the_indentation(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """A resident with two managers sits under one row, so the edge has to be said."""
+    tree = org_tree(write_resident, tmp_path)
+
+    output = runner.invoke(main, ["org", "--residents", str(tree)]).output
+
+    assert "hands work to: receiver-agent" in output
+    assert "hands work to: nobody (no delegation grant)" in output
+
+
+def test_org_marks_a_receiver_it_would_refuse_rather_than_listing_it_as_a_handoff(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    sender = valid_manifest()
+    sender["delegation"] = {"send": True, "to": ["ghost"]}
+    write_resident(sender)
+
+    output = runner.invoke(main, ["org", "--residents", str(tmp_path / "residents")]).output
+
+    assert "hands work to: ghost (refused)" in output
+
+
+def test_org_json_is_the_same_projection_the_api_answers_with(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    tree = org_tree(write_resident, tmp_path)
+
+    result = runner.invoke(main, ["org", "--residents", str(tree), "--format", "json"])
+
+    body = json.loads(result.output)
+    assert result.exit_code == 0
+    assert body["edges"] == [
+        {
+            "sender": "test-agent",
+            "receiver": "receiver-agent",
+            "named": True,
+            "deliverable": True,
+            "reason": None,
+        }
+    ]
+    assert body["errors"] == []
+
+
+def test_org_names_a_declared_handoff_that_would_not_deliver(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    sender = valid_manifest()
+    sender["delegation"] = {"send": True, "to": ["ghost"]}
+    write_resident(sender)
+
+    result = runner.invoke(main, ["org", "--residents", str(tmp_path / "residents")])
+
+    assert result.exit_code == 0
+    assert "test-agent -> ghost" in result.output
+
+
+def test_org_exits_invalid_when_a_manifest_does_not_validate(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """The same exit code `validate` uses: a chart drawn from half a tree is not an answer."""
+    write_resident(valid_manifest())
+    broken = tmp_path / "residents" / "broken"
+    broken.mkdir()
+    (broken / "manifest.yaml").write_text("version: 0\nid: broken\n", encoding="utf-8")
+
+    result = runner.invoke(main, ["org", "--residents", str(tmp_path / "residents")])
+
+    assert result.exit_code == 1

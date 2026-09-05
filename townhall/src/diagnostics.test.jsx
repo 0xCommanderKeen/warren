@@ -14,7 +14,15 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fixture from "./fixtures/complete-v1.js";
 import { viewModel } from "./model.js";
-import { KNOCK, UNNAMED, fields, foldKnocks, groupDiagnostics, knockCount } from "./diagnostics.js";
+import {
+  KIND_WORDS,
+  KNOCK,
+  UNNAMED,
+  fields,
+  foldKnocks,
+  groupDiagnostics,
+  knockCount,
+} from "./diagnostics.js";
 import DiagnosticsPage from "./pages/DiagnosticsPage.jsx";
 
 const knock = (overrides = {}) => ({
@@ -152,6 +160,25 @@ describe("grouping diagnostics by kind", () => {
 
     expect(knockCount(records)).toBe(200);
     expect(foldKnocks(records.slice(0, 3))[0].count).toBe(200);
+  });
+
+  it("names a contested approval rather than leaving an operator the raw kind", () => {
+    // warren#266 gave the projection a kind for an approval closed twice with different
+    // answers. It is the least self-explanatory of the reducer's complaints — nothing in
+    // `{kind, request_id}` says which decision stands — so it gets words and a slot beside
+    // the other approval findings rather than falling through to the unknown-kind path.
+    const groups = groupDiagnostics([
+      { kind: "journal_collision", day: "2026-09-01", agent_id: "claude:keeper" },
+      { kind: "conflicting_approval_resolution", request_id: "r-1" },
+      { kind: "orphan_approval_resolution", request_id: "r-2" },
+    ]);
+
+    expect(groups.map((group) => group.kind)).toEqual([
+      "orphan_approval_resolution", "conflicting_approval_resolution", "journal_collision",
+    ]);
+    expect(KIND_WORDS.conflicting_approval_resolution.title).toBe(
+      "Approvals answered twice, differently",
+    );
   });
 
   it("keeps a kind chronicle grew after this page was written", () => {

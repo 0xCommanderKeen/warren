@@ -1,6 +1,7 @@
 """Resident HTTP routes and their local request/view vocabulary."""
 
 from collections.abc import Mapping
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Annotated, Any
 
@@ -16,7 +17,13 @@ from steward.chat import Transcript, chat_complaint, conversation_slug, conversa
 from steward.deploy import TransportError
 from steward.input_bounds import IDENTIFIER_MAX_CHARS
 from steward.journal import journal_complaint, read_entries
-from steward.manifest import Resident, ResidentManifest, redact_secrets, validate_path
+from steward.manifest import (
+    Resident,
+    ResidentManifest,
+    ValidationResult,
+    redact_secrets,
+    validate_path,
+)
 from steward.nursery import (
     CLAUDE_LOGIN_REMAINS,
     COMMIT_FAILED,
@@ -26,6 +33,8 @@ from steward.nursery import (
     NurseryReport,
     RetireReport,
 )
+from steward.prompt import MESSAGE_MAX_CHARS
+from steward.rehearsal import Rehearsal, RehearsalError, rehearse
 from steward.routes.auth import session_of
 from steward.routes.deps import DOCUMENT_MAX_CHARS, Deps, _Body, _refuse
 from steward.skills import SkillLibrary, effective_skills, library_for
@@ -58,6 +67,21 @@ class ProvisionPost(_Body):
     dry_run: bool = Field(
         default=False,
         description="Print the plan and reach no host. Nothing is sent, run, or written.",
+    )
+
+
+class RehearsePost(_Body):
+    """The one message a rehearsal answers.
+
+    Nothing else, and deliberately no knobs: the declaration in the tree is the rest of
+    the request, and a rehearsal that let the caller vary the charter, the skills or the
+    tools would be rehearsing something other than what would be provisioned.
+    """
+
+    message: str = Field(
+        min_length=1,
+        max_length=MESSAGE_MAX_CHARS,
+        description="What to say to the resident. Shape it like its first real message.",
     )
 
 
@@ -287,6 +311,43 @@ RETIRE_UNTOUCHED: frozenset[str] = frozenset(
 )
 
 
+def _payer_for(  # noqa: RET503 — the fallthrough raises through the refusal seam
+    request: Request, result: ValidationResult, residents_dir: Path
+) -> ResidentManifest | None:
+    """Name the manifest whose budget line pays for a rehearsal, or ``None`` for a human.
+
+    A session pays: the credential names a resident, and that resident's declaration is
+    the budget the turn comes out of. A human — the master token, a named operator, or
+    open mode — has no ledger line to charge, so nothing is recorded and no budget can
+    refuse the turn. That asymmetry is the same one the run ledger already has: it is a
+    record of what *residents* spent, and an operator asking a question is steward
+    spending its own operator's money.
+    """
+    session = session_of(request)
+    if session is None:
+        return None
+    for resident in result.residents:
+        if resident.id == session.resident_id:
+            return resident.manifest
+    # The credential authenticated against a live run, so the resident existed when the
+    # run opened; its declaration has since stopped validating or been removed. Refusing
+    # is the honest answer — the alternative is a free rehearsal on a budget nobody can
+    # find, which is exactly the thing this door is separate from `residents.dry_run` to
+    # prevent.
+    _refuse(
+        409,
+        "payer_not_declared",
+        f"{session.resident_id} holds a live session credential, but its own declaration "
+        f"is not in {residents_dir}; a rehearsal is charged to the caller's budget "
+        f"line and steward will not run one it cannot bill",
+    )
+
+
+def _charge_note(rehearsal: Rehearsal) -> str:
+    """Say whose budget the turn came out of, in the sentence that reports it."""
+    if rehearsal.charged_to:
+        return f"was charged to {rehearsal.charged_to}'s budget line"
+    return "was charged to no resident's budget line, because a human asked for it"
 #: What a declaration edit that no decision authorises is answered with. One error slug
 #: for every way an approval can fail to cover a write — unknown, somebody else's, still
 #: pending, denied, expired, spent, or simply about a different edit — because the caller's
@@ -676,6 +737,64 @@ def router(deps: Deps) -> APIRouter:  # noqa: C901, PLR0915 — route factory is
             "request_id": request_id,
             "message": _provision_message(report),
             **report.to_dict(),
+        }
+
+    @routes.post("/residents/{resident_id}/rehearse")
+    def rehearse_declared_resident(
+        resident_id: str, request: Request, body: RehearsePost
+    ) -> dict[str, Any]:
+        """Answer one message from a declaration, and keep nothing (warren#446).
+
+        The behavioural half of the dry run. ``POST /residents/{id}/provision`` with
+        ``dry_run: true`` proves the *plan* — the image, the host, the mounts, the next
+        fires — and says nothing about whether the charter reads right. This runs one
+        throwaway turn from the same declaration, with its charter, soul and skills
+        assembled into the prompt exactly as a real launch would assemble them, and
+        returns what the resident said.
+
+        Nothing else happens. No container, no mounts, no memory directory, no session
+        credential, no events, and no run row against the resident being rehearsed: it is
+        exactly as unprovisioned afterwards as it was before. See
+        :mod:`steward.rehearsal` for what each of those absences is protecting.
+
+        **The one thing it costs is money**, which is why the door is its own grant. A
+        session pays out of its *own* budget line rather than the declaration's — the
+        resident being rehearsed does not exist yet, and the caller is who chose to spend
+        a model turn — so a caller whose budget is spent or paused is refused here as it
+        would be refused a session of its own. That check is advisory in exactly the way
+        ``guard.allow`` is at every other route: it reads the ledger before the turn and
+        writes to it after, so simultaneous requests can each see an unspent budget. What
+        bounds a rehearsal absolutely is the per-turn timeout and the empty tool grant,
+        not the daily cap.
+        """
+        result = validate_path(residents_dir, settings.skills_dir)
+        resident = deps.find_resident(result, resident_id)
+        payer = _payer_for(request, result, residents_dir)
+        try:
+            rehearsal = rehearse(
+                resident,
+                body.message,
+                library=library_for(residents_dir, settings.skills_dir),
+                runner_factory=deps.runner_factory,
+                guard=guard,
+                payer=payer,
+                now=deps.now(),
+            )
+        except RehearsalError as exc:
+            # Every one of them is 409: steward looked at the declaration, or at the
+            # budget line that would pay, and will not run this. Nothing was spent.
+            _refuse(409, exc.reason, str(exc))
+        # Logged after the turn, never before: a rehearsal that was refused spent nothing
+        # and belongs in the log as a refusal, which `_refuse` above has already made it.
+        request_id = deps.accept(request, "answered", {"resident": resident.id})
+        return {
+            "request_id": request_id,
+            "message": (
+                "nothing was built, mounted, credentialed or recorded against this "
+                "resident: this is one throwaway turn from its declaration, and it "
+                f"{_charge_note(rehearsal)}"
+            ),
+            **rehearsal.to_dict(),
         }
 
     def record_refusal(request_id: str, reason: str) -> None:

@@ -784,6 +784,7 @@
         "skills.write",
         "residents.declare",
         "residents.dry_run",
+        "residents.rehearse",
         "residents.grant_skill"
       ],
       "title": "SessionGrant",

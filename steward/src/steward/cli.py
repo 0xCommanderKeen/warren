@@ -76,6 +76,7 @@ from steward.nursery import (
 )
 from steward.openapi import OPENAPI_ARTIFACT, openapi_json
 from steward.operator_auth import new_operator_credential, operator_email
+from steward.org import OrgEdge, OrgNode, org_chart
 from steward.prompt import assemble_preamble
 from steward.runners import (
     SESSION_EMITTER_ENV,
@@ -84,7 +85,9 @@ from steward.runners import (
     check_cli_support,
     check_runner,
     check_session_emitter,
+    check_session_ingest,
     session_emitter,
+    session_emitter_outbox,
     skills_home,
 )
 from steward.scheduler import (
@@ -548,6 +551,23 @@ def _report_telemetry(resident: Resident, placement: Placement) -> int:
     `|| true` so that a missing emitter costs telemetry rather than denying every tool
     call, which means the resident runs, looks healthy, and says nothing.
 
+    Everything the third line below says was read from *this* process's environment and
+    this account's outbox, and it says so, for the reason the emitter line already hedges:
+    the process that will launch the session is the scheduler. A doctor typed into a shell
+    that does not hold the ingest token therefore stays quiet about a scheduler that does —
+    a limit, and the honest shape of a report about somebody else's environment.
+
+    A third line, yellow and uncounted, is the one warren#449 added: an emitter that is
+    there and hooks that fire still leave the second question open, which is whether what
+    they post can be *delivered* from here. A local session inherits no `CHRONICLE_TOKEN`,
+    so against a token-guarded village every per-session event 401s into an outbox nothing
+    drains — the hooks fire, the outbox grows, the village stays empty, and until this line
+    nothing anywhere said why. Uncounted for the same reason quiet is: an operator may
+    legitimately run a local resident against a guarded village and read its events out of
+    the outbox by hand, and `doctor` exiting non-zero over a choice somebody made would
+    make the exit status mean less, not more. It is the outbox reading appended to it that
+    makes it more than a warning — see :func:`~steward.runners.session_emitter_outbox`.
+
     Only `claude` residents are answerable at all. Which flags a session carries is
     `required_flags`' question, and it answers `()` for every other kind — a `codex` or
     `command` session is never handed a settings document, so a line about its hooks would
@@ -574,7 +594,123 @@ def _report_telemetry(resident: Resident, placement: Placement) -> int:
     # the difference between a report and an assertion.
     where = "" if placement.is_container else f" (${SESSION_EMITTER_ENV}, read here)"
     click.secho(f"{resident.id}: per-session events via {emitter}{where}", fg="bright_black")
+    undeliverable = check_session_ingest(placement)
+    if undeliverable:
+        # Same hedge as the line above, and it earns it twice over: the token this was
+        # decided from and the outbox this reading came out of are both *this* process's,
+        # and the process that will launch the session is the scheduler, under whatever
+        # account it runs as. Said, rather than quietly asserted.
+        outbox = session_emitter_outbox(placement)
+        reading = f"; {outbox} (read here)" if outbox else "; no outbox reading here"
+        click.secho(f"{resident.id}: per-session events — {undeliverable}{reading}", fg="yellow")
     return 0
+
+
+# --------------------------------------------------------------------------------------
+# org
+# --------------------------------------------------------------------------------------
+
+
+@main.command("org")
+@_RESIDENTS_OPTION
+@click.option(
+    "--skills",
+    "skills_dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="The skills library. Defaults to the skills/ directory beside the residents tree.",
+)
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def org_command(residents: Path, skills_dir: Path | None, output_format: str) -> None:
+    """Print the org chart the manifests declare: who may hand work to whom.
+
+    The same projection ``GET /org`` answers with and Townhall's Org page draws, printed
+    for a terminal. Nothing here is a drawing anybody maintains — every line is
+    ``delegation.send``/``delegation.to`` on one manifest meeting an active ``delegation``
+    route on another, so a grant added this morning is in this output without anybody
+    having remembered to update it.
+
+    Residents are indented by rank: a resident nobody may hand work to sits flush left,
+    and everyone below is one level in from whoever may hand work to it. An edge that is
+    declared but would not deliver today is still printed, with the reason — a grant that
+    does not work is a thing to fix, not a thing to hide.
+    """
+    result = validate_paths([residents], skills_dir)
+    chart = org_chart(result.residents)
+
+    if output_format == "json":
+        click.echo(json.dumps({**chart.to_dict(), "errors": _rendered(result.errors)}, indent=2))
+        sys.exit(EXIT_OK if not result.errors else EXIT_INVALID)
+
+    if not chart.nodes:
+        click.secho("no residents", fg="yellow")
+    for node in sorted(chart.nodes, key=lambda entry: (entry.rank, entry.id)):
+        _render_org_node(node, [edge for edge in chart.edges if edge.sender == node.id])
+    for edge in chart.edges:
+        if not edge.deliverable:
+            click.secho(
+                f"  ! {edge.sender} -> {edge.receiver}: {edge.reason}", fg="yellow", err=True
+            )
+    for diagnostic in result.errors:
+        click.secho(diagnostic.render(), fg="red", err=True)
+    sys.exit(EXIT_OK if not result.errors else EXIT_INVALID)
+
+
+def _rendered(diagnostics: Sequence[Diagnostic]) -> list[str]:
+    """Render diagnostics the way every other JSON surface prints them."""
+    return [diagnostic.render() for diagnostic in diagnostics]
+
+
+def _render_org_node(node: OrgNode, sends: Sequence[OrgEdge]) -> None:
+    """Print one resident and the chips hanging off it, indented by rank."""
+    indent = "  " * node.rank
+    label = f"{node.id} ({node.name}, {node.role})"
+    click.secho(f"{indent}{label}", fg="cyan" if not node.retired else "white", bold=True)
+    if node.retired:
+        click.secho(f"{indent}  retired", fg="white")
+    for chip in _org_chips(node, sends):
+        click.echo(f"{indent}  {chip}")
+
+
+def _org_chips(node: OrgNode, sends: Sequence[OrgEdge]) -> list[str]:
+    """Return the one-line facts a chart draws beside a node, in a fixed order.
+
+    Every dimension speaks even when it has nothing to say ("no cap", "none"),
+    because on a chart of what a resident is allowed to do, silence and unlimited must
+    not look the same — the rule :func:`steward.routes.residents.budget_summary` follows.
+
+    ``sends`` is the other half of the projection, said out loud rather than left to the
+    indentation: two managers of one resident sit on different rows, so indentation alone
+    cannot say which of them a given handoff belongs to. A grant steward would refuse is
+    named as refused here, not silently listed beside the ones that work.
+    """
+    budget = node.budget
+    # Against None rather than on truthiness: a declared cap of zero is falsy, and printing
+    # "no cap" over a resident told to spend nothing would invert the very fact this line
+    # exists to state.
+    caps = [
+        f"${budget.daily_cost_usd:g}/day" if budget.daily_cost_usd is not None else "",
+        f"{budget.daily_tokens} tokens/day" if budget.daily_tokens is not None else "",
+        f"{budget.max_run_seconds}s/run" if budget.max_run_seconds is not None else "",
+    ]
+    declared = [cap for cap in caps if cap]
+    mounts = [f"{mount.container} ({mount.mode})" for mount in node.mounts]
+    grants = list(node.session_grants)
+    return [
+        f"budget: {', '.join(declared) if declared else 'no cap'}",
+        f"mounts: {', '.join(mounts) if mounts else 'none'}",
+        f"grants: {', '.join(grants) if grants else 'none'}",
+        f"accepts: {', '.join(node.accepts) if node.accepts else 'no delegation route'}",
+        f"hands work to: {_org_handoffs(node, sends)}",
+    ]
+
+
+def _org_handoffs(node: OrgNode, sends: Sequence[OrgEdge]) -> str:
+    """Name every receiver this resident may hand work to, refusals marked."""
+    if not node.delegates:
+        return "nobody (no delegation grant)"
+    named = [edge.receiver if edge.deliverable else f"{edge.receiver} (refused)" for edge in sends]
+    return ", ".join(named) if named else "nobody with an open door"
 
 
 # --------------------------------------------------------------------------------------

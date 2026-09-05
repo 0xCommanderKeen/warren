@@ -161,7 +161,7 @@ The write allowlist below is about **sessions** and is untouched by operator cre
 It exists to keep a running resident out of human acts, and an operator is the human.
 
 **What a session may reach.** Every `GET`, plus `POST /delegate`. Named `session_grants`
-may open four deliberately narrow doors beside that permanent allowlist:
+may open five deliberately narrow doors beside that permanent allowlist:
 
 - `skills.write` permits `POST /skills` and `PUT` of an ungranted skill. It may not set
   `defaults: true` or replace a skill any resident manifest already grants.
@@ -170,6 +170,12 @@ may open four deliberately narrow doors beside that permanent allowlist:
 - `residents.dry_run` permits `POST /residents/{id}/provision` with an explicit
   `dry_run: true` only. It returns the full bundle, compose, command, next-fire and
   environment-key plan without reaching a host.
+- `residents.rehearse` permits `POST /residents/{id}/rehearse`: one throwaway turn run
+  from a declaration, in a scratch directory, with no container, no mounts, no memory
+  directory, no credential, no tools and no steward event. **Never implied by
+  `residents.dry_run`**, and that is the point of it being a
+  name of its own (warren#446): a dry run reads a plan and costs nothing, a rehearsal runs
+  a model turn and spends the caller's own budget line.
 - `residents.grant_skill` permits `PUT /residents/{id}/declaration` **only against an
   approval a human answered** — see [An approved declaration
   edit](#an-approved-declaration-edit). It is the one grant that opens nothing by itself.
@@ -215,6 +221,9 @@ worth knowing:
   over ssh. `residents.dry_run` opens only its no-host planning form. Named separately from
   declaring, and matched ahead of it, because the two are different acts and a refusal that
   called this one "declaring" would be describing something the caller did not try.
+- **`POST /residents/{id}/rehearse`** — a rehearsal runs a model turn and spends money.
+  `residents.dry_run` buys the free half of "check this declaration before building it"
+  and deliberately does not buy this half.
 - **`POST /residents/{id}/retire`** — retiring is ending a resident: a mark in git, a
   container stopped, a village token removed. A session that could do it would be deciding
   which of its colleagues carries on, or dismissing itself. Matched ahead of declaring for
@@ -888,6 +897,57 @@ and `unreported_runs` counts the runs whose brain reported no usage at all (a `c
 `command` session has none to give); steward writes those as zero and says how many they
 were rather than inventing a number.
 
+### `GET /org`
+
+The org chart, computed from the manifests and nothing else (warren#441). Who may hand
+work to whom is already written down twice over — `delegation.send`/`delegation.to` on the
+sending manifest, an active route of kind `delegation` on the receiving one — so this
+route derives the chart rather than storing one. Nothing here reads the ledger, the host
+or the clock: two calls over an unchanged tree answer the same bytes.
+
+```json
+{
+  "nodes": [
+    {"id": "hob", "uid": "…", "name": "Hob", "role": "vault keeper", "accent": "#a68a4f",
+     "summary": "Keeps the vault.", "retired": false, "rank": 0,
+     "session_grants": ["skills.write"],
+     "app_grants": [{"id": "chronicle", "status": "granted"}],
+     "mounts": [{"host": "~/Life", "container": "/vault", "mode": "rw"}],
+     "budget": {"declared": true, "daily_cost_usd": 10.0, "daily_tokens": null,
+                "max_run_seconds": null},
+     "delegates": true, "accepts": ["inbox"]}
+  ],
+  "edges": [
+    {"sender": "hob", "receiver": "pip", "named": true, "deliverable": true, "reason": null}
+  ],
+  "errors": []
+}
+```
+
+`rank` is the layout fact: 0 for a resident nobody may hand work to, and one more than
+whoever may hand work to it otherwise. It is computed here rather than in each surface so
+the terminal's indentation and the panel's rows cannot disagree about who is above whom.
+Two residents that may delegate to each other are a cycle with no top, and everyone in one
+keeps rank 0.
+
+**An edge is drawn even when it will not deliver.** `delegation.to: [pip]` aimed at a
+resident whose door is shut is a declared intention that does not work, and a chart that
+dropped it would answer "there is no such grant" about a grant that is in the file. Such an
+edge carries `"deliverable": false` and the reason. `named` separates the two grants a
+sender can hold: `true` when `delegation.to` picked this receiver, `false` when the
+allowlist is empty and the receiver is reachable because it opened a door.
+
+`budget` is the **declared** cap, not today's spend — an org chart answers what a resident
+is allowed to do, and `GET /residents/{id}/budget` is where the ledger lives. `declared:
+false` with every cap `null` is said out loud, because unlimited must not read as unknown.
+
+`errors` carries what validation refused, the way `GET /residents` does: a manifest steward
+could not read is not a node, and a fleet that has gone quiet says why rather than
+answering an empty chart.
+
+`steward org` prints the same projection for a terminal (`--format json` emits this exact
+document), and Townhall's Org page draws it.
+
 ### `GET /residents/{id}/journal`
 
 The resident's own journal, **newest first** — the entries it wrote at the close of its
@@ -1309,6 +1369,62 @@ residents tree. That is a bigger change than it looks — a configured-but-empty
 turns every existing grant into an error, where an absent one leaves grants unchecked — so
 it goes through the same gate as everything else, and a first skill that would invalidate
 the fleet is refused before the directory exists.
+
+### `GET /secrets` · `PUT /secrets/{name}`
+
+The credential write path (warren#462). Adding a bot to Discord used to end in an ssh
+heredoc appending a token to the burrow's `.env`, followed by
+`docker compose up -d --force-recreate chat`. The paste is a step no agent session can
+take — a classifier refuses it, correctly, because it is a credential going into a shell —
+and the recreate is a blunt way to say "one more token exists". Both are replaced by this
+endpoint and the chat daemon's own reload.
+
+`PUT /secrets/{name}` stores one credential as one file, mode 600, in the burrow's
+`secrets/` directory (`STEWARD_SECRETS_DIR`, `/secrets` in every container). The name is an
+environment variable name — `STEWARD_CHAT_TOKEN_DISCORD_HOB` — because that is the slot the
+value fills: resolution is **file first, environment second**, so a token already in the
+`.env` keeps working and one written here simply wins for that name.
+
+```json
+PUT /secrets/STEWARD_CHAT_TOKEN_DISCORD_HOB
+{"value": "…"}
+
+{"request_id": "…", "name": "STEWARD_CHAT_TOKEN_DISCORD_HOB", "set": true}
+```
+
+**The value never comes back.** There is no `GET /secrets/{name}`, no value in the listing,
+no value in the `secret_written` event, and no value in the request log — which also means
+the refusals below name the rule rather than quoting what they refused. Every consumer of
+these values is a process on the burrow that reads the file directly.
+
+**Human callers only.** A session credential is refused with `403
+session_credential_forbidden` before anything is written: a resident that could set
+`STEWARD_CHAT_TOKEN_DISCORD_PIP` could take Pip's identity, which is the boundary
+`app_grants` exists to hold.
+
+| status | error | meaning |
+|---|---|---|
+| 422 | `invalid_secret_name` | not an environment variable name (upper case, digits, `_`) |
+| 422 | `invalid_secret_value` | blank, more than one line, or longer than 8,192 characters |
+| 403 | `session_credential_forbidden` | a resident session tried to set a credential |
+
+`GET /secrets` lists the slots and never their values: every slot a declared chat route
+asks for, every file in the directory, and every `STEWARD_CHAT_TOKEN_*` still in the
+environment — with `set`, where it came from (`file` or `env`), and which route claims it.
+
+```json
+{"directory": "/secrets",
+ "secrets": [{"name": "STEWARD_CHAT_TOKEN_DISCORD_HOB", "set": true, "source": "file",
+              "route": {"resident": "hob", "route": "discord", "address": "discord:hob"}}]}
+```
+
+There is no delete. Unsetting a credential is rare, is not what this endpoint is for, and
+stays an ssh step — `rm` on the burrow, then restart what held it.
+
+**Reaching the fleet.** The chat daemon re-reads the tree and the secrets directory on its
+route-recheck timer (five minutes), so a token set here becomes `reachable, bot @Name` in
+`steward chat list` without a container recreate. `POST /reload` still only reloads the API
+process; nothing else changed about it.
 
 ### `POST /reload`
 

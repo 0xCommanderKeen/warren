@@ -353,6 +353,7 @@ fields. Parent and child always retain distinct `agent_id` values and lifecycles
 | `discord_message_pinned` | Steward pinned a Discord message for a resident | `resident`, `route`, `channel`; optional message metadata, never `text` |
 | `discord_topic_set` | Steward set a Discord channel topic for a resident | `resident`, `route`, `channel`; never topic `text` |
 | `journal_written`   | Steward observed a successful close produce a real readable daily file | `routine`, `day`, `path` |
+| `secret_written`    | An operator set or rotated one of steward's credentials (warren#462) | `secret` — the slot's name, and nothing else; there is deliberately nowhere in this event for a value |
 
 Routine events are projected into a separate bounded ledger keyed by agent, routine,
 and run id, and are also first-class villager activity. A valid start can create or
@@ -421,8 +422,8 @@ none) and the event `ts`. Those named fields only: the
 raw record still reaches that villager's history exactly as it arrived, which is why
 Steward keeps the stranger's text out of the event in the first place.
 
-Rotation holds the same line: `retention` imports the reducer's ambient set rather than
-mirroring it, so a knock is never carried forward as a villager's state witness and a
+Rotation holds the same line: `retention_projection` imports the reducer's ambient set
+rather than mirroring it, so a knock is never carried forward as a villager's state witness and a
 departed villager cannot be resurrected by somebody ringing its bell.
 
 It is also the one event type an *outsider* causes, which is why its **volume** is bounded
@@ -434,7 +435,8 @@ Neither is data loss — but both are an outsider choosing what the projection s
 is the thing it is otherwise careful about.
 
 So every channel a knock lands in is *split* rather than merely bounded, by one shared rule
-(`village_state.ambient_share`, which `retention` imports the way it imports the ambient set):
+(`village_state.ambient_share`, which `retention_projection` imports the way it imports the
+ambient set):
 
 Outbound Discord events are visible audit facts, but not activity-state or mood evidence.
 They remain in a resident's bounded history and may supply its newest timeline sentence,
@@ -725,15 +727,22 @@ come from `source: "steward"` and their decision is exactly `approve`, `deny`, o
 `edit`. A close appended before its request is unknown at that point: it is ignored
 with a bounded diagnostic and cannot later bind when a matching request appears.
 Likewise, request duplicates never replace the first appended immutable request.
-Exact close replays and all later conflicts are ignored with bounded, deduplicated
-diagnostics, so neither an earlier timestamp nor an equal timestamp can replace the
-rendered decision. `tests/fixtures/approval-lifecycle.json` and
+The first binding close is the decision and no later close can replace it, so neither
+an earlier timestamp nor an equal timestamp can rewrite the rendered answer. An exact
+close replay is Steward answering the same way twice and is ignored in silence; a later
+close that binds the same request with a *different* decision is contested evidence and
+raises one bounded `conflicting_approval_resolution` diagnostic per request ID, however
+many times it repeats. This is what makes the projection a pure function of the log's
+content: rotation carries exactly one close forward, so raw tail and rotated log must
+render the same *decision* (warren#266). The diagnostic is evidence about the log rather
+than about the request, so it does not survive the rotation that drops the close it
+complains about; only the decision is invariant. `tests/fixtures/approval-lifecycle.json` and
 `approval-identity.json` were written as shared vectors driving the JavaScript
 projection against Python rotation. The JavaScript side is gone (warren#219), but
 the rules were always rotation's, so `tests/test_retention_approvals.py` enforces
 both files against the Python that owns them: identity against
-`retention._approval_lifecycle_identity`, lifecycle against the single close
-`retention._approval_keep_indexes` carries forward.
+`retention_approvals._approval_lifecycle_identity`, lifecycle against the single close
+`retention_approvals._approval_keep_indexes` carries forward.
 
 The panel keeps at most five newest confirmed request cards (action, detail and
 decision) alongside any newer pending queue. Closing one card therefore does not erase

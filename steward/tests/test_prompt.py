@@ -675,11 +675,28 @@ def test_raise_resident_reaches_the_prompt_with_the_skeleton_the_dry_run_and_the
     assert '"deploy": false' in section
     # the plan that proves the manifest builds, read without reaching a host
     assert '{"dry_run": true}' in section
-    # "rehearse" is warren#446's word for a run that spends the caller's budget
-    assert "rehears" not in section.lower()
     # one decision, and nothing moves until it is answered
     assert "Provision karen?" in section
     assert "nothing happens until you say" in section.lower()
+
+
+def test_raise_resident_rehearses_the_draft_and_quotes_the_reply_in_the_knock() -> None:
+    """The behavioural half of "check it before you build it" (warren#446).
+
+    The two doors are separate names for separate costs, and the skill has to say which is
+    which: a session that reached for ``/rehearse`` holding only ``residents.dry_run``
+    would spend its turn on a 403, and one that never rehearsed at all would knock with
+    nothing to say about how the resident actually sounds.
+    """
+    _, text = hr_prompt()
+    section = skills_section(text)
+
+    # the door, and that it is not the free one
+    assert "/rehearse" in section
+    assert "residents.rehearse" in section
+    assert "costs money, and the money is yours" in section
+    # and the reply is what the knock carries, so Miha reads the voice before approving
+    assert "Morning. Nothing due yet" in section
 
 
 def test_both_hr_skills_fit_beside_the_default_set_without_truncation() -> None:

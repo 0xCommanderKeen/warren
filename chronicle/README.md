@@ -57,7 +57,11 @@ snapshot carries:
   decision once a matching `needs_human_resolved` arrives. The question is immutable — a
   request ID reused with a different question is quarantined as a `collision` instead of
   overwritten, and a resolution that does not match on agent, project and action is a
-  diagnostic rather than a decision. Nothing here evaluates the expiry: `expires_at` is
+  diagnostic rather than a decision. The answer is immutable too: the *first* matching
+  close is the decision, an exact replay of it changes nothing, and a later close naming a
+  different decision is a `conflicting_approval_resolution` diagnostic rather than an
+  overwrite — rotation keeps one close, so the newest-wins reading rendered two different
+  answers from one log. Nothing here evaluates the expiry: `expires_at` is
   carried through as declared, and deciding what an elapsed one means is the client's.
 - **`journals`** — journal *metadata* observed from Steward's `journal_written`: day,
   agent, project, routine, path, observed time. Never the entry text. First valid append
@@ -206,7 +210,8 @@ deploy is pushed from a machine that has the repo checked out.
   [`deploy/compose.yaml`](deploy/compose.yaml), published by the repo's `deploy/deploy.sh`. Deploy code
   and all runtime support and resident manifests with the authoritative
   tar-over-ssh recipe (UGOS scp is broken): `tar -cf - pyproject.toml uv.lock serve.py config.py event_log.py delivery_id_index.py state_coordinator.py village_state.py identity.py retention.py
-  retention-policy.json
+  retention_policy.py retention_ledger.py retention_approvals.py retention_mood.py
+  retention_projection.py retention-policy.json
   approval_protocol.py journal_observations.py notification_persistence.py protocol.py
   residents.py typed_json.py hooks villagers | ssh
   Miha@dxp2800 'tar -xf - -C ~/docker/warren/chronicle/app'`, then

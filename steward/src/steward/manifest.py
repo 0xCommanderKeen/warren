@@ -201,6 +201,10 @@ UNRESTRICTED_TOOLS = "unrestricted"
 SESSION_GRANT_SKILLS_WRITE = "skills.write"
 SESSION_GRANT_RESIDENTS_DECLARE = "residents.declare"
 SESSION_GRANT_RESIDENTS_DRY_RUN = "residents.dry_run"
+#: Deliberately not implied by ``residents.dry_run`` (warren#446). A dry run reads a
+#: rendered plan and costs nothing; a rehearsal runs a model turn and spends the caller's
+#: budget, so a resident handed the cheap door must not inherit the expensive one.
+SESSION_GRANT_RESIDENTS_REHEARSE = "residents.rehearse"
 SESSION_GRANT_RESIDENTS_GRANT_SKILL = "residents.grant_skill"
 
 
@@ -210,6 +214,7 @@ class SessionGrant(StrEnum):
     SKILLS_WRITE = SESSION_GRANT_SKILLS_WRITE
     RESIDENTS_DECLARE = SESSION_GRANT_RESIDENTS_DECLARE
     RESIDENTS_DRY_RUN = SESSION_GRANT_RESIDENTS_DRY_RUN
+    RESIDENTS_REHEARSE = SESSION_GRANT_RESIDENTS_REHEARSE
     #: The one door that does not open on the grant alone (warren#437). A session holding
     #: it may ``PUT`` a declaration only while presenting an approval a human answered
     #: ``approve`` to, and only when the edit is the one that approval describes.
@@ -2929,8 +2934,22 @@ def _check_shared_journal_dirs(residents: Sequence[Resident]) -> list[Diagnostic
 
 
 def _check_competing_mount_writers(residents: Sequence[Resident]) -> list[Diagnostic]:
-    """Warn when one shared host path has more than one declared writer."""
-    by_host: dict[str, dict[str, Resident]] = {}
+    """Refuse a tree where one shared host path has more than one declared writer.
+
+    One writer per resource is a rule of the org, not advice (warren#440): two residents
+    holding the same clone open for writing race each other, and no manifest can see the
+    conflict on its own. Read-only mounts are free — it is the second *writer* that is
+    refused.
+
+    Two residents contend only if they share a filesystem, so the grouping key is the
+    burrow *and* the resolved path. Matching is exact after ``~/`` resolution and
+    :func:`posixpath.normpath`: a symlink to the same directory, or a mount nested inside
+    another resident's, is not seen.
+    """
+    # (burrow, path): two residents on different burrows do not share a filesystem, so
+    # the same spelling there is two resources. The default mirrors deploy.DEFAULT_HOST,
+    # which cannot be imported here — deploy imports this module.
+    by_host: dict[tuple[str, str], dict[str, Resident]] = {}
     for resident in residents:
         for mount in resident.manifest.deploy.mounts:
             if mount.mode == "rw":
@@ -2939,9 +2958,10 @@ def _check_competing_mount_writers(residents: Sequence[Resident]) -> list[Diagno
                     user = resident.manifest.deploy.user or "Miha"
                     home = (os.environ.get("STEWARD_BURROW_HOME") or f"/home/{user}").rstrip("/")
                     host = resolve_mount_host_path(host, home)
-                by_host.setdefault(posixpath.normpath(host), {})[resident.id] = resident
+                burrow = resident.manifest.deploy.host or "dxp2800"
+                by_host.setdefault((burrow, posixpath.normpath(host)), {})[resident.id] = resident
     diagnostics: list[Diagnostic] = []
-    for host_path, residents_by_id in by_host.items():
+    for (burrow, host_path), residents_by_id in by_host.items():
         group = list(residents_by_id.values())
         if len(group) <= 1:
             continue
@@ -2951,11 +2971,10 @@ def _check_competing_mount_writers(residents: Sequence[Resident]) -> list[Diagno
                 file=resident.path,
                 field_path="deploy.mounts",
                 problem=(
-                    f"host path {host_path!r} has read-write mounts for {ids}; the "
-                    "one writer per shared clone rule permits at most one"
+                    f"host path {host_path!r} on {burrow} has read-write mounts for "
+                    f"{ids}; the one writer per shared clone rule permits at most one"
                 ),
                 example="change every mount but one to mode: ro",
-                severity=Severity.WARNING,
             )
             for resident in group
         )

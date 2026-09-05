@@ -957,6 +957,210 @@ class VillageProjectionTests(unittest.TestCase):
         self.assertLessEqual(len(first["diagnostics"]), 2)
         json.dumps(first, allow_nan=False)
 
+    def test_a_second_conflicting_resolution_cannot_rewrite_the_first_decision(self):
+        """warren#266: the first close owns the answer, later conflicts are complaints.
+
+        `retention._approval_keep_indexes` carries exactly one close forward, so a
+        projection that let the newest close win rendered `deny` from the raw tail and
+        `approve` from the rotated log — the same evidence, two decisions.
+        """
+        events = [
+            event(
+                "needs_human",
+                minutes=0,
+                message="Ship?",
+                request_id="r1",
+                action="ship",
+                detail={"env": "prod"},
+                options=["approve", "deny"],
+            ),
+            event(
+                "needs_human_resolved",
+                minutes=1,
+                source="steward",
+                request_id="r1",
+                action="ship",
+                decision="deny",
+                decided_by="miha",
+            ),
+            event(
+                "needs_human_resolved",
+                minutes=2,
+                source="steward",
+                request_id="r1",
+                action="ship",
+                decision="approve",
+                decided_by="miha",
+            ),
+        ]
+        state = project_village(
+            events, [RESIDENT], NOW + dt.timedelta(minutes=3), ProjectionPolicy()
+        )
+        [approval] = state["approvals"]
+        self.assertEqual("resolved", approval["state"])
+        self.assertEqual("deny", approval["decision"])
+        self.assertEqual(
+            (NOW + dt.timedelta(minutes=1))
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z"),
+            approval["resolved_at"],
+        )
+        self.assertEqual(
+            ["conflicting_approval_resolution"],
+            [item["kind"] for item in state["diagnostics"]],
+        )
+        self.assertEqual("r1", state["diagnostics"][0]["request_id"])
+
+    def test_a_conflicting_resolution_storm_leaves_one_deduplicated_complaint(self):
+        """The channel is bounded, so one contested request is one complaint."""
+        events = [
+            event(
+                "needs_human",
+                minutes=0,
+                message="Ship?",
+                request_id="r1",
+                action="ship",
+                detail={"env": "prod"},
+                options=["approve", "deny"],
+            ),
+            event(
+                "needs_human_resolved",
+                minutes=1,
+                source="steward",
+                request_id="r1",
+                action="ship",
+                decision="deny",
+                decided_by="miha",
+            ),
+        ] + [
+            event(
+                "needs_human_resolved",
+                minutes=2 + index,
+                source="steward",
+                request_id="r1",
+                action="ship",
+                decision="approve",
+                decided_by="miha",
+            )
+            for index in range(20)
+        ]
+        state = project_village(
+            events, [RESIDENT], NOW + dt.timedelta(minutes=30), ProjectionPolicy()
+        )
+        self.assertEqual("deny", state["approvals"][0]["decision"])
+        self.assertEqual(
+            ["conflicting_approval_resolution"],
+            [item["kind"] for item in state["diagnostics"]],
+        )
+
+    def test_an_exact_close_replay_is_idempotent_and_silent(self):
+        """Steward replays a recorded answer; a replay is not a disagreement."""
+        events = [
+            event(
+                "needs_human",
+                minutes=0,
+                message="Ship?",
+                request_id="r1",
+                action="ship",
+                detail={"env": "prod"},
+                options=["approve", "deny"],
+            ),
+            event(
+                "needs_human_resolved",
+                minutes=1,
+                source="steward",
+                request_id="r1",
+                action="ship",
+                decision="approve",
+                decided_by="miha",
+            ),
+            event(
+                "needs_human_resolved",
+                minutes=5,
+                source="steward",
+                request_id="r1",
+                action="ship",
+                decision="approve",
+                decided_by="miha",
+            ),
+        ]
+        state = project_village(
+            events, [RESIDENT], NOW + dt.timedelta(minutes=6), ProjectionPolicy()
+        )
+        [approval] = state["approvals"]
+        self.assertEqual("approve", approval["decision"])
+        self.assertEqual(
+            (NOW + dt.timedelta(minutes=1))
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z"),
+            approval["resolved_at"],
+        )
+        self.assertEqual([], state["diagnostics"])
+
+    def test_rotation_cannot_change_a_contested_decision(self):
+        """The vector the issue asks for: one log, projected on both sides of rotation.
+
+        The filler is what makes this a real vector rather than a tautology — rotation
+        only reaches the second close once ordinary activity has pushed the log past its
+        per-villager bound, and it keeps the first. Before warren#266 the raw tail read
+        `approve` and the rotated log read `deny` from these same bytes.
+        """
+        events = [
+            event(
+                "needs_human",
+                minutes=0,
+                message="Ship?",
+                request_id="r1",
+                action="ship",
+                detail={"env": "prod"},
+                options=["approve", "deny"],
+            ),
+            event(
+                "needs_human_resolved",
+                minutes=1,
+                source="steward",
+                request_id="r1",
+                action="ship",
+                decision="deny",
+                decided_by="miha",
+            ),
+            event(
+                "needs_human_resolved",
+                minutes=2,
+                source="steward",
+                request_id="r1",
+                action="ship",
+                decision="approve",
+                decided_by="miha",
+            ),
+        ] + [
+            event("tool_called", minutes=3 + index, tool="Read") for index in range(80)
+        ]
+        now = NOW + dt.timedelta(minutes=200)
+        retained = retention.carry_forward(
+            [json.dumps(item) for item in events],
+            int(now.timestamp() * 1000),
+            retention.POLICY,
+        )
+        retained_events = [
+            value
+            for value in (json.loads(line) for line in retained.lines)
+            if "_burrow_internal" not in value
+        ]
+        self.assertEqual(
+            ["deny"],
+            [
+                item["payload"]["decision"]
+                for item in retained_events
+                if item["type"] == "needs_human_resolved"
+            ],
+            "rotation must have dropped the second close for this vector to mean anything",
+        )
+        complete = project_village(events, [RESIDENT], now, ProjectionPolicy())
+        rotated = project_village(retained_events, [RESIDENT], now, ProjectionPolicy())
+        self.assertEqual("deny", complete["approvals"][0]["decision"])
+        self.assertEqual(complete["approvals"], rotated["approvals"])
+
     def test_rotation_is_observationally_invisible(self):
         events = [
             event("task_started", prompt="work"),

@@ -39,7 +39,7 @@ describe("base-prefix routing", () => {
       routeTo.fleet(), routeTo.agent("d29c-…"), routeTo.residents(),
       routeTo.resident("hob"), routeTo.residentNew(),
       routeTo.residentDeclaration("hob"), routeTo.skills(),
-      routeTo.skill("read-inbox"), routeTo.skillNew(), routeTo.routines(),
+      routeTo.skill("read-inbox"), routeTo.skillNew(), routeTo.org(), routeTo.routines(),
       routeTo.approvals(), routeTo.board(), routeTo.budgets(), routeTo.budgets("hob"),
       routeTo.diagnostics(),
     ];
@@ -71,6 +71,8 @@ describe("route matching", () => {
       page: "residentDeclaration",
       params: { id: "hob" },
     });
+    expect(matchRoute("/org")).toEqual({ page: "org", params: {} });
+    expect(matchRoute("/org/hob")).toEqual({ page: "unknown", params: {} });
     expect(matchRoute("/routines")).toEqual({ page: "routines", params: {} });
     expect(matchRoute("/approvals")).toEqual({ page: "approvals", params: {} });
     expect(matchRoute("/board")).toEqual({ page: "board", params: {} });
@@ -97,7 +99,7 @@ describe("route matching", () => {
       for (const page of entry.pages) expect(navFor(page)).toBe(entry.nav);
     }
     expect(NAV.map((entry) => entry.label)).toEqual([
-      "Fleet", "Residents", "Routines", "Approvals", "Board", "Skills", "Budgets",
+      "Fleet", "Residents", "Org", "Routines", "Approvals", "Board", "Skills", "Budgets",
       "Diagnostics",
     ]);
   });

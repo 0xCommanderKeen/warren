@@ -28,6 +28,9 @@ KEY = "/run/steward/residents-key"
 #: rather than the image's ``/root``. That directory and no wider: the control plane's own
 #: directory beside it holds the ``.env`` and the deploy key, which the daemons have no
 #: business with.
+#: Where the burrow's credential directory is mounted (warren#462). One file per secret,
+#: written by the API and read by the daemons that carry a conversation.
+SECRETS = "/secrets"
 HOST_RESIDENTS = "/home/Miha/docker/warren/residents"
 BURROW_HOME = "/home/Miha"
 
@@ -166,3 +169,29 @@ def test_the_api_provisions_this_burrows_residents_itself(services: dict[str, An
     assert api["environment"]["STEWARD_BURROW"] == "dxp2800", (
         "the name deploy.host is matched against"
     )
+
+
+def test_the_api_alone_may_write_the_credential_directory(services: dict[str, Any]) -> None:
+    """warren#462: the write path is an API call, so exactly one container may write.
+
+    The chat daemon and the scheduler both *read* tokens — one to answer a message, one to
+    deliver a routine's final line — and neither has any business setting one. Mounting
+    their side read-only is what makes "a credential is written by a human through the API"
+    a property of the deployment rather than a convention in the code.
+    """
+    assert mounts(services["api"])[SECRETS] == f"./secrets:{SECRETS}"
+    for name in ("chat", "scheduler"):
+        assert mounts(services[name])[SECRETS] == f"./secrets:{SECRETS}:ro", name
+
+
+def test_every_container_that_mounts_secrets_is_told_where_they_are(
+    services: dict[str, Any],
+) -> None:
+    """The mount point and ``STEWARD_SECRETS_DIR`` are one fact, so they cannot drift."""
+    for name in ("api", "chat", "scheduler"):
+        assert services[name]["environment"]["STEWARD_SECRETS_DIR"] == SECRETS, name
+
+
+def test_the_watchdog_holds_no_credentials(services: dict[str, Any]) -> None:
+    """It restarts containers and reads no route; a mount it never uses is only exposure."""
+    assert SECRETS not in mounts(services["watchdog"])

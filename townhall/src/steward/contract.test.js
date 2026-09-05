@@ -127,10 +127,18 @@ const UNCALLED = [
   // The console follows one request it just made (`readRequest`); the full log is an
   // operator's audit view, and there is no page for it.
   "GET /requests",
+  // Credentials (warren#462) have no page yet: the write path exists so that provisioning a
+  // bot needs no ssh, and today the caller is a Claude session or a curl, not this console.
+  "GET /secrets",
   // The board renders a task's lineage from the snapshot Chronicle already streams.
   "GET /tasks/{task_id}/lineage",
   // Delegation is resident-to-resident, through the `<delegate>` block in a session.
   "POST /delegate",
+  // Rehearsing a declaration (warren#446) is Karen's move inside `raise-resident`, before
+  // she knocks: what the console shows is the reply she quotes in it, not a button that
+  // spends a model turn on somebody else's behalf.
+  "POST /residents/{resident_id}/rehearse",
+  "PUT /secrets/{name}",
 ];
 
 describe("the client speaks the routes Steward declares", () => {

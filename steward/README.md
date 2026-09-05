@@ -275,6 +275,19 @@ $ steward inbox hob            # what is waiting, from whom, at what depth
 $ steward task lineage <task_id>      # the whole chain, root first
 ```
 
+**The org chart is computed, not drawn** (warren#441). Every edge above is already a
+declared fact, so `GET /org` derives the chart from the validated tree and nothing else —
+residents as nodes with their API write doors, their rw/ro mounts and their declared cap,
+delegation edges between them, and a `rank` per node so the terminal and the panel place
+the same resident on the same row. An edge only one half of the fleet agrees to is drawn
+too, marked undeliverable with the reason: `delegation.to` aimed at a shut door is a thing
+to fix, not a thing to hide. Townhall's **Org** page draws the same document.
+
+```console
+$ steward org                        # the chart, indented by rank
+$ steward org --format json          # the same document GET /org answers with
+```
+
 Closing a route stops delivery but not the pile already behind it, and nothing claims a
 letter while the door is shut — so `steward doctor` counts every resident's post and fails
 on the one case nobody would otherwise notice: open letters behind a `pending` or
@@ -663,6 +676,22 @@ Diagnostics always name the file, the field path, the problem, and an example of
 value, and the same check is importable (`steward.validate_tree`, `steward.load_manifest`)
 so the scheduler, the API, and CI share one load-and-validate path.
 
+**One writer per resource** (warren#440). Every writable resource — a clone, a vault, a
+directory on a burrow — has exactly one resident that writes it. Others may read it as
+much as they like. Two residents holding the same tree open for writing produce the one
+failure nobody can debug from a transcript: a change that was there and then was not,
+overwritten by a colleague who never knew. Validation enforces it — two `mode: rw` mounts
+resolving to one host path is an error naming both residents, and the write API's gate
+refuses the `PUT` that would create the second one — so the rule holds for a fleet edited
+through the panel, not only for one assembled by hand.
+
+Its corollary is about the org chart rather than the filesystem: **split a job into two
+residents when their trust differs, not when their titles do.** Backend and frontend
+development on one repo is one resident, because it is one clone; a librarian that only
+recommends and a worker that rewrites library data are two, because one of them may
+destroy something and the other may not. A manager owns conversations and letters — it
+delegates, it does not write files — so a manager and its report never contend.
+
 ## Development
 
 Python 3.14, [uv](https://docs.astral.sh/uv/), ruff, ty, pytest.
@@ -832,8 +861,13 @@ Two names are deliberately missing, and neither is an oversight:
   `steward events flush` drains, which is steward's own emitter's queue. So they are not lost
   and they do not arrive. Naming it in `STEWARD_SESSION_ENV_PASSTHROUGH` buys live emission
   at the price of handing every session a secret that can impersonate every other resident;
-  per-resident ingest credentials are the real answer and are their own issue. A
-  container-placed session needs none of this — `docker exec` runs it in the container's own
+  per-resident ingest credentials are the real answer and are their own issue. **`steward
+  doctor` prints a yellow line when it can see that situation** — the shell it is run in
+  holds an ingest token and a local session will not inherit it — carrying the emitter's
+  own outbox reading where the emitter answers, so the choice is made in daylight rather
+  than found as an empty village (warren#449). Everything on that line is read from
+  doctor's own environment and account, which the line says, because the process that
+  launches the session is the scheduler. A container-placed session needs none of this — `docker exec` runs it in the container's own
   environment, which its compose service already gives both variables.
 
 One name is deliberately added: **`STEWARD_SESSION_TOKEN`**, this run's own scoped

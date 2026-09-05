@@ -46,6 +46,7 @@ EVENT_TYPES = frozenset(
         "discord_message_pinned",
         "discord_topic_set",
         "journal_written",
+        "secret_written",
     }
 )
 _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
@@ -279,12 +280,35 @@ def _validate_discord_event(event):
     return None
 
 
+#: How long a credential slot's name may be here. Steward's own grammar bounds it at 128,
+#: and this is the gate for everything that is not steward — a name is an environment
+#: variable name, so anything longer is a payload pretending to be one.
+_SECRET_NAME_MAX = 128
+
+
+def _validate_secret_written(event):
+    """A credential slot was filled. The name, and nothing else, ever.
+
+    ``set(payload) != {"secret"}`` is the whole rule and it is deliberately exact rather
+    than a minimum: an extra field on this one event type is how a value would arrive in
+    the village, and the village is the most-read surface the fleet has (warren#462).
+    """
+    payload = event["payload"]
+    if set(payload) != {"secret"}:
+        return "invalid secret fields"
+    name = payload.get("secret")
+    if not _nonempty_text(name) or len(name) > _SECRET_NAME_MAX:
+        return "invalid payload.secret"
+    return None
+
+
 _ROUTINE_AUTHORITY = "routine events require source steward"
 _TASK_AUTHORITY = "task events require source steward"
 _APPROVAL_AUTHORITY = "approval resolutions require source steward"
 _RESIDENT_AUTHORITY = "resident lifecycle events require source steward"
 _CHAT_AUTHORITY = "chat events require source steward"
 _DISCORD_AUTHORITY = "discord events require source steward"
+_SECRET_AUTHORITY = "secret events require source steward"
 
 #: Every fact only Steward can witness, because only Steward runs the routines, the board,
 #: the watchdog and the chat routes. One table so the trust boundary is a list somebody can
@@ -311,6 +335,7 @@ _STEWARD_AUTHORED = {
     "discord_thread_archived": (_validate_discord_event, _DISCORD_AUTHORITY),
     "discord_message_pinned": (_validate_discord_event, _DISCORD_AUTHORITY),
     "discord_topic_set": (_validate_discord_event, _DISCORD_AUTHORITY),
+    "secret_written": (_validate_secret_written, _SECRET_AUTHORITY),
 }
 
 
