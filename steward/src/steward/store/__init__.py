@@ -8,6 +8,7 @@ from steward.store._connection import _Connection
 from steward.store._legacy import _LegacyTables
 from steward.store.approvals import _ApprovalTables
 from steward.store.board import _BoardTables
+from steward.store.ledger import _LedgerTables
 from steward.store.records import (
     APPROVAL_DECISIONS,
     DECIDED_BY_EXPIRY,
@@ -65,5 +66,13 @@ __all__ = [
 ]
 
 
-class Store(_RunTables, _ApprovalTables, _BoardTables, _LegacyTables, _RequestTables, _Connection):
+class Store(
+    _LedgerTables,
+    _RunTables,
+    _ApprovalTables,
+    _BoardTables,
+    _LegacyTables,
+    _RequestTables,
+    _Connection,
+):
     """The one durable memory the API writes to. Safe to share across threads."""
