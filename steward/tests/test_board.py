@@ -1848,3 +1848,67 @@ def test_an_escalation_a_board_session_raised_taps_through_the_same_notifier(
     dispatcher.dispatch(NOW)
 
     assert [tap.kind for tap in taps.sent] == ["needs_human", "task_done"]
+
+
+def test_dry_run_decision_hook_leaves_the_answer_for_one_live_wake(
+    make_dispatcher: Dispatch,
+    store: Store,
+) -> None:
+    record = store.create_approval_request(
+        agent_id="claude-code:test-agent",
+        project="p",
+        action="send_email",
+        message="Send the report?",
+        resident="test-agent",
+    )
+    store.decide(record.request_id, "approve", decided_by="api")
+    dispatcher = make_dispatcher()
+    dispatcher.dry_run = True
+
+    assert dispatcher.decisions_for("test-agent") is None
+    assert [r.request_id for r in store.undelivered_decisions("test-agent")] == [record.request_id]
+
+    dispatcher.dry_run = False
+    preamble = dispatcher.decisions_for("test-agent")
+    assert preamble is not None
+    assert "send_email: approve" in preamble
+    assert dispatcher.decisions_for("test-agent") is None
+    assert store.undelivered_decisions("test-agent") == []
+
+
+def test_dry_run_reply_hook_leaves_the_letter_for_one_live_wake(
+    make_dispatcher: Dispatch,
+    store: Store,
+) -> None:
+    letter = store.delegate_job(
+        title="Count the shelves",
+        assignee="worker",
+        delegated_by="test-agent",
+        route="inbox",
+    )
+    claimed = store.claim_next_delegated(
+        assignee="worker",
+        claimant="claude-code:worker",
+        lease_expires_at="2026-08-24T13:00:00Z",
+        now="2026-08-24T12:00:00Z",
+    )
+    assert claimed is not None
+    store.finish_job(
+        letter.task_id,
+        status="done",
+        claimant="claude-code:worker",
+        outcome="ok",
+        final_message="There are 12 shelves.",
+        lease=claimed.claimed_at,
+        now="2026-08-24T12:01:00Z",
+    )
+    dispatcher = make_dispatcher()
+    dispatcher.dry_run = True
+
+    assert dispatcher.answered_letters_for("test-agent") is None
+
+    dispatcher.dry_run = False
+    preamble = dispatcher.answered_letters_for("test-agent")
+    assert preamble is not None
+    assert "There are 12 shelves." in preamble
+    assert dispatcher.answered_letters_for("test-agent") is None

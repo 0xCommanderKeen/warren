@@ -556,13 +556,18 @@ class Dispatcher:
         (:meth:`steward.store.Store.claim_undelivered_decisions`), so two wake-ups of the
         same resident at the same instant cannot both be handed the same decision — one
         gets it, the other opens without it, and it is delivered exactly once (steward #74).
-        The preamble is rendered from what *this* call claimed.
+        The preamble is rendered from what *this* call claimed. A dry run claims
+        nothing: a rehearsal must leave the answer for an actual wake-up.
         """
+        if self.dry_run:
+            return None
         records = self.store.claim_undelivered_decisions(resident_id)
         return approvals.decisions_preamble(records)
 
     def answered_letters_for(self, resident_id: str) -> str | None:
-        """Claim and render the delegated-task replies owed to this sender."""
+        """Claim and render replies owed to this sender, unless this is a dry run."""
+        if self.dry_run:
+            return None
         records = self.store.claim_answered_letters(resident_id)
         return dg.answered_letters_preamble(records)
 
