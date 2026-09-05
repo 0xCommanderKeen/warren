@@ -1,7 +1,7 @@
 # Chat: talking to a resident from a phone (v0)
 
 `routes: {kind: chat}` used to be a description. Since warren#108 it is a doorway: a
-daemon long-polls one Telegram bot per resident, and every message from a named operator
+daemon long-polls dedicated or shared Telegram bots, and every message from a named operator
 fires **one ordinary session** whose final message is sent back as the reply.
 
 Text in, text out. No buttons, no outbound escalations, no group chats, one shipped transport.
@@ -24,10 +24,49 @@ deliberately *not* here is at the bottom.
 
 ## Why each piece is the way it is
 
-**One bot per resident.** Talking to Pip and talking to the librarian are two
-conversations, with two names and two faces, in two threads on your phone. A single bot
-multiplexing the fleet would need a routing convention in every message and would make
-"who am I talking to" a thing you have to remember rather than a thing you can see.
+**Dedicated or shared bots.** Dedicated bots keep separate threads on your phone. A shared
+bot addresses residents by id or name and tags their replies, using the rules below.
+
+### One shared Telegram bot
+
+Declare the same address on each participating resident, with `shared: true`:
+
+```yaml
+routes:
+  - id: village-chat
+    kind: chat
+    address: telegram:warren
+    shared: true
+    status: active
+```
+
+Set one `STEWARD_CHAT_TOKEN_WARREN` secret and the usual `STEWARD_CHAT_OPERATORS`.
+The daemon polls this bot once. Only residents with an active shared route to that bot
+can be addressed through it. Dedicated routes can coexist; use different bot references
+and tokens for different bots. `steward chat list` lists each resident's address, token
+slot, reachability and whether the route is shared.
+
+Start a message with an id or display name followed by a colon (`karen: write me a
+skill`), or an at-sign (`@hob how are things?`). Matching ignores case and accepts full
+display names, including spaces. The daemon removes the prefix before starting the
+session. An address alone (`@hob`) selects that resident without starting a paid session.
+Replies and routine deliveries carry the sender's display name, for example `Karen: …`.
+
+A bare follow-up goes to the last explicitly addressed resident in that conversation.
+That selection survives daemon restarts. Another operator or bot has its own selection;
+an unsolicited routine delivery does not change it. A first bare message, an unknown or
+ambiguous address, or a selection whose route has closed gets routing guidance without
+starting any resident. Busy or paused residents retain the existing refusal and reason.
+Strangers, group messages, bots and stale messages are checked before selecting anyone.
+An unrecognized single word before a colon is treated as an unknown address. A colon
+inside an ordinary sentence does not switch recipients; use `@id` to make addressing
+explicit when in doubt.
+Shared transcripts use `shared-<bot fingerprint>-<chat id>.jsonl` in each resident's
+chat directory, so they do not mix with a dedicated bot's conversation with that resident.
+
+Use `deliver: chat` when the shared route is the resident's only active chat route.
+If it also has a dedicated bot, use `deliver: telegram:warren` to select the shared bot.
+Dedicated routes omit `shared` (it defaults to false) and keep their existing behavior.
 
 **The address is a reference, and the token is a credential slot.** `telegram:pip` names a bot;
 `STEWARD_CHAT_TOKEN_PIP` holds the secret that speaks as it. That split is the same one

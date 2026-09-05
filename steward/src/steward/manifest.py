@@ -985,6 +985,10 @@ class Route(_Model):
     address: str = Field(min_length=1, description="Reference to the channel, not a secret.")
     status: Literal["active", "pending", "disabled"] = "active"
     note: str | None = None
+    shared: bool = Field(
+        default=False,
+        description="Route a shared Telegram bot by resident id or display name.",
+    )
     posts_to: list[str] = Field(
         default_factory=list,
         description="Discord channel names this resident may post to. Empty denies posting.",
@@ -1009,6 +1013,14 @@ class Route(_Model):
         if len(set(cleaned)) != len(cleaned):
             raise ValueError("Discord channel names must be unique within an allowlist")
         return cleaned
+
+    @model_validator(mode="after")
+    def _shared_belongs_to_telegram_chat(self) -> Self:
+        if self.shared and not (
+            self.kind == CHAT_ROUTE_KIND and self.address.startswith("telegram:")
+        ):
+            raise ValueError("shared is allowed only on a Telegram chat route")
+        return self
 
     @model_validator(mode="after")
     def _channels_belong_to_discord_chat(self) -> Self:

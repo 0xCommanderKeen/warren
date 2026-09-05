@@ -575,6 +575,12 @@
           "default": null,
           "title": "Note"
         },
+        "shared": {
+          "default": false,
+          "description": "Route a shared Telegram bot by resident id or display name.",
+          "title": "Shared",
+          "type": "boolean"
+        },
         "posts_to": {
           "description": "Discord channel names this resident may post to. Empty denies posting.",
           "items": {
