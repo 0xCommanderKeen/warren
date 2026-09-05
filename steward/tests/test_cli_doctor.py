@@ -1,5 +1,6 @@
 """CLI behavior: doctor."""
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -1010,3 +1011,197 @@ def test_doctor_says_a_retired_resident_fires_nothing(
 
     assert "retired — fires nothing" in result.output
     assert "no enabled routines" in result.output
+
+
+@pytest.mark.usefixtures("empty_path")
+def test_doctor_json_reports_missing_brain_as_structured_health(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+) -> None:
+    path = write_resident()
+    result = runner.invoke(
+        main, ["doctor", str(path.parent), "--json", "--db", str(tmp_path / "db")]
+    )
+    assert result.exit_code == 1, result.output
+    report = json.loads(result.stdout)
+    assert report["schema_version"] == 1
+    assert report["ok"] is False
+    check = next(c for c in report["checks"] if c["name"] == "runner")
+    assert check["resident"] == "test-agent"
+    assert check["status"] == "error"
+    assert check["details"]["kind"] == "claude"
+    assert check["details"]["ready"] is False
+    assert check["details"]["placement"]["container"] is None
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize("paused", [False, True])
+def test_doctor_json_exposes_budget_inbox_session_and_daemon_facts(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    paused: bool,
+) -> None:
+    monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "scheduler.json"))
+    monkeypatch.setenv("STEWARD_TOKEN", 'master-secret-"with-quotes')
+    data = receiving_manifest(status="disabled" if paused else "active")
+    data["budgets"] = {"daily_cost_usd": 1}
+    path = write_resident(data)
+    db = tmp_path / "db"
+    deliver_a_letter(db)
+    if paused:
+        ledger_a_run(db, 2)
+        with Store(db) as store:
+            BudgetGuard(store).allow(load_manifest(path).manifest)
+    with Store(db) as store:
+        store.claim_resident(
+            "test-agent",
+            token="private-claim-token",
+            holder="host:42",
+            stale_before=ev.utc_now_iso(),
+        )
+        store.record_watchdog_pass(interventions=2, now="2026-08-24T12:00:00.000Z")
+    result = runner.invoke(main, ["doctor", str(path.parent), "--json", "--db", str(db)])
+    assert result.exit_code == int(paused), result.output
+    report = json.loads(result.stdout)
+    checks = {c["name"]: c for c in report["checks"]}
+    assert report["ok"] is not paused
+    assert checks["budget"]["details"]["paused"] is paused
+    assert checks["inbox"]["details"]["pending"] == 1
+    assert checks["inbox"]["details"]["accepting"] == ([] if paused else ["handoff"])
+    assert checks["session"]["details"]["live"] is True
+    assert checks["session"]["details"]["holder"] == "host:42"
+    assert checks["watchdog"]["details"]["interventions"] == 2
+    assert checks["scheduler"]["details"]["alive"] is None
+    assert checks["routines"]["details"]["upcoming"]
+    assert "private-claim-token" not in result.output
+    assert "master-secret-" not in result.output
+    assert result.stderr == ""
+
+
+@pytest.mark.usefixtures("on_operator_burrow")
+def test_doctor_json_reports_container_health_and_capabilities(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(REPO_ROOT)
+    monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state.json"))
+    result = runner.invoke(main, ["doctor", "--json", "--db", str(tmp_path / "db")])
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.stdout)
+    hob = {c["name"]: c for c in report["checks"] if c["resident"] == "hob"}
+    assert hob["runner"]["details"]["model"] == "claude-opus-5"
+    assert hob["runner"]["details"]["placement"]["container"] == "steward-hob"
+    assert hob["runner"]["details"]["ready"] is True
+    assert hob["reach"]["details"]["supported"] is True
+    assert hob["telemetry"]["details"]["emitter"] == "/opt/steward/chronicle-emit.py"
+    assert hob["telemetry"]["details"]["available"] is True
+    assert hob["journal"]["details"]["directory"]
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize("invalid_yaml", [False, True])
+def test_doctor_json_invalid_manifest_is_parseable_and_redacted(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    invalid_yaml: bool,
+) -> None:
+    secret = "sk-" + "a" * 24
+    monkeypatch.setenv("STEWARD_TOKEN", secret)
+    data = valid_manifest()
+    del data["charter"]
+    path = write_resident(data)
+    if invalid_yaml:
+        path.write_text(f"version: [0\n{secret}: broken\n")
+    result = runner.invoke(main, ["doctor", str(path.parent), "--json"])
+    assert result.exit_code == 1, result.output
+    report = json.loads(result.stdout)
+    assert report["ok"] is False
+    assert report["diagnostics"]
+    assert secret not in result.output
+    assert result.stderr == ""
+
+
+def test_doctor_json_database_open_error_is_parseable(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+) -> None:
+    path = write_resident(budgeted_manifest())
+    db = tmp_path / "directory-not-database"
+    db.mkdir()
+    result = runner.invoke(main, ["doctor", str(path.parent), "--json", "--db", str(db)])
+    assert result.exit_code == 1, result.output
+    report = json.loads(result.stdout)
+    assert report["ok"] is False
+    assert report["errors"]
+    assert result.stderr == ""
+
+
+def test_doctor_json_default_empty_tree_is_unhealthy(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "residents").mkdir()
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(main, ["doctor", "--json"])
+    assert result.exit_code == 1, result.output
+    report = json.loads(result.stdout)
+    assert report["ok"] is False
+    assert report["residents"] == []
+    assert report["diagnostics"]
+
+
+@pytest.mark.usefixtures("empty_path")
+def test_doctor_json_retired_residents_are_visible_without_runner_probes(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+) -> None:
+    path = write_resident({**valid_manifest(), "retired": True})
+    result = runner.invoke(
+        main, ["doctor", str(path.parent), "--json", "--db", str(tmp_path / "db")]
+    )
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.stdout)
+    assert report["residents"] == [{"id": "test-agent", "retired": True}]
+    assert not any(check["name"] == "runner" for check in report["checks"])
+
+
+def test_doctor_json_board_workdir_warning_does_not_fail_health(
+    write_resident: ResidentWriter,
+    write_skill: SkillWriter,
+    stub_bin: StubWriter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub_bin("claude", CURRENT_CLAUDE)
+    write_skill("research", defaults=True)
+    secret = "private-journal-secret"
+    monkeypatch.setenv("CHRONICLE_TOKEN", secret)
+    blocker = tmp_path / secret
+    blocker.write_text("not a directory")
+    data = board_manifest()
+    data["runner"] = {"kind": "claude"}
+    data["memory"] = {"kind": "directory", "path": str(blocker / "memory")}
+    data["skills"] = []
+    data["routines"] = []
+    path = write_resident(data)
+    result = CliRunner().invoke(
+        main, ["doctor", str(path.parent), "--json", "--db", str(tmp_path / "db")]
+    )
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.stdout)
+    board = next(c for c in report["checks"] if c["name"] == "board")
+    assert board["status"] == "warning"
+    assert board["details"]["workdir_ready"] is False
+    assert report["ok"] is True
+    assert "private-" not in result.output
+    assert "[REDACTED]" in result.output
