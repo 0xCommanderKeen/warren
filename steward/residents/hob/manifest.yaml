@@ -81,6 +81,11 @@ runner:
   permission_mode: bypassPermissions
 budgets:
   daily_cost_usd: 50
+notifications:
+  transport: discord
+  "on": [needs_human]
+  status: active
+  note: Miha — the escalations in the charter, and steward's own knocks about Hob.
 deploy:
   host: dxp2800
   user: Miha
