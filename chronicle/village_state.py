@@ -12,6 +12,7 @@ import json
 from collections import defaultdict
 
 from identity import allocate_identities, fallback_identity
+from mood_policy import MOOD_FAILURE_TYPES, MOOD_TERMINAL_TYPES, MOOD_WORK_WEIGHTS
 from protocol import validate_event
 
 
@@ -263,37 +264,19 @@ def _mood(agent_id, indexed_history, approvals):
     outcomes = [
         event
         for event in events
-        if event["type"]
-        in {
-            "tool_failed",
-            "routine_failed",
-            "task_failed",
-            "heartbeat",
-            "routine_finished",
-            "task_done",
-        }
+        if event["type"] in MOOD_TERMINAL_TYPES
         and anchor_ms - int(_instant(event["ts"]).timestamp() * 1000)
         < 24 * 60 * 60 * 1000
     ]
-    failures = {"tool_failed", "routine_failed", "task_failed"}
-    failure_count = min(3, sum(event["type"] in failures for event in outcomes))
+    failure_count = min(3, sum(event["type"] in MOOD_FAILURE_TYPES for event in outcomes))
     streak = 0
     for event in reversed(outcomes):
-        if event["type"] not in failures:
+        if event["type"] not in MOOD_FAILURE_TYPES:
             break
         streak = min(3, streak + 1)
-    weights = {
-        "task_started": 3,
-        "task_claimed": 3,
-        "routine_started": 3,
-        "artifact_produced": 2,
-        "journal_written": 2,
-        "tool_called": 1,
-        "heartbeat": 1,
-    }
     buckets = {}
     for event in events:
-        weight = weights.get(event["type"])
+        weight = MOOD_WORK_WEIGHTS.get(event["type"])
         bucket = int(_instant(event["ts"]).timestamp()) // (15 * 60)
         if weight and anchor_ms // (15 * 60 * 1000) - 7 <= bucket <= anchor_ms // (
             15 * 60 * 1000
