@@ -43,6 +43,23 @@ cd townhall  && pnpm test && pnpm build
 cd arcadia   && pnpm test && pnpm build
 ```
 
+Optional local commit checks use [prek](https://prek.j178.dev/). With `uv` on your
+`PATH`, run these commands from the repository root:
+
+```sh
+uv tool install prek
+prek install
+prek run --all-files
+```
+
+The root `.pre-commit-config.yaml` validates the complete checked-in steward resident
+and skill trees on every commit, including deletions and validator/dependency changes.
+Steward changes also run its Ruff format and lint checks across `steward/`, using the
+locked project dependencies and existing exclusions. These checks report problems
+without rewriting files; fix formatting with `cd steward && make format`, then stage
+the changes again. They do not format other services or replace `make check` and CI.
+`prek uninstall` removes the opt-in Git hook.
+
 CI is path-filtered per service: `.github/workflows/{steward,chronicle,townhall,arcadia}.yml`.
 
 ## Deployment
