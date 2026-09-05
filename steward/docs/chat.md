@@ -623,3 +623,26 @@ at once before it is allowed to ship.
 - **A conversation the resident starts.** A delivered routine is a message the *manifest*
   scheduled, not one the resident decided to send; nothing a session says mid-run reaches
   a phone, and there is no API a session can call to send one.
+
+## Implementation map
+
+`steward.chat` remains the public import surface and owns bridge orchestration and routine
+delivery. Its collaborators are separately navigable:
+
+- `chat_config.py`: token and operator configuration, addresses, declared routes, and shared
+  bot routing rules.
+- `chat_transports.py`: Telegram and Discord HTTP, inbound messages, and per-bot Discord
+  discovery, room registrations, and cursors. `ChatTransport` is the bridge's poll/send seam.
+- `chat_transcripts.py`: transcript storage, bounded windows, and conversation summaries.
+- `chat_health.py`: route diagnostics shared by the daemon and `chat list`.
+
+The adapters never import the bridge. Discord's `listen` replaces a bot's room set, including
+revocation when names are empty or discovery fails. A failed multi-channel poll returns no
+batch and advances no cursors, leaving every unseen message retryable. Reload re-registers
+room names and clears removed tokens before the bridge polls again.
+
+Tests follow these responsibilities in `test_chat_config.py`, `test_chat_transports.py`,
+`test_chat_transcripts.py`, and `test_chat_delivery.py`. Routing, reload, room-removal, and
+partial-poll recovery remain in `test_chat.py`, with shared-bot routing in
+`test_shared_chat.py`. They exercise the stable `steward.chat` imports; common doubles and
+loopback servers live in `tests/support/chat.py` and `tests/support/chat_http.py`.

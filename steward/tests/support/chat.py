@@ -14,6 +14,7 @@ from steward import events as ev
 from steward import manifest as m
 from steward.manifest import (
     CHAT_ROUTE_KIND,
+    ResidentManifest,
     load_manifest,
 )
 from steward.runners import Outcome, Runner, RunRequest, RunResult
@@ -212,3 +213,8 @@ DIGEST = m.Routine.model_validate(
         "quiet_word": "NOTHING",
     }
 )
+
+
+def manifest_for(manifest: dict | None = None) -> ResidentManifest:
+    """Build a validated manifest straight from the shared fixture data."""
+    return ResidentManifest.model_validate(manifest or valid_manifest())

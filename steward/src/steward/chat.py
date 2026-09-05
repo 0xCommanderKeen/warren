@@ -59,42 +59,112 @@ exactly as the scheduler and the board reach it.
 import contextlib
 import fcntl
 import hashlib
-import json
 import logging
-import math
 import os
-import re
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol
 
 from steward import events as ev
-from steward import secrets
+from steward.chat_config import (
+    DEFAULT_POLL_TIMEOUT_S as DEFAULT_POLL_TIMEOUT_S,  # noqa: PLC0414 — preserve public chat imports
+)
+from steward.chat_config import (
+    DISCORD as DISCORD,  # noqa: PLC0414 — preserve public chat imports
+)
+from steward.chat_config import (
+    OPERATORS_ENV,
+    POLL_TIMEOUT_ENV,
+    TOKEN_ENV_PREFIX,
+    Address,
+    ChatError,
+    ChatRoute,
+    _addressed_routes,
+    _shared_bot_problems,
+    chat_routes,
+    operators_from_env,
+    poll_timeout_from_env,
+    token_env_name,
+    token_env_names,
+    tokens_from_env,
+)
+from steward.chat_config import (
+    TELEGRAM as TELEGRAM,  # noqa: PLC0414 — preserve public chat imports
+)
+from steward.chat_health import (
+    ChatReport,
+    RouteCheck,
+    RouteHealth,
+    check_route,
+    describe_chat,
+)
+from steward.chat_transcripts import (
+    CHAT_DIR,
+    TRANSCRIPT_KEEP_TURNS,
+    TRANSCRIPT_WINDOW_TURNS,
+    Transcript,
+    Turn,
+    chat_complaint,
+    resolve_chat_dir,
+)
+from steward.chat_transcripts import (
+    SLUG_MAX_CHARS as SLUG_MAX_CHARS,  # noqa: PLC0414 — preserve public chat imports
+)
+from steward.chat_transcripts import (
+    ConversationSummary as ConversationSummary,  # noqa: PLC0414 — preserve public chat imports
+)
+from steward.chat_transcripts import (
+    conversation_slug as conversation_slug,  # noqa: PLC0414 — preserve public chat imports
+)
+from steward.chat_transcripts import (
+    conversation_summaries as conversation_summaries,  # noqa: PLC0414 — preserve public chat imports
+)
+from steward.chat_transports import (
+    API_URL_ENV,
+    DEFAULT_API_URL,
+    DEFAULT_DISCORD_API_URL,
+    DISCORD_API_URL_ENV,
+    SEND_TIMEOUT_S,
+    ChatTransport,
+    ConversationAccess,
+    DiscordTransport,
+    Message,
+    TelegramTransport,
+)
+from steward.chat_transports import (
+    DISCORD_MEMBER_MAX_PAGES as DISCORD_MEMBER_MAX_PAGES,  # noqa: PLC0414 — preserve public chat imports
+)
+from steward.chat_transports import (
+    DISCORD_MEMBER_PAGE_SIZE as DISCORD_MEMBER_PAGE_SIZE,  # noqa: PLC0414 — preserve public chat imports
+)
+from steward.chat_transports import (
+    DISCORD_PAGE_SIZE as DISCORD_PAGE_SIZE,  # noqa: PLC0414 — preserve public chat imports
+)
+from steward.chat_transports import (
+    DISCORD_REPLY_CHARS as DISCORD_REPLY_CHARS,  # noqa: PLC0414 — preserve public chat imports
+)
+from steward.chat_transports import (
+    HTTP_TIMEOUT_MARGIN_S as HTTP_TIMEOUT_MARGIN_S,  # noqa: PLC0414 — preserve public chat imports
+)
+from steward.chat_transports import (
+    HTTP_TOO_MANY_REQUESTS as HTTP_TOO_MANY_REQUESTS,  # noqa: PLC0414 — preserve public chat imports
+)
+from steward.chat_transports import (
+    MAX_RATE_LIMIT_SLEEP_S as MAX_RATE_LIMIT_SLEEP_S,  # noqa: PLC0414 — preserve public chat imports
+)
 from steward.claims import ClaimRefused, ResidentClaims
-from steward.deploy import memory_host_dir
 from steward.manifest import (
-    CHAT_ROUTE_KIND,
-    CHAT_TOKEN_ENV_PREFIX,
     ROUTINE_DELIVER_CHAT,
     Resident,
-    ResidentManifest,
-    Route,
     Routine,
-    active_residents,
-    chat_token_env_name,
     redact_secrets,
     validate_path,
 )
-from steward.notify import DISCORD_USER_AGENT
-from steward.prompt import TRANSCRIPT_MAX_CHARS
+from steward.prompt import TRANSCRIPT_MAX_CHARS as TRANSCRIPT_MAX_CHARS  # noqa: PLC0414
 from steward.run_lifecycle import RunTransitions, event_log_path, new_owner_token
 from steward.runners import RunResult, build_runner
 from steward.runs import DELIVERED, DELIVERY_FAILED, RUN_CHAT, TRIGGER_CHAT
@@ -111,6 +181,8 @@ from steward.sessions import (
 )
 from steward.skills import SkillLibrary, library_for
 from steward.store import Store
+
+log = logging.getLogger("steward.chat")
 
 __all__ = [
     "API_URL_ENV",
@@ -159,61 +231,11 @@ __all__ = [
     "tokens_from_env",
 ]
 
-log = logging.getLogger("steward.chat")
-
 
 def _utcnow() -> datetime:
     """Read the wall clock, in UTC. What a message's age is measured against."""
     return datetime.now(UTC)
 
-
-#: The transport a ``telegram:…`` address names. One today, and the module is written so a
-#: second is a class rather than a rewrite — but v0 ships one, because a chat kind nobody
-#: has a bot for is a vocabulary rather than a feature.
-TELEGRAM = "telegram"
-DISCORD = "discord"
-
-#: Where Telegram's bot API lives. Overridable for exactly one reason: the test suite points
-#: it at a local server, so nothing in this repo can reach the real API. Mirrors
-#: :data:`steward.notify.NTFY_URL_ENV`, and for the same reason.
-DEFAULT_API_URL = "https://api.telegram.org"
-API_URL_ENV = "STEWARD_CHAT_API_URL"
-DISCORD_API_URL_ENV = "STEWARD_CHAT_DISCORD_API_URL"
-DEFAULT_DISCORD_API_URL = "https://discord.com/api/v10"
-
-#: What every per-bot token variable starts with. Telegram appends the reference for v0
-#: compatibility; other transports append transport then reference so credentials cannot
-#: collide. Addresses, not resident ids, own the names: renaming a resident does not silently
-#: disconnect its bot, and reading the route is enough to know which variable to set.
-TOKEN_ENV_PREFIX = CHAT_TOKEN_ENV_PREFIX
-
-#: Who steward answers: comma-separated ``<transport>:<user-id>`` identities. Bare ids
-#: retain their original Telegram meaning. Empty means the bridge refuses to start rather
-#: than answering the world.
-OPERATORS_ENV = "STEWARD_CHAT_OPERATORS"
-
-#: How long one ``getUpdates`` call may wait for a message before coming back empty. Long
-#: polling is what keeps a bridge that answers instantly from costing a request a second.
-POLL_TIMEOUT_ENV = "STEWARD_CHAT_POLL_TIMEOUT_S"
-DEFAULT_POLL_TIMEOUT_S = 25.0
-
-#: How much longer than the long poll steward waits on the socket before giving up. The
-#: server holds the connection for the whole poll timeout by design, so a socket timeout at
-#: or below it would turn every idle minute into a stream of invented failures.
-HTTP_TIMEOUT_MARGIN_S = 10.0
-
-#: How long sending one reply may take. Five times the two seconds a notification tap gets
-#: (:data:`steward.notify.NTFY_TIMEOUT_S`), because the two are paid for by different
-#: people: a tap runs inside a durable transition and may not cost a run, while this runs
-#: in a daemon whose entire job is this message, after a session that already took minutes.
-#: Bounded all the same — a hung socket must not stop the daemon answering the next message.
-SEND_TIMEOUT_S = 10.0
-DISCORD_REPLY_CHARS = 1900
-DISCORD_PAGE_SIZE = 50
-DISCORD_MEMBER_PAGE_SIZE = 1000
-DISCORD_MEMBER_MAX_PAGES = 100
-HTTP_TOO_MANY_REQUESTS = 429
-MAX_RATE_LIMIT_SLEEP_S = 30.0
 
 #: How long a bridge waits after a pass in which some bot could not be reached, so an API
 #: that is down costs one request every few seconds rather than a spin.
@@ -249,17 +271,6 @@ DEFAULT_CATCHUP_S = 300.0
 #: fix must not become the leak (warren#278).
 KNOCK_DOORS_TRACKED = 4096
 
-#: Where a resident's conversations live inside its memory directory.
-CHAT_DIR = "chat"
-
-#: How many turns of one conversation survive on disk. Ten exchanges: enough to read back
-#: what happened this morning, and bounded by construction like the journal is.
-TRANSCRIPT_KEEP_TURNS = 20
-
-#: How many of those go into the prompt. Fewer than are kept, because the file is for a
-#: person scrolling back and the window is paid for on every single message.
-TRANSCRIPT_WINDOW_TURNS = 10
-
 #: How long one reply may be. Telegram refuses anything past 4096 characters, and a reply
 #: that long is a report rather than an answer; the cap is applied *after* redaction, which
 #: is the repo rule (steward #65) and matters most here — this text goes to a phone.
@@ -270,513 +281,6 @@ REPLY_MAX_CHARS = 3500
 #: be a fact about a person that the conversation never needed.
 OPERATOR_SPEAKER = "operator"
 
-_ADDRESS = re.compile(r"^(?P<transport>[a-z][a-z0-9+.-]*):(?P<reference>\S.*)$")
-_UNSAFE_IN_NAME = re.compile(r"[^A-Za-z0-9_-]+")
-
-#: How long a conversation's file name may be before steward shortens it. Telegram's own
-#: ids are far shorter; the bound exists so nothing a transport invents can produce a name
-#: a filesystem refuses.
-SLUG_MAX_CHARS = 64
-
-
-class ChatError(Exception):
-    """Raised when the bridge refuses to start — loudly, in daylight."""
-
-
-# --------------------------------------------------------------------------------------
-# where a bot's token comes from
-# --------------------------------------------------------------------------------------
-
-
-def token_env_name(reference: str, transport: str = TELEGRAM) -> str:
-    """Return the environment variable holding the token for one chat address.
-
-    Telegram keeps its v0 spelling: ``telegram:polica-librarian`` reads
-    ``STEWARD_CHAT_TOKEN_POLICA_LIBRARIAN``. Other transports include their name —
-    ``discord:pip`` reads ``STEWARD_CHAT_TOKEN_DISCORD_PIP`` — so two services using the
-    same reference never share a credential slot. Everything is upper-cased and non-word
-    runs fold to ``_`` because environment variable names cannot carry a hyphen.
-    """
-    resolved = chat_token_env_name(f"{transport}:{reference}")
-    if resolved is None:  # pragma: no cover — constructed above in the accepted grammar
-        raise ValueError(f"cannot derive a token variable for {transport}:{reference}")
-    return resolved
-
-
-def token_env_names(env: Mapping[str, str] | None = None) -> list[str]:
-    """Return every configured bot-token slot name, including empty ones.
-
-    Files and variables together (warren#462): a token that arrived as a file in the
-    secrets directory occupies exactly the same named slot as one exported into the
-    environment, so a listing that only read the environment would report a wired-up bot
-    as unassigned.
-    """
-    return sorted(name for name in secrets.overlay(env) if name.startswith(TOKEN_ENV_PREFIX))
-
-
-def tokens_from_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
-    """Return every bot token in the environment, keyed by the variable that held it.
-
-    Keyed by variable name rather than address so lookup stays exact and no secret is copied
-    into a report. :class:`Address` owns the transport-aware name derivation.
-
-    The mapping is read through :func:`steward.secrets.overlay`, so a token written into the
-    secrets directory answers here without ever having been exported — which is what lets a
-    daemon that is already running pick one up (warren#462).
-    """
-    source = secrets.overlay(env)
-    names = {name for name in source if name.startswith(TOKEN_ENV_PREFIX)}
-    return {
-        name: value.strip() for name, value in source.items() if name in names and value.strip()
-    }
-
-
-def operators_from_env(
-    env: Mapping[str, str] | None = None, *, transport: str = TELEGRAM
-) -> frozenset[str]:
-    """Return the user ids steward will answer on one transport. Empty means nobody.
-
-    Empty is a real answer and the safe one: a bridge with no operators answers no message
-    from anyone, and refuses to start rather than run as an open door
-    (:meth:`ChatBridge.require_ready`). A qualified entry such as ``discord:31337`` belongs
-    only to that transport. An unqualified id keeps the original Telegram meaning so an
-    existing ``STEWARD_CHAT_OPERATORS=4242`` deployment changes neither identity nor access.
-    """
-    source = os.environ if env is None else env
-    raw = (source.get(OPERATORS_ENV) or "").strip()
-    found: set[str] = set()
-    for item in raw.split(","):
-        entry = item.strip()
-        if not entry:
-            continue
-        namespace, separator, user_id = entry.partition(":")
-        if not separator:
-            if transport == TELEGRAM:
-                found.add(entry)
-        elif namespace == transport and user_id:
-            found.add(user_id)
-    return frozenset(found)
-
-
-def poll_timeout_from_env(env: Mapping[str, str] | None = None) -> float:
-    """Return how long one ``getUpdates`` may wait, from the environment or the default."""
-    source = os.environ if env is None else env
-    raw = (source.get(POLL_TIMEOUT_ENV) or "").strip()
-    if not raw:
-        return DEFAULT_POLL_TIMEOUT_S
-    try:
-        seconds = float(raw)
-    except ValueError:
-        log.warning(
-            "%s=%r is not a number of seconds; using %.0fs",
-            POLL_TIMEOUT_ENV,
-            raw,
-            DEFAULT_POLL_TIMEOUT_S,
-        )
-        return DEFAULT_POLL_TIMEOUT_S
-    return seconds if seconds >= 0 else DEFAULT_POLL_TIMEOUT_S
-
-
-# --------------------------------------------------------------------------------------
-# what a manifest declared
-# --------------------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class Address:
-    """A chat route's ``address``, split into the transport and the bot it names."""
-
-    transport: str
-    reference: str
-
-    @classmethod
-    def parse(cls, address: str) -> Address | None:
-        """Split ``<transport>:<reference>``, or return ``None`` when it is not that.
-
-        ``None`` rather than a raise: an address that does not parse is a manifest that
-        validated (any non-empty string is a legal address) and cannot be delivered to, which
-        is a line in :func:`describe_chat` and a skipped route — not an exception that takes
-        the whole daemon down over one resident's typo.
-        """
-        match = _ADDRESS.match(address.strip())
-        if match is None:
-            return None
-        return cls(transport=match.group("transport"), reference=match.group("reference").strip())
-
-    @property
-    def token_env(self) -> str:
-        """Name the environment variable this bot's token is read from."""
-        return token_env_name(self.reference, self.transport)
-
-    def __str__(self) -> str:
-        """Render the address the way the manifest spells it."""
-        return f"{self.transport}:{self.reference}"
-
-
-@dataclass(frozen=True, slots=True)
-class ChatRoute:
-    """One resident, one active chat route, and the bot that route names."""
-
-    resident: Resident
-    route: Route
-    address: Address
-
-    @property
-    def key(self) -> str:
-        """The stable name for this doorway: ``<resident id>/<route id>``, for a log line."""
-        return f"{self.resident.id}/{self.route.id}"
-
-    @property
-    def route_id(self) -> str:
-        """Name the route a message came through."""
-        return self.route.id
-
-    @property
-    def poll_key(self) -> str:
-        """Share one Telegram cursor between all routes to a shared bot."""
-        return self.address.token_env if self.route.shared else self.key
-
-    @property
-    def name(self) -> str:
-        """What to call this resident *to its operator*: the soul's name, not the id.
-
-        The same judgement :func:`steward.notify.tap_for` makes about a knock on a phone —
-        "Pip is busy right now" is a sentence and ``pip/chat: busy`` is a log line, and this
-        text is read by a person in a chat window.
-        """
-        return self.resident.manifest.soul.name
-
-
-def _addressed_routes(routes: Sequence[ChatRoute], text: str) -> tuple[list[ChatRoute], str, bool]:
-    """Resolve an explicit prefix, preserving ambiguity instead of picking by order."""
-    text = text.lstrip()
-    if text.startswith("@"):
-        candidates: list[tuple[int, ChatRoute, str]] = []
-        for route in routes:
-            for alias in {route.resident.id, route.name}:
-                match = re.match(r"@" + re.escape(alias) + r"(?=:|\s|$):?\s*", text, re.IGNORECASE)
-                if match:
-                    candidates.append((len(alias), route, text[match.end() :]))
-        if not candidates:
-            return [], text, True
-        longest = max(length for length, _, _ in candidates)
-        matches = {route.key: route for length, route, _ in candidates if length == longest}
-        remaining = next(rest for length, _, rest in candidates if length == longest)
-        return list(matches.values()), remaining, True
-    if ":" in text:
-        alias, remaining = text.split(":", 1)
-        matches = [
-            route
-            for route in routes
-            if alias.strip().casefold() in {route.resident.id.casefold(), route.name.casefold()}
-        ]
-        if matches or re.fullmatch(r"[\w-]+", alias.strip()):
-            return matches, remaining.lstrip(), True
-    return [], text, False
-
-
-def _declared_chat_routes(residents: Sequence[Resident]) -> Iterator[tuple[Resident, Route]]:
-    """Yield every chat route of every active resident, in declared order."""
-    for resident in active_residents(residents):
-        for route in resident.manifest.routes:
-            if route.kind == CHAT_ROUTE_KIND:
-                yield resident, route
-
-
-def _shared_bot_problems(
-    routes: Sequence[ChatRoute], tokens: Mapping[str, str]
-) -> dict[str, tuple[str, ...]]:
-    """Refuse conflicting shared bot declarations before two pollers can steal updates."""
-    groups: dict[str, list[ChatRoute]] = {}
-    for route in routes:
-        if route.address.transport == TELEGRAM:
-            identity = tokens.get(route.address.token_env) or route.address.token_env
-            groups.setdefault(identity, []).append(route)
-    problems: dict[str, tuple[str, ...]] = {}
-    for group in groups.values():
-        if any(route.route.shared for route in group) and (
-            not all(route.route.shared for route in group)
-            or len({route.address.token_env for route in group}) > 1
-        ):
-            for route in group:
-                problems[route.key] = (
-                    (
-                        "routes using a shared bot must all declare shared: true and the same "
-                        "bot reference; use a different token for a dedicated bot"
-                    ),
-                )
-    return problems
-
-
-def chat_routes(residents: Sequence[Resident]) -> list[ChatRoute]:
-    """Return every doorway an operator can actually reach, in declared order.
-
-    Three things have to be true, and none of them is inferred: the route is
-    ``kind: chat``, it is ``active`` (:attr:`steward.manifest.Route.accepts_chat`), and its
-    address parses into a transport and a reference. A retired resident has closed every
-    door it had, so :func:`steward.manifest.active_residents` filters it out first.
-
-    Whether a *token* exists for the bot is deliberately not asked here: that is the
-    environment's answer rather than the manifest's, it is what :func:`describe_chat` reports
-    and what :meth:`ChatBridge.preflight` refuses on, and mixing the two would make "is this
-    declared" unanswerable on a laptop that holds no tokens.
-    """
-    found: list[ChatRoute] = []
-    for resident, route in _declared_chat_routes(residents):
-        address = Address.parse(route.address)
-        if not route.accepts_chat or address is None:
-            continue
-        found.append(ChatRoute(resident=resident, route=route, address=address))
-    return found
-
-
-@dataclass(frozen=True, slots=True)
-class RouteHealth:
-    """Whether one route could carry a conversation when steward last asked, and when.
-
-    The unit warren#456 broke the daemon's startup check into. A problem found here belongs
-    to *this* route and says nothing about the one next door, so it closes one doorway
-    instead of the whole burrow's — and because it is stamped with the moment it was
-    measured, it can be asked again rather than believed for the life of the process.
-    """
-
-    problems: tuple[str, ...]
-    checked_at: datetime
-
-    @property
-    def reachable(self) -> bool:
-        """Report whether an operator could get an answer through this route right now."""
-        return not self.problems
-
-
-@dataclass(frozen=True, slots=True)
-class ChatReport:
-    """What one declared chat route is, and whether an operator could talk through it.
-
-    A record rather than a dictionary, like :class:`steward.notify.NotificationReport`: the
-    CLI renders it in two formats and a field renamed in one place should not be a
-    ``KeyError`` discovered in the other.
-
-    ``token_env`` is the *name* of the variable, and there is deliberately nowhere in this
-    record for its value. Whether a token is set is the fact an operator needs; what it is
-    belongs in the environment and nowhere a command could print it.
-    """
-
-    resident: str
-    route: str
-    address: str
-    status: str
-    token_env: str | None
-    token_set: bool
-    reachable: bool
-    note: str | None
-    bot: str | None = None
-    shared: bool = False
-
-    def to_dict(self) -> dict[str, Any]:
-        """Render as the JSON object ``steward chat list --format json`` prints."""
-        return {
-            "resident": self.resident,
-            "route": self.route,
-            "address": self.address,
-            "status": self.status,
-            "token_env": self.token_env,
-            "token_set": self.token_set,
-            "reachable": self.reachable,
-            "note": self.note,
-            "bot": self.bot,
-            "shared": self.shared,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class RouteCheck:
-    """What one look at a route found: its bot's name, if any, and what is wrong with it."""
-
-    bot: str | None
-    problems: tuple[str, ...]
-
-
-def check_route(
-    resident: Resident,
-    address: Address,
-    *,
-    token: str | None,
-    transport: ChatTransport | None,
-    operators: frozenset[str],
-) -> RouteCheck:
-    """Return why this one route cannot carry a conversation, nearest thing to fix first.
-
-    The single place the question is asked (warren#456). ``steward chat list`` renders the
-    first problem as the route's note and the daemon shuts a route that has any, so a second
-    copy of this cascade would drift the day one of them learned a new problem — and an
-    operator reading a listing that disagrees with the log is worse off than one reading
-    neither.
-
-    Every problem here is a fact about *this* route and says nothing about the doorway next
-    door, which is precisely why none of them may close it. They widen outwards: this bot,
-    then this transport's operator list, then this resident's memory.
-    """
-    if transport is None:
-        return RouteCheck(
-            bot=None, problems=(f"steward cannot carry chat over {address.transport!r}",)
-        )
-    problems: list[str] = []
-    bot = None
-    if not token:
-        problems.append(f"no token — set {address.token_env} to the token issued for {address}")
-    elif address.transport == DISCORD:
-        bot = _transport_identity(transport, token)
-        if bot is None:
-            problems.append(f"{address.token_env} could not identify a Discord bot")
-    if not operators:
-        problems.append(
-            f"{OPERATORS_ENV} has no {address.transport!r} operators, so steward would "
-            "answer nobody"
-        )
-    complaint = chat_complaint(resident.manifest)
-    if complaint is not None:
-        problems.append(complaint)
-    return RouteCheck(bot=bot, problems=tuple(problems))
-
-
-def describe_chat(
-    residents: Sequence[Resident],
-    env: Mapping[str, str] | None = None,
-    *,
-    transports: Mapping[str, ChatTransport] | None = None,
-) -> list[ChatReport]:
-    """Report every declared chat route and what still stands between it and a message.
-
-    Deliberately wider than :func:`chat_routes`, exactly as
-    :meth:`steward.notify.Notifier.describe` is wider than ``transport_for``: a ``pending``
-    route is precisely the one an operator is in the middle of wiring up, and reporting
-    nothing for it would make this command useless at the one moment it is needed.
-    """
-    tokens = tokens_from_env(env)
-    source = os.environ if env is None else env
-    available = transports or {
-        TELEGRAM: TelegramTransport.from_env(source),
-        DISCORD: DiscordTransport.from_env(source),
-    }
-    reports: list[ChatReport] = []
-    conflicts = _shared_bot_problems(chat_routes(residents), tokens)
-    for resident, route in _declared_chat_routes(residents):
-        address = Address.parse(route.address)
-        if address is None:
-            reports.append(
-                ChatReport(
-                    resident=resident.id,
-                    route=route.id,
-                    address=route.address,
-                    status=route.status,
-                    token_env=None,
-                    token_set=False,
-                    reachable=False,
-                    note=(
-                        "address is not <transport>:<reference> — steward cannot tell which "
-                        "bot this names"
-                    ),
-                )
-            )
-            continue
-        token_set = address.token_env in tokens
-        transport = available.get(address.transport)
-        # A silent route is not checked any further: nothing polls a `pending` doorway, so
-        # naming what its token would need to be is answering a question nobody asked.
-        # Otherwise this listing and the daemon shut a route on exactly the same facts —
-        # one :func:`check_route`, two readers. Room posting is deliberately not one of
-        # those facts: an unknown channel name breaks ``posts_to``/``listens_in`` and
-        # nothing else, so it is reported (`room`) without closing the door.
-        check = (
-            RouteCheck(
-                bot=None,
-                problems=(route.note or f"declared and silent: status is {route.status!r}",),
-            )
-            if transport is not None and not route.accepts_chat
-            else check_route(
-                resident,
-                address,
-                token=tokens.get(address.token_env),
-                transport=transport,
-                operators=operators_from_env(source, transport=address.transport),
-            )
-        )
-        rooms = [*route.posts_to, *route.listens_in]
-        problems = [*check.problems, *conflicts.get(f"{resident.id}/{route.id}", ())]
-        room = (
-            _room_complaint(transport, tokens[address.token_env], rooms, source)
-            if transport is not None and check.bot is not None and rooms
-            else None
-        )
-        reports.append(
-            ChatReport(
-                resident=resident.id,
-                route=route.id,
-                address=str(address),
-                status=route.status,
-                token_env=address.token_env,
-                token_set=token_set,
-                reachable=not problems,
-                note=problems[0] if problems else (room or route.note),
-                bot=check.bot,
-                shared=route.shared,
-            )
-        )
-    return reports
-
-
-def _transport_identity(transport: ChatTransport, token: str) -> str | None:
-    """Use an adapter's optional diagnostic capability without widening the wire seam."""
-    identity = getattr(transport, "identity", None)
-    if not callable(identity):
-        return None
-    try:
-        value = identity(token)
-    except Exception as exc:  # noqa: BLE001 — a diagnostic must not take down the CLI
-        log.warning("%s identity check failed: %s", transport.name, exc)
-        return None
-    return value if isinstance(value, str) and value else None
-
-
-def _room_complaint(
-    transport: ChatTransport,
-    token: str,
-    channel_names: Sequence[str],
-    env: Mapping[str, str],
-) -> str | None:
-    """Return what is wrong with this route's Discord rooms, or ``None``.
-
-    Reported but never a closure (warren#456): an unknown name in ``posts_to`` or
-    ``listens_in`` breaks that channel and leaves the conversation itself working, so it is
-    a note beside a reachable route rather than one of :func:`check_route`'s problems.
-    """
-    guild = (env.get("STEWARD_CHAT_DISCORD_GUILD") or "").strip()
-    if not guild:
-        return "room posting is configured but STEWARD_CHAT_DISCORD_GUILD is not set"
-    channels = _transport_channels(transport, token, guild)
-    if channels is None:
-        return "the configured Discord guild's channels could not be resolved"
-    unknown = [name for name in channel_names if name not in channels]
-    if unknown:
-        return "unknown Discord channel name(s): " + ", ".join(unknown)
-    return None
-
-
-def _transport_channels(
-    transport: ChatTransport, token: str, guild: str
-) -> Mapping[str, str] | None:
-    """Use Discord's optional room lookup without widening the two-method chat seam."""
-    channels = getattr(transport, "channels", None)
-    if not callable(channels) or not guild:
-        return None
-    try:
-        value = channels(token, guild)
-    except Exception as exc:  # noqa: BLE001 — a diagnostic must not take down the CLI
-        log.warning("%s channel lookup failed: %s", transport.name, exc)
-        return None
-    return value if isinstance(value, Mapping) else None
-
 
 def _post_outcome_line(outcome: object) -> str:
     """Render an optional shared-harvest outcome through its deliberately tiny seam."""
@@ -785,794 +289,6 @@ def _post_outcome_line(outcome: object) -> str:
         return ""
     value = render()
     return value if isinstance(value, str) else ""
-
-
-# --------------------------------------------------------------------------------------
-# the rolling transcript
-# --------------------------------------------------------------------------------------
-
-
-def chat_complaint(manifest: ResidentManifest) -> str | None:
-    """Return why this resident cannot keep a transcript, or ``None`` when it can.
-
-    Pure, like :func:`steward.journal.journal_complaint`: it reads the declaration and never
-    the filesystem, so the bridge can refuse at startup on a machine that has never seen the
-    resident's volume rather than discovering it mid-conversation.
-    """
-    memory = manifest.memory
-    if memory.kind == "file":
-        return (
-            "memory.kind is 'file', so there is nowhere to keep a conversation; a chat "
-            "route needs memory.kind 'directory' or 'repo'"
-        )
-    if "://" in memory.path:
-        return (
-            f"memory.path {memory.path!r} is a remote reference; a transcript is read and "
-            f"written as an ordinary file, so it needs a local directory"
-        )
-    return None
-
-
-def resolve_chat_dir(manifest: ResidentManifest) -> Path:
-    """Return the directory this resident's conversations live in.
-
-    ``<memory>/chat``, on the *host* side of the mount for a container-placed resident —
-    the same base :func:`steward.journal.resolve_journal_dir` resolves against, so a
-    resident's memory has one location and steward writes to the side it can actually see
-    (steward #58). The session inside the container reads the same files at
-    ``<memory.path>/chat`` through the bind mount.
-    """
-    complaint = chat_complaint(manifest)
-    if complaint is not None:
-        raise ChatError(f"{manifest.id}: {complaint}")
-    return memory_host_dir(manifest) / CHAT_DIR
-
-
-def conversation_slug(conversation: str) -> str:
-    """Return a file name for one conversation, from an id steward did not choose.
-
-    Everything that is not a letter, a digit, ``_`` or ``-`` is folded away, so nothing a
-    transport hands over can climb out of the chat directory or name a file the filesystem
-    refuses. A Telegram chat id is an integer and survives this unchanged, negative sign
-    included.
-    """
-    slug = _UNSAFE_IN_NAME.sub("_", conversation.strip())[:SLUG_MAX_CHARS].strip("_")
-    return slug or "unknown"
-
-
-@dataclass(frozen=True, slots=True)
-class Turn:
-    """One thing that was said, by one side, at one moment."""
-
-    at: str
-    speaker: str
-    text: str
-
-    def render(self) -> str:
-        """Render this turn the way it appears in a prompt."""
-        return f"{self.speaker}: {self.text}"
-
-
-@dataclass(frozen=True, slots=True)
-class Transcript:
-    """One conversation, kept as a rolling file in the resident's own memory directory.
-
-    JSON lines rather than the markdown the journal uses, and the difference is who writes
-    them. A journal entry is a resident's own prose, written by the session, read by a
-    person; a transcript is *steward's* record of an exchange, written a turn at a time and
-    read back into a prompt, and a format that can hold any text without a parser having to
-    guess where one turn ends is worth more here than prettiness. It still reads fine in a
-    terminal, which is the property the issue actually asked for.
-
-    Bounded by construction, like the journal: every append rotates the file down to
-    :data:`TRANSCRIPT_KEEP_TURNS` turns, so nothing here grows without limit and no cron job
-    has to remember to trim it.
-    """
-
-    manifest: ResidentManifest
-    conversation: str
-    keep: int = TRANSCRIPT_KEEP_TURNS
-
-    @property
-    def path(self) -> Path:
-        """The file this conversation lives in."""
-        return resolve_chat_dir(self.manifest) / f"{conversation_slug(self.conversation)}.jsonl"
-
-    def turns(self) -> list[Turn]:
-        """Return every surviving turn, oldest first. An unreadable line is skipped.
-
-        Broad on purpose, the way :func:`steward.journal._parse_entry` is: this file is read
-        at the top of a session, and a byte somebody corrupted must degrade to "less context"
-        rather than to a resident that cannot be talked to at all.
-        """
-        try:
-            raw = self.path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return []
-        found: list[Turn] = []
-        for line in raw.splitlines():
-            if not line.strip():
-                continue
-            try:
-                value = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(value, dict):
-                continue
-            speaker = str(value.get("speaker") or "")
-            text = str(value.get("text") or "")
-            if not speaker or not text:
-                continue
-            found.append(Turn(at=str(value.get("at") or ""), speaker=speaker, text=text))
-        return found
-
-    def window(self, turns: int = TRANSCRIPT_WINDOW_TURNS) -> list[Turn]:
-        """Return the last few turns: what the next session is opened with."""
-        return self.turns()[-turns:] if turns > 0 else []
-
-    def render(self) -> str:
-        """Render the window as the text injected into a prompt, oldest first.
-
-        Bounded here as well as at injection, and from the *newest* end: a window cut from
-        the front by the prompt's cap would drop the turn the operator just referred to and
-        keep the one from an hour ago, which is the wrong half to lose.
-        """
-        rendered = [turn.render() for turn in self.window()]
-        text = "\n".join(rendered)
-        while len(text) > TRANSCRIPT_MAX_CHARS and rendered:
-            rendered.pop(0)
-            text = "\n".join(rendered)
-        return text
-
-    def append(self, speaker: str, text: str, *, now: datetime | None = None) -> None:
-        """Record one turn and rotate. Never raises: a lost line is not a failed answer."""
-        if not text.strip():
-            return
-        turn = Turn(at=ev.utc_now_iso(now), speaker=speaker, text=text.strip())
-        try:
-            existing = self.turns()
-            path = self.path
-            path.parent.mkdir(parents=True, exist_ok=True)
-            kept = [*existing, turn][-self.keep :] if self.keep > 0 else []
-            body = "".join(
-                json.dumps(
-                    {"at": item.at, "speaker": item.speaker, "text": item.text},
-                    ensure_ascii=False,
-                )
-                + "\n"
-                for item in kept
-            )
-            path.write_text(body, encoding="utf-8")
-        except OSError as exc:
-            log.warning(
-                "%s: could not record a chat turn in %s: %s",
-                self.manifest.id,
-                self.conversation,
-                exc,
-            )
-
-
-@dataclass(frozen=True, slots=True)
-class ConversationSummary:
-    """The list-view facts for one remembered conversation."""
-
-    id: str
-    last_turn_at: str
-    turn_count: int
-
-
-def conversation_summaries(manifest: ResidentManifest) -> list[ConversationSummary]:
-    """Return readable conversation windows, newest conversation first."""
-    directory = resolve_chat_dir(manifest)
-    summaries: list[ConversationSummary] = []
-    try:
-        paths = directory.glob("*.jsonl") if directory.is_dir() else ()
-        for path in paths:
-            turns = Transcript(manifest, path.stem).turns()
-            if turns:
-                summaries.append(
-                    ConversationSummary(
-                        id=path.stem,
-                        last_turn_at=turns[-1].at,
-                        turn_count=len(turns),
-                    )
-                )
-    except OSError:
-        return []
-    return sorted(
-        summaries,
-        key=lambda summary: (summary.last_turn_at, summary.id),
-        reverse=True,
-    )
-
-
-# --------------------------------------------------------------------------------------
-# the wire
-# --------------------------------------------------------------------------------------
-
-
-class ConversationAccess(StrEnum):
-    """Why a conversation is, or is not, allowed to cross the bridge."""
-
-    PRIVATE = "private"
-    PUBLIC = "public"
-    ALLOWLISTED_PUBLIC = "allowlisted_public"
-
-
-@dataclass(frozen=True, slots=True)
-class Message:
-    """One inbound message, in the only shape this module cares about."""
-
-    #: The transport's own cursor for this message. What the next poll acknowledges.
-    update_id: int
-    #: The conversation it belongs to: what a reply is addressed to, and what the
-    #: transcript is filed under.
-    conversation: str
-    #: Who sent it, as the transport names them. Checked against the operator list.
-    sender: str
-    text: str
-    at: datetime
-    #: Whether this is private, public, or public with manifest consent.
-    access: ConversationAccess = ConversationAccess.PRIVATE
-    #: Whether the transport says the sender is another bot. Bots never start residents.
-    bot: bool = False
-    #: Transport message id to attach a reply to, when the transport supports references.
-    reply_to: str | None = None
-
-    @property
-    def private(self) -> bool:
-        """Whether this is a one-to-one conversation."""
-        return self.access == ConversationAccess.PRIVATE
-
-    def age_s(self, now: datetime) -> float:
-        """How long ago this was sent, in seconds."""
-        return (now - self.at).total_seconds()
-
-
-class ChatTransport(Protocol):
-    """Anything that can carry a conversation. Telegram and Discord REST ship today.
-
-    Two methods and no state the bridge can see, so the whole of "how a message travels" is
-    behind one seam: a test injects a fake, and a second transport is a class rather than a
-    rewrite. Neither method raises — an unreachable API is a reported fact, not an exception
-    that takes a daemon down.
-    """
-
-    @property
-    def name(self) -> str:
-        """The transport a route's address names to select this."""
-        ...
-
-    def poll(self, token: str, offset: int) -> list[Message] | None:
-        """Return the messages waiting past ``offset``, or ``None`` if it is unreachable."""
-        ...
-
-    def send(self, token: str, conversation: str, text: str) -> bool:
-        """Deliver one reply. Returns whether it landed; never raises."""
-        ...
-
-
-@dataclass
-class TelegramTransport:
-    """Telegram's bot API: long-polled ``getUpdates`` in, ``sendMessage`` out.
-
-    Both are POSTs with JSON bodies rather than the query strings the API also accepts, for
-    one reason worth stating: the token is in the URL path either way, and putting the
-    *arguments* there as well would mean a message's text ends up in whatever logs a proxy or
-    a library keeps. Nothing here ever logs a URL, for the same reason — the path carries the
-    bot's credential, and a warning that leaked it would be worse than the failure it
-    reported.
-
-    No webhook, and that is a deployment property rather than a preference (warren#108): long
-    polling means the NAS opens outbound connections and nothing on the internet needs a way
-    in.
-    """
-
-    base_url: str = DEFAULT_API_URL
-    poll_timeout_s: float = DEFAULT_POLL_TIMEOUT_S
-    send_timeout_s: float = SEND_TIMEOUT_S
-
-    @property
-    def name(self) -> str:
-        """The address transport that selects this."""
-        return TELEGRAM
-
-    @classmethod
-    def from_env(cls, env: Mapping[str, str] | None = None) -> TelegramTransport:
-        """Build a transport from the environment. No manifest ever carries any of this."""
-        source = os.environ if env is None else env
-        return cls(
-            base_url=((source.get(API_URL_ENV) or "").strip() or DEFAULT_API_URL).rstrip("/"),
-            poll_timeout_s=poll_timeout_from_env(source),
-        )
-
-    def poll(self, token: str, offset: int) -> list[Message] | None:
-        """Long-poll one bot for what it has been sent since ``offset``.
-
-        ``allowed_updates`` asks for messages and nothing else: v0 is text in and text out,
-        and an edited message, a reaction or a button press arriving here would be a fact
-        steward has no honest answer to.
-        """
-        payload: dict[str, Any] = {
-            "timeout": int(self.poll_timeout_s),
-            "allowed_updates": ["message"],
-        }
-        if offset:
-            payload["offset"] = offset
-        result = self._call(
-            token,
-            "getUpdates",
-            payload,
-            timeout_s=self.poll_timeout_s + HTTP_TIMEOUT_MARGIN_S,
-        )
-        if result is None:
-            return None
-        if not isinstance(result, list):
-            log.warning("telegram answered getUpdates with something that is not a list")
-            return None
-        return [message for update in result if (message := _message_from(update)) is not None]
-
-    def send(self, token: str, conversation: str, text: str) -> bool:
-        """Send one reply into a conversation. Never raises, and never waits long."""
-        if not text.strip():
-            return False
-        sent = self._call(
-            token,
-            "sendMessage",
-            {"chat_id": conversation, "text": text},
-            timeout_s=self.send_timeout_s,
-        )
-        return sent is not None
-
-    def _call(
-        self, token: str, method: str, payload: Mapping[str, Any], *, timeout_s: float
-    ) -> Any | None:  # noqa: ANN401 — the API's own result shape differs per method
-        """Call one bot API method and return its ``result``, or ``None`` on any failure."""
-        url = f"{self.base_url}/bot{token}/{method}"
-        if not url.startswith(("http://", "https://")):
-            log.warning("the chat API target is not an http(s) URL; nothing can be delivered")
-            return None
-        request = urllib.request.Request(  # noqa: S310 — scheme checked just above
-            url,
-            data=json.dumps(dict(payload), ensure_ascii=False).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=timeout_s) as response:  # noqa: S310
-                body = json.loads(response.read().decode("utf-8"))
-        except (OSError, urllib.error.URLError, ValueError) as exc:
-            # Never the URL: it carries the bot's token. The method name and the error class
-            # are what a person debugging this actually needs.
-            log.warning("telegram %s failed — %s: %s", method, type(exc).__name__, exc)
-            return None
-        if not isinstance(body, dict) or not body.get("ok"):
-            log.warning(
-                "telegram refused %s: %s",
-                method,
-                redact_secrets(str(body.get("description", "no reason given")))
-                if isinstance(body, dict)
-                else "unreadable answer",
-            )
-            return None
-        return body.get("result")
-
-
-def _message_from(update: object) -> Message | None:
-    """Read one Telegram update into a :class:`Message`, or ignore it.
-
-    Ignored rather than refused: an update steward cannot read is one it has no answer for,
-    and the poll's job is to hand over the messages it understood, not to fail on the ones it
-    did not. A non-text message — a photo, a sticker, a voice note — is one of those.
-    """
-    if not isinstance(update, Mapping):
-        return None
-    update_id = update.get("update_id")
-    message = update.get("message")
-    if not isinstance(update_id, int) or not isinstance(message, Mapping):
-        return None
-    chat = message.get("chat")
-    sender = message.get("from")
-    text = message.get("text")
-    date = message.get("date")
-    if not isinstance(chat, Mapping) or not isinstance(sender, Mapping):
-        return None
-    if not isinstance(text, str) or not text.strip():
-        return None
-    conversation = chat.get("id")
-    sender_id = sender.get("id")
-    if conversation is None or sender_id is None:
-        return None
-    try:
-        at = datetime.fromtimestamp(float(date), tz=UTC) if date is not None else datetime.now(UTC)
-    except TypeError, ValueError, OSError, OverflowError:
-        at = datetime.now(UTC)
-    return Message(
-        update_id=update_id,
-        conversation=str(conversation),
-        sender=str(sender_id),
-        text=text,
-        at=at,
-        access=(
-            ConversationAccess.PRIVATE
-            if chat.get("type") == "private"
-            else ConversationAccess.PUBLIC
-        ),
-    )
-
-
-@dataclass
-class _DiscordState:
-    """Per-bot DM discovery and cursors, keyed without retaining its credential."""
-
-    channels: dict[str, str] = field(default_factory=dict)
-    listened_channels: set[str] = field(default_factory=set)
-    channel_names: dict[str, str] = field(default_factory=dict)
-    cursors: dict[str, int] = field(default_factory=dict)
-    bot_id: str = ""
-    started: bool = False
-
-
-@dataclass
-class DiscordTransport:
-    """Discord bot DMs and allowlisted channel mentions, polled over REST."""
-
-    base_url: str = DEFAULT_DISCORD_API_URL
-    operators: frozenset[str] = frozenset()
-    guild: str = ""
-    timeout_s: float = SEND_TIMEOUT_S
-    sleep: Callable[[float], None] = time.sleep
-    _states: dict[str, _DiscordState] = field(default_factory=dict, init=False, repr=False)
-
-    @property
-    def name(self) -> str:
-        """The address transport that selects Discord REST."""
-        return DISCORD
-
-    @classmethod
-    def from_env(cls, env: Mapping[str, str] | None = None) -> DiscordTransport:
-        """Build the Discord adapter from process configuration."""
-        source = os.environ if env is None else env
-        return cls(
-            base_url=(
-                (source.get(DISCORD_API_URL_ENV) or "").strip() or DEFAULT_DISCORD_API_URL
-            ).rstrip("/"),
-            operators=operators_from_env(source, transport=DISCORD),
-            guild=(source.get("STEWARD_CHAT_DISCORD_GUILD") or "").strip(),
-        )
-
-    def listen(self, token: str, names: Sequence[str]) -> bool:
-        """Replace this bot's listening set; failed discovery revokes the old set."""
-        state = self._state(token)
-        previous = state.listened_channels
-        state.listened_channels = set()
-        state.channel_names = {}
-        if not names:
-            return True
-        if not self.guild:
-            return False
-        identity = self._request(token, "GET", "/users/@me")
-        bot_id = identity.get("id") if isinstance(identity, Mapping) else None
-        channels = self.channels(token, self.guild)
-        if not isinstance(bot_id, str) or not bot_id or channels is None:
-            return False
-        resolved = [channels.get(name) for name in names]
-        if any(channel is None for channel in resolved):
-            return False
-        state.bot_id = bot_id
-        state.channel_names = {name: channels[name] for name in names}
-        desired = set(state.channel_names.values())
-        for channel in desired - previous:
-            if state.started and not self._seed_channel_cursor(token, channel):
-                state.channel_names = {}
-                return False
-        state.listened_channels = desired
-        return True
-
-    def listening_channels(self, token: str, names: Sequence[str]) -> frozenset[str]:
-        """Return currently registered channel ids belonging to these declared names."""
-        state = self._state(token)
-        return frozenset(state.channel_names[name] for name in names if name in state.channel_names)
-
-    def identity(self, token: str) -> str | None:
-        """Authenticate the token and return its visible bot username."""
-        value = self._request(token, "GET", "/users/@me")
-        if not isinstance(value, Mapping):
-            return None
-        username = value.get("username")
-        return f"@{username}" if isinstance(username, str) and username else None
-
-    def channels(self, token: str, guild: str) -> Mapping[str, str] | None:
-        """Resolve one guild's text channel names to ids without exposing ids in manifests."""
-        value = self._request(token, "GET", f"/guilds/{guild}/channels")
-        if not isinstance(value, list):
-            return None
-        pairs = [
-            (str(item["name"]), str(item["id"]))
-            for item in value
-            if isinstance(item, Mapping)
-            and isinstance(item.get("name"), str)
-            and str(item.get("id", "")).isdigit()
-            and item.get("type") == 0
-        ]
-        if len({name for name, _channel_id in pairs}) != len(pairs):
-            return None
-        return dict(pairs)
-
-    def admin(
-        self,
-        token: str,
-        method: str,
-        path: str,
-        payload: Mapping[str, object] | None = None,
-    ) -> bool:
-        """Perform one scoped Discord write assembled by the policy-owning Poster."""
-        return self._request(token, method, path, payload) is not None
-
-    def guild_snapshot(self, token: str, guild: str) -> Mapping[str, object] | None:
-        """Read the guild context used by scoped resident mirror files."""
-        channels = self._request(token, "GET", f"/guilds/{guild}/channels")
-        if not isinstance(channels, list):
-            return None
-        members: list[object] = []
-        after = ""
-        for _page in range(DISCORD_MEMBER_MAX_PAGES):
-            suffix = f"&after={after}" if after else ""
-            page = self._request(
-                token,
-                "GET",
-                f"/guilds/{guild}/members?limit={DISCORD_MEMBER_PAGE_SIZE}{suffix}",
-            )
-            if not isinstance(page, list):
-                return None
-            members.extend(page)
-            if len(page) < DISCORD_MEMBER_PAGE_SIZE:
-                break
-            last = page[-1]
-            user = last.get("user") if isinstance(last, Mapping) else None
-            snowflake = user.get("id") if isinstance(user, Mapping) else None
-            if not isinstance(snowflake, str) or not snowflake.isdigit() or snowflake == after:
-                return None
-            after = snowflake
-        else:
-            return None
-        return {"channels": channels, "members": members}
-
-    def threads(self, token: str, guild: str) -> frozenset[str] | None:
-        """Resolve active thread ids inside one configured guild."""
-        value = self._request(token, "GET", f"/guilds/{guild}/threads/active")
-        if not isinstance(value, Mapping) or not isinstance(value.get("threads"), list):
-            return None
-        return frozenset(
-            str(item["id"])
-            for item in value["threads"]
-            if isinstance(item, Mapping) and str(item.get("id", "")).isdigit()
-        )
-
-    def poll(self, token: str, offset: int) -> list[Message] | None:
-        """Open operator DMs once, then fetch each channel after its cursor."""
-        del offset  # Discord cursors are per DM channel, not per bot.
-        state = self._state(token)
-        if not state.started:
-            if not self._ensure_started(token):
-                return None
-            return []
-        found: list[Message] = []
-        cursors = state.cursors.copy()
-        dm_channels = set(state.channels.values())
-        for channel in (*state.channels.values(), *sorted(state.listened_channels)):
-            messages = self._messages_after(token, channel, cursors.get(channel, 0))
-            if messages is None:
-                return None
-            for raw in messages:
-                raw_id = (
-                    int(raw["id"])
-                    if isinstance(raw, Mapping) and str(raw.get("id", "")).isdigit()
-                    else 0
-                )
-                cursors[channel] = max(cursors.get(channel, 0), raw_id)
-                message = self._message(
-                    raw,
-                    channel,
-                    private=channel in dm_channels,
-                    bot_id=state.bot_id,
-                )
-                if message is not None:
-                    found.append(message)
-        # A failed later channel returns no messages: keep every cursor retryable until
-        # the complete batch can be handed to the bridge.
-        state.cursors = cursors
-        return found
-
-    def send(self, token: str, conversation: str, text: str) -> bool:
-        """Send a bounded sequence of Discord-sized message chunks."""
-        return self.send_reply(token, conversation, text, None)
-
-    def send_reply(self, token: str, conversation: str, text: str, reply_to: str | None) -> bool:
-        """Send Discord-sized chunks, optionally attached to one triggering message."""
-        if not text.strip():
-            return False
-        target = conversation
-        if conversation in self.operators:
-            if not self._ensure_started(token):
-                return False
-            target = self._state(token).channels.get(conversation, "")
-            if not target:
-                return False
-        chunks = [
-            text[start : start + DISCORD_REPLY_CHARS]
-            for start in range(0, len(text), DISCORD_REPLY_CHARS)
-        ]
-        for chunk in chunks:
-            payload: dict[str, object] = {"content": chunk}
-            if reply_to:
-                payload["message_reference"] = {
-                    "message_id": reply_to,
-                    "channel_id": target,
-                }
-            if self._request(token, "POST", f"/channels/{target}/messages", payload) is None:
-                return False
-        return True
-
-    def _open_channels(self, token: str) -> bool:
-        state = self._state(token)
-        for operator in sorted(self.operators):
-            value = self._request(token, "POST", "/users/@me/channels", {"recipient_id": operator})
-            if not isinstance(value, Mapping) or not isinstance(value.get("id"), str):
-                return False
-            channel = value["id"]
-            state.channels[operator] = channel
-            if not self._seed_channel_cursor(token, channel):
-                return False
-        for channel in sorted(state.listened_channels):
-            if not self._seed_channel_cursor(token, channel):
-                return False
-        return True
-
-    def _seed_channel_cursor(self, token: str, channel: str) -> bool:
-        """Start one channel after its newest message, never in its history."""
-        latest = self._request(token, "GET", f"/channels/{channel}/messages?limit=1")
-        if not isinstance(latest, list):
-            return False
-        ids = [
-            int(item["id"])
-            for item in latest
-            if isinstance(item, Mapping) and str(item.get("id", "")).isdigit()
-        ]
-        self._state(token).cursors[channel] = max(ids, default=0)
-        return True
-
-    def _ensure_started(self, token: str) -> bool:
-        state = self._state(token)
-        if state.started:
-            return True
-        if not self._open_channels(token):
-            return False
-        state.started = True
-        return True
-
-    def _state(self, token: str) -> _DiscordState:
-        key = hashlib.sha256(token.encode()).hexdigest()
-        return self._states.setdefault(key, _DiscordState())
-
-    def _messages_after(self, token: str, channel: str, cursor: int) -> list[object] | None:
-        """Drain every unseen page without advancing past messages Discord omitted."""
-        query = urllib.parse.urlencode({"after": str(cursor), "limit": str(DISCORD_PAGE_SIZE)})
-        value = self._request(token, "GET", f"/channels/{channel}/messages?{query}")
-        if not isinstance(value, list):
-            return None
-        found: list[object] = list(value)
-        page = value
-        while len(page) == DISCORD_PAGE_SIZE:
-            ids = [
-                int(item["id"])
-                for item in page
-                if isinstance(item, Mapping) and str(item.get("id", "")).isdigit()
-            ]
-            if not ids or min(ids) <= cursor:
-                break
-            query = urllib.parse.urlencode(
-                {"before": str(min(ids)), "limit": str(DISCORD_PAGE_SIZE)}
-            )
-            older = self._request(token, "GET", f"/channels/{channel}/messages?{query}")
-            if not isinstance(older, list):
-                return None
-            page = [
-                item
-                for item in older
-                if isinstance(item, Mapping)
-                and str(item.get("id", "")).isdigit()
-                and int(item["id"]) > cursor
-            ]
-            found.extend(page)
-        return found
-
-    @staticmethod
-    def _message(
-        raw: object, channel: str, *, private: bool = True, bot_id: str = ""
-    ) -> Message | None:
-        if not isinstance(raw, Mapping):
-            return None
-        author = raw.get("author")
-        content = raw.get("content")
-        snowflake = str(raw.get("id") or "")
-        if (
-            not isinstance(author, Mapping)
-            or not isinstance(content, str)
-            or not content.strip()
-            or not snowflake.isdigit()
-        ):
-            return None
-        sender = str(author.get("id") or "")
-        if not sender:
-            return None
-        if not private:
-            mentions = raw.get("mentions")
-            if not isinstance(mentions, list) or not any(
-                isinstance(mention, Mapping) and str(mention.get("id") or "") == bot_id
-                for mention in mentions
-            ):
-                return None
-        timestamp = raw.get("timestamp")
-        try:
-            at = datetime.fromisoformat(str(timestamp))
-        except ValueError:
-            at = datetime.now(UTC)
-        return Message(
-            update_id=int(snowflake),
-            conversation=channel,
-            sender=f"{DISCORD}:{sender}",
-            text=content,
-            at=at,
-            access=(
-                ConversationAccess.PRIVATE if private else ConversationAccess.ALLOWLISTED_PUBLIC
-            ),
-            bot=bool(author.get("bot")),
-            reply_to=snowflake,
-        )
-
-    def _request(
-        self, token: str, method: str, path: str, payload: Mapping[str, Any] | None = None
-    ) -> object | None:
-        url = f"{self.base_url}{path}"
-        if not url.startswith(("http://", "https://")):
-            return None
-        data = None if payload is None else json.dumps(dict(payload)).encode()
-        request = urllib.request.Request(  # noqa: S310 — scheme checked just above
-            url,
-            data=data,
-            headers={
-                "Authorization": f"Bot {token}",
-                "Content-Type": "application/json",
-                "User-Agent": DISCORD_USER_AGENT,
-            },
-            method=method,
-        )
-        for attempt in range(2):
-            try:
-                with urllib.request.urlopen(request, timeout=self.timeout_s) as response:  # noqa: S310
-                    body = response.read().decode()
-                    return json.loads(body) if body else {}
-            except urllib.error.HTTPError as exc:
-                if exc.code == HTTP_TOO_MANY_REQUESTS and attempt == 0:
-                    try:
-                        body = json.loads(exc.read().decode())
-                        delay = float(body.get("retry_after", 0))
-                    except ValueError, TypeError, AttributeError:
-                        return None
-                    if not math.isfinite(delay) or not 0 <= delay <= MAX_RATE_LIMIT_SLEEP_S:
-                        log.warning("discord rate limit delay is unsafe; deferring this route")
-                        return None
-                    self.sleep(delay)
-                    continue
-                log.warning(
-                    "discord %s %s failed — HTTP %s", method, path.split("?", 1)[0], exc.code
-                )
-                return None
-            except (OSError, urllib.error.URLError, ValueError) as exc:
-                log.warning("discord %s failed — %s: %s", method, type(exc).__name__, exc)
-                return None
-        return None
 
 
 # --------------------------------------------------------------------------------------
