@@ -14,7 +14,7 @@ IMAGE_VERSION ?= $(shell sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | he
 #: cross-arch by default. buildx --load puts the result in the local docker images list;
 #: `make image-ship` is what actually gets it onto the NAS.
 PLATFORM ?= linux/amd64
-NAS ?= Miha@dxp2800
+NAS ?= Miha@nas
 
 #: The claude CLI is pinned, not floating: an image whose brain changes under it on a
 #: rebuild is an image nobody can say anything true about. Bump this deliberately — and in

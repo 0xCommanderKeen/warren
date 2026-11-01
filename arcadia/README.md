@@ -45,7 +45,7 @@ pnpm dev
 The running app loads live Chronicle state; compatibility fixtures are never bundled as village activity. To preview another Chronicle instance:
 
 ```sh
-CHRONICLE_URL=http://dxp2800:8738 STEWARD_URL=http://dxp2800:8802 pnpm dev --host 127.0.0.1
+CHRONICLE_URL=http://nas:8738 STEWARD_URL=http://nas:8802 pnpm dev --host 127.0.0.1
 ```
 
 ## Village interface

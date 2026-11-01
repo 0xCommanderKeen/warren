@@ -42,9 +42,9 @@
 # townhall), and, for steward, a docker that can build linux/amd64.
 set -eu
 
-NAS="${NAS:-Miha@dxp2800}"
-ORIGIN="${ORIGIN:-http://dxp2800:8737}"          # arcadia's nginx: the one public origin
-STEWARD_URL="${STEWARD_URL:-http://dxp2800:8802}"
+NAS="${NAS:-Miha@nas}"
+ORIGIN="${ORIGIN:-http://nas:8737}"          # arcadia's nginx: the one public origin
+STEWARD_URL="${STEWARD_URL:-http://nas:8802}"
 # The burrow's residents checkout (warren#351): a sparse clone of this repository on a
 # branch of its own, which the control plane commits into and pushes. Made once here and
 # never reset here. The branch is the one steward/deploy/compose.yaml sets as

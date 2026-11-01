@@ -64,8 +64,10 @@ CI is path-filtered per service: `.github/workflows/{steward,chronicle,townhall,
 
 ## Deployment
 
-Everything runs on one burrow — the NAS, `dxp2800` over Tailscale, `192.168.1.222` on the
-LAN — and nothing there pulls. **The NAS has no git installed and holds no clone of this
+Everything runs on one burrow — the NAS, `nas` over Tailscale, `192.168.1.222` on the
+LAN — and nothing there pulls. The burrow itself is still *named* `dxp2800`, the
+NAS's tailnet name until 2026-11-01: `STEWARD_BURROW` and every manifest's `deploy.host`
+say `dxp2800`, and steward matches that label as text, never through DNS. **The NAS has no git installed and holds no clone of this
 repo.** Its three deploy directories are unpacked artifacts, so every deploy is *pushed*
 from a machine that has warren checked out, as a tar over ssh (UGOS's `scp` is broken).
 There is no registry either: images travel as `docker save | ssh … docker load`.
@@ -81,7 +83,7 @@ One nginx (arcadia's) owns the origin: it serves the village at `/`, townhall at
 chronicle, and hands steward every one of its own top-level routes. Both services answer
 `GET /residents`, so the bare path is steward's and chronicle's report is the prefixed
 one (warren#242). So a townhall release is published into *arcadia's* deploy
-directory, and `CHRONICLE_URL=http://dxp2800:8737`
+directory, and `CHRONICLE_URL=http://nas:8737`
 is correct even though chronicle listens on 8738 — the origin proxies `/events` through.
 
 **Steward's daemons run on the burrow whose containers they supervise** — today, the NAS.

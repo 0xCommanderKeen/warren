@@ -6,7 +6,7 @@
 # deployed by hand, before the script existed — which is itself the answer.
 set -eu
 
-NAS="${NAS:-Miha@dxp2800}"
+NAS="${NAS:-Miha@nas}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 main="$(git -C "$ROOT" rev-parse origin/main 2>/dev/null || git -C "$ROOT" rev-parse HEAD)"

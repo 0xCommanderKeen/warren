@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>dxp2800 · signpost</title>
+<title>nas · signpost</title>
 <meta name="description" content="Every door on the NAS, one page: the warren's UIs, the library, the media stack, the machine itself.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -222,12 +222,12 @@
 <body>
 <main>
   <header>
-    <p class="eyebrow">dxp2800 · signpost</p>
+    <p class="eyebrow">nas · signpost</p>
     <h1>Every door<br>on the NAS.</h1>
     <p class="lede">The warren's UIs, the library, the media stack and the machine itself — one page, so nothing needs remembering but this one.</p>
     <div class="host" id="host">
       <span>reach it as</span>
-      <button type="button" data-host="dxp2800">dxp2800</button>
+      <button type="button" data-host="nas">nas</button>
       <button type="button" data-host="192.168.1.222">192.168.1.222</button>
       <span id="host-note"></span>
     </div>
@@ -281,7 +281,7 @@
     media: [
       ["Homarr",             "media dashboard",                                   7575, "/",                     "http"],
       ["Jellyfin",           "media server",                                      8899, "/",                     "http"],
-      ["Jellyseerr",         "request portal",                                    5055, "/",                     "http"],
+      ["Seerr",              "request portal",                                    5055, "/",                     "http"],
       ["Sonarr",             "TV",                                                8989, "/",                     "http"],
       ["Radarr",             "movies",                                            7878, "/",                     "http"],
       ["Prowlarr",           "indexers",                                          9696, "/",                     "http"],
@@ -292,11 +292,14 @@
       ["UGOS",               "the NAS's own admin desktop",                       9999, "/",                     "http"],
     ],
   };
-  const HOSTS = ["dxp2800", "192.168.1.222"];
+  const HOSTS = ["nas", "192.168.1.222"];
   const hostBar = document.getElementById("host");
   const hostNote = document.getElementById("host-note");
   let host = HOSTS.includes(location.hostname) ? location.hostname : HOSTS[0];
-  try { host = localStorage.getItem("signpost-host") || host; } catch (_) {}
+  try {
+    const saved = localStorage.getItem("signpost-host");
+    if (HOSTS.includes(saved)) host = saved;
+  } catch (_) {}
 
   const urlFor = (port, path) => `http://${host}:${port}${path}`;
 
