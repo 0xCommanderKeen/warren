@@ -572,7 +572,7 @@ for the shared rules, including what happens when the tree is not in a checkout 
                "files": ["docker-compose.yaml", ".env", "manifest.yaml", "soul.md"],
                "compose": "services:\n  note-keeper:\n…",
                "compose_changed": true, "env_keys": ["CHRONICLE_TOKEN", "CHRONICLE_URL"],
-               "commands": ["ssh Miha@dxp2800 docker compose … up -d"], "sent": true},
+               "commands": ["ssh Miha@nas docker compose … up -d"], "sent": true},
  "register": {"ok": true, "problems": [],
               "next_fires": [{"routine": "tidy-notes", "at": "2026-06-15T20:00:00+02:00"}]}}
 ```
@@ -742,8 +742,8 @@ credential made the request, exactly as every other write here is.
 {"request_id": "…", "message": "…",
  "resident": "hob", "manifest_path": "residents/hob/manifest.yaml",
  "marked": true, "stopped": true, "scrubbed": true,
- "commands": ["ssh Miha@dxp2800 docker compose … down --remove-orphans",
-              "ssh Miha@dxp2800 rm -f ~/docker/warren/residents/hob/.env …"],
+ "commands": ["ssh Miha@nas docker compose … down --remove-orphans",
+              "ssh Miha@nas rm -f ~/docker/warren/residents/hob/.env …"],
  "commit": "9f2c…", "dry_run": false, "note": "retired",
  "revision": "sha256:…",
  "push": {"pushed": true, "remote": "origin", "branch": "burrow/residents",

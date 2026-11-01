@@ -33,13 +33,13 @@ Run steps 1–3 from a warren checkout on a machine that can build; steps 4–5 
 
    ```sh
    # from warren/arcadia/ — the village, then its two config files
-   tar -cf - dist | ssh Miha@dxp2800 'tar -xf - -C ~/docker/warren/arcadia'
+   tar -cf - dist | ssh Miha@nas 'tar -xf - -C ~/docker/warren/arcadia'
    tar -cf - -C deploy compose.yaml nginx.conf \
-     | ssh Miha@dxp2800 'tar -xf - -C ~/docker/warren/arcadia'
+     | ssh Miha@nas 'tar -xf - -C ~/docker/warren/arcadia'
 
    # from warren/townhall/ — its dist becomes the *contents* of observatory-dist
    tar -cf - -C dist . \
-     | ssh Miha@dxp2800 'tar -xf - -C ~/docker/warren/arcadia/observatory-dist'
+     | ssh Miha@nas 'tar -xf - -C ~/docker/warren/arcadia/observatory-dist'
    ```
 
    The `-C` flags are what put the files where the compose file expects them: the config
@@ -49,11 +49,11 @@ Run steps 1–3 from a warren checkout on a machine that can build; steps 4–5 
    `compose.yaml` and `nginx.conf` live at the *root* of `~/docker/warren/arcadia/` on the NAS,
    not under a `deploy/` subdirectory — that is what the compose file's
    `./nginx.conf:/etc/nginx/nginx.conf:ro` mount resolves to.
-4. `ssh Miha@dxp2800 'cd ~/docker/warren/arcadia && docker compose up -d'`. Static assets are
+4. `ssh Miha@nas 'cd ~/docker/warren/arcadia && docker compose up -d'`. Static assets are
    bind-mounted read-only, so a build-only change needs no restart — the container serves
    the new files as soon as they land. Changing `nginx.conf` does need
    `docker compose restart arcadia` (or `up -d` after a compose change).
-5. Run `sh deploy/smoke.sh http://dxp2800:8737` from `warren/arcadia/`. In a browser, enter
+5. Run `sh deploy/smoke.sh http://nas:8737` from `warren/arcadia/`. In a browser, enter
    the Steward token in the approval-knock prompt and exercise an existing pending approval
    if one exists.
 
@@ -108,7 +108,7 @@ the cutover today leaves an API with nothing in front of it. Arcadia is the vill
 ## Cutover record
 
 The first cutover completed on 2026-08-27. Arcadia and Observatory were installed under
-one nginx origin on `dxp2800:8737`; Chronicle moved to host port 8738 and was upgraded from
+one nginx origin on `nas:8737`; Chronicle moved to host port 8738 and was upgraded from
 the stale pre-contract server to the stable `main` deployment bundle and documented
 Python 3.14/uv runtime. The automated smoke check verified root delivery, deep-link
 fallback, a live schema-version-1 snapshot, an 18-second unbuffered SSE connection with

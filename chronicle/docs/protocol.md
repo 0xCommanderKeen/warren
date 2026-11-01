@@ -1351,15 +1351,15 @@ fail-open adapter, which determines the event from the callback body.
 ```json
 {
   "hooks": {
-    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}],
-    "PreToolUse": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}],
-    "PostToolUse": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}],
-    "PostToolUseFailure": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}],
-    "Notification": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}],
-    "Stop": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}],
-    "SubagentStart": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}],
-    "SubagentStop": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}],
-    "SessionEnd": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}]
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://nas:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}],
+    "PreToolUse": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://nas:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}],
+    "PostToolUse": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://nas:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}],
+    "PostToolUseFailure": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://nas:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}],
+    "Notification": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://nas:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://nas:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}],
+    "SubagentStart": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://nas:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}],
+    "SubagentStop": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://nas:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}],
+    "SessionEnd": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://nas:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}]
   }
 }
 ```
@@ -1376,14 +1376,14 @@ inline hooks in `config.toml`), not both.
 {
   "description": "Send truthful Codex lifecycle events to Chronicle.",
   "hooks": {
-    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME CHRONICLE_MIRROR= \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\" --runner codex", "timeout": 3}]}],
-    "PreToolUse": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME CHRONICLE_MIRROR= \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\" --runner codex", "timeout": 3}]}],
-    "PermissionRequest": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME CHRONICLE_MIRROR= \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\" --runner codex", "timeout": 3}]}],
-    "PostToolUse": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME CHRONICLE_MIRROR= \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\" --runner codex", "timeout": 3}]}],
-    "SubagentStart": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME CHRONICLE_MIRROR= \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\" --runner codex", "timeout": 3}]}],
-    "SubagentStop": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME CHRONICLE_MIRROR= \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\" --runner codex", "timeout": 3}]}],
-    "Stop": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME CHRONICLE_MIRROR= \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\" --runner codex", "timeout": 3}]}],
-    "SessionEnd": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME CHRONICLE_MIRROR= \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\" --runner codex", "timeout": 3}]}]
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://nas:8737 CHRONICLE_TOKEN=REPLACE_ME CHRONICLE_MIRROR= \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\" --runner codex", "timeout": 3}]}],
+    "PreToolUse": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://nas:8737 CHRONICLE_TOKEN=REPLACE_ME CHRONICLE_MIRROR= \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\" --runner codex", "timeout": 3}]}],
+    "PermissionRequest": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://nas:8737 CHRONICLE_TOKEN=REPLACE_ME CHRONICLE_MIRROR= \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\" --runner codex", "timeout": 3}]}],
+    "PostToolUse": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://nas:8737 CHRONICLE_TOKEN=REPLACE_ME CHRONICLE_MIRROR= \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\" --runner codex", "timeout": 3}]}],
+    "SubagentStart": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://nas:8737 CHRONICLE_TOKEN=REPLACE_ME CHRONICLE_MIRROR= \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\" --runner codex", "timeout": 3}]}],
+    "SubagentStop": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://nas:8737 CHRONICLE_TOKEN=REPLACE_ME CHRONICLE_MIRROR= \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\" --runner codex", "timeout": 3}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://nas:8737 CHRONICLE_TOKEN=REPLACE_ME CHRONICLE_MIRROR= \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\" --runner codex", "timeout": 3}]}],
+    "SessionEnd": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://nas:8737 CHRONICLE_TOKEN=REPLACE_ME CHRONICLE_MIRROR= \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\" --runner codex", "timeout": 3}]}]
   }
 }
 ```

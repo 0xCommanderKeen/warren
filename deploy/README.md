@@ -1,6 +1,6 @@
 # Deploying the warren
 
-Everything runs on one burrow — the NAS, `dxp2800` — and nothing there pulls. There is
+Everything runs on one burrow — the NAS, `nas` on the tailnet — and nothing there pulls. There is
 no git on it and no registry: every deploy is *pushed* from a machine that has this repo
 checked out. That machine is a laptop, or a GitHub Actions runner on every merge to
 `main`. Both run the same script.
@@ -158,7 +158,7 @@ What that makes true:
   it fetches, pushes anything the burrow holds that the branch does not, and **refuses
   to continue if the checkout is dirty** — a write that landed on disk without its
   commit is somebody's edit, and the script will not reset it. All of that runs before
-  anything is stopped. Look with `ssh Miha@dxp2800 docker exec steward-api git -C
+  anything is stopped. Look with `ssh Miha@nas docker exec steward-api git -C
   /checkout status`; `deploy/status.sh` prints the branch, head, unpushed and dirty
   counts on every run.
 
@@ -173,8 +173,8 @@ The checkout needs a key that can read and push this (private) repository. Gener
 key with write access. From the laptop:
 
 ```sh
-ssh Miha@dxp2800 'ssh-keygen -t ed25519 -N "" -C "warren residents checkout (dxp2800)" -f ~/docker/warren/steward/residents-key && chmod 600 ~/docker/warren/steward/residents-key'
-ssh Miha@dxp2800 'cat ~/docker/warren/steward/residents-key.pub' \
+ssh Miha@nas 'ssh-keygen -t ed25519 -N "" -C "warren residents checkout (dxp2800)" -f ~/docker/warren/steward/residents-key && chmod 600 ~/docker/warren/steward/residents-key'
+ssh Miha@nas 'cat ~/docker/warren/steward/residents-key.pub' \
     | gh repo deploy-key add - -R 0xCommanderKeen/warren --allow-write --title 'dxp2800 residents checkout'
 ```
 
@@ -298,7 +298,7 @@ places.
    the burrow's steward `.env`:
 
    ```sh
-   api=http://dxp2800:8802; auth="Authorization: Bearer $STEWARD_TOKEN"
+   api=http://nas:8802; auth="Authorization: Bearer $STEWARD_TOKEN"
    for id in pip hob; do
      curl -fsS -H "$auth" "$api/residents/$id/declaration" \
        | python3 -c 'import json, sys
@@ -319,7 +319,7 @@ places.
    them the same way, or `down` finds nothing:
 
    ```sh
-   ssh Miha@dxp2800 'set -e
+   ssh Miha@nas 'set -e
      for d in ~/docker/steward-*; do docker compose -f "$d/docker-compose.yaml" --project-directory "$d" -p "${d##*/steward-}" down; done
      cd ~/docker/steward && docker compose down --remove-orphans
      cd ~/docker/arcadia && docker compose down
@@ -332,7 +332,7 @@ places.
    `burrow` project's container orphaned under the old name.
 
    ```sh
-   ssh Miha@dxp2800 'set -e
+   ssh Miha@nas 'set -e
      mkdir -p ~/docker/warren/residents
      mv ~/docker/burrow ~/docker/warren/chronicle
      mv ~/docker/arcadia ~/docker/warren/arcadia
@@ -347,7 +347,7 @@ places.
    once it finds `residents/<id>/memory` there.
 
    ```sh
-   ssh Miha@dxp2800 'set -e
+   ssh Miha@nas 'set -e
      cd ~/docker/warren/chronicle && docker compose up -d
      cd ~/docker/warren/arcadia && docker compose up -d
      for d in ~/docker/warren/residents/*; do docker compose -f "$d/docker-compose.yaml" --project-directory "$d" -p "${d##*/}" up -d; done

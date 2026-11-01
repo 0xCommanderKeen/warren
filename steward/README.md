@@ -391,7 +391,7 @@ across the village, the fleet-ops fuel gauges — live in chronicle's issues.
 
 ## Deployment
 
-Residents run as docker compose services on the NAS (`dxp2800`), over Tailscale, beside
+Residents run as docker compose services on the NAS (`nas`), over Tailscale, beside
 chronicle's own server at `~/docker/warren/chronicle`. **Steward puts them there.** This section
 replaces the manual ritual in chronicle's README for anything that is a resident; the
 event server itself is still deployed by hand, now from
@@ -505,7 +505,7 @@ The rule, the measurements, what is *not* measured, and the case for teaching su
 ssh later are in [docs/topology.md](docs/topology.md).
 
 ```console
-$ export CHRONICLE_URL=http://dxp2800:8737    # arcadia's origin, which proxies /events to
+$ export CHRONICLE_URL=http://nas:8737    # arcadia's origin, which proxies /events to
                                            # chronicle on 8738 — not a stale port
 $ export CHRONICLE_TOKEN=…                    # the village's shared ingest secret
 
@@ -550,7 +550,7 @@ that you want it anyway.
 
 **Provision.** The compose fragment is rendered from `steward/templates/`, the runtime
 bundle is packed into a tar **in memory**, and the whole thing is piped over
-`ssh Miha@dxp2800 tar -xf - -C ~/docker/warren/residents/<id>` — a pipe rather than `scp`, because
+`ssh Miha@nas tar -xf - -C ~/docker/warren/residents/<id>` — a pipe rather than `scp`, because
 UGOS's `scp` is broken and the pipe is what has actually worked all along. Then
 `docker compose up -d` over the same ssh. Every external command goes through
 `steward.runners.run_argv`, which is the only file in steward that starts a process.
@@ -587,10 +587,10 @@ everything else does — a pipe over ssh:
 
 ```console
 $ make image                                          # linux/amd64, for the NAS
-$ make image-ship                                     # docker save | ssh dxp2800 docker load
-$ ssh Miha@dxp2800 docker exec steward-<id> steward-smoke
+$ make image-ship                                     # docker save | ssh nas docker load
+$ ssh Miha@nas docker exec steward-<id> steward-smoke
 smoke: ok   claude 2.1.243 (Claude Code)
-smoke: ok   POST http://dxp2800:8737/events -> 204
+smoke: ok   POST http://nas:8737/events -> 204
 smoke: PASS this container can reach the village
 ```
 

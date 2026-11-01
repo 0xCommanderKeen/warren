@@ -167,8 +167,8 @@ above are the canonical install, validation, test, and deployment sequence.
 
 One village for the whole fleet, served from the NAS over Tailscale. Since the
 2026-08-27 cutover arcadia owns the origin on port 8737 and this service answers
-on **host port 8738** (<http://dxp2800:8738>), proxied same-origin under
-`http://dxp2800:8737/chronicle/`, which carries `/state`, `/state/stream` and
+on **host port 8738** (<http://nas:8738>), proxied same-origin under
+`http://nas:8737/chronicle/`, which carries `/state`, `/state/stream` and
 `/residents`. That prefix was `/burrow/` until warren#361 and nothing answers there
 now.
 The origin also answers `/state` and `/state/stream` unprefixed (they rewrite to the
@@ -196,7 +196,7 @@ deploy is pushed from a machine that has the repo checked out.
 > `~/docker/warren/chronicle` / `chronicle` with warren#358's move, which is a rename an
 > operator does once, with everything down.
 
-- **Server** — Docker Compose at `~/docker/warren/chronicle` on the NAS (`dxp2800`), which
+- **Server** — Docker Compose at `~/docker/warren/chronicle` on the NAS (`nas`), which
   maps host `8738` to the container's `8737`:
   `ghcr.io/astral-sh/uv:python3.14-bookworm-slim` installs the locked environment with
   `uv sync --frozen --no-dev` and runs `uv run --no-dev python serve.py 8737` — the `__main__` entry point, which reads
@@ -217,8 +217,8 @@ deploy is pushed from a machine that has the repo checked out.
   retention_projection.py retention-policy.json
   approval_protocol.py journal_observations.py notification_persistence.py protocol.py
   residents.py typed_json.py hooks villagers | ssh
-  Miha@dxp2800 'tar -xf - -C ~/docker/warren/chronicle/app'`, then
-  `ssh Miha@dxp2800 'cd ~/docker/warren/chronicle && docker compose restart chronicle'`. Manifests
+  Miha@nas 'tar -xf - -C ~/docker/warren/chronicle/app'`, then
+  `ssh Miha@nas 'cd ~/docker/warren/chronicle && docker compose restart chronicle'`. Manifests
   ship with the code, so `/villagers` on the NAS matches the repo after every
   deploy — no manual file copying. `tests/test_deployment_bundle.py` parses this
   exact command and boots the tree it packs, so the file list and the test move
@@ -242,7 +242,7 @@ deploy is pushed from a machine that has the repo checked out.
   `~/.claude/settings.json` hooks
   (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`,
   `SubagentStart`, `SubagentStop`, `SessionEnd`) with
-  `CHRONICLE_URL=http://dxp2800:8737` and `CHRONICLE_TOKEN=<same
+  `CHRONICLE_URL=http://nas:8737` and `CHRONICLE_TOKEN=<same
   secret>`. Off the tailnet it records the privacy-filtered event in the bounded
   durable primary outbox and `~/.chronicle/events.jsonl`; later hooks replay
   oldest-first after connectivity returns.

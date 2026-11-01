@@ -1320,7 +1320,7 @@ is worth noticing while you are reading the two numbers side by side.
 
 ```yaml
 deploy:
-  host: dxp2800                       # the NAS, over Tailscale
+  host: dxp2800                       # the NAS's burrow name (STEWARD_BURROW)
   user: Miha                          # the ssh user steward reaches it as
   path: ~/docker/warren/residents/hob   # the compose directory on that host
   container: steward-hob       # the docker container name
@@ -1471,15 +1471,15 @@ resident cannot work without:
 
 ```console
 $ make image                    # steward-resident:<version> and :latest, linux/amd64
-$ make image-ship               # docker save | ssh Miha@dxp2800 docker load
-$ ssh Miha@dxp2800 docker exec steward-<id> steward-smoke
+$ make image-ship               # docker save | ssh Miha@nas docker load
+$ ssh Miha@nas docker exec steward-<id> steward-smoke
 ```
 
 An image on the NAS can be asked what it was built from, which is the question that matters
 when a resident behaves unlike the repo says it should:
 
 ```console
-$ ssh Miha@dxp2800 docker image inspect steward-resident:latest \
+$ ssh Miha@nas docker image inspect steward-resident:latest \
     --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
 298fda13783f0ed0b68a35d815549a3b437df6c8
 ```

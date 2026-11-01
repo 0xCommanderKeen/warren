@@ -75,8 +75,8 @@ __all__ = [
 
 #: What this burrow is called, when the machine's own hostname is not the name manifests
 #: use for it. A ``deploy.host`` is matched against this before anything else the operator
-#: did not write down, because the NAS answers to ``dxp2800`` on the tailnet whatever
-#: ``hostname`` happens to return locally. Defined in ``deploy.py``, which also reads it to
+#: did not write down, because the NAS's burrow name (``dxp2800``, its tailnet name until
+#: 2026-11-01) is not what ``hostname`` happens to return locally. Defined in ``deploy.py``, which also reads it to
 #: decide that a resident of this burrow is provisioned here rather than over ssh.
 
 #: Docker's own pointer. Steward never sets it and never reads it to *decide* anything —
